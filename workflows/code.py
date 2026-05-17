@@ -5838,15 +5838,26 @@ def _check_deleted_imports(
                     uniq.append(f)
             candidate_files = uniq[:15]
 
+            # Capture import bodies across BOTH single-line and parenthesized
+            # multi-line forms. Multi-line: `from .table import (Name1,\n
+            # Name2, Name3)` — the captured group must span newlines until
+            # the closing paren. Single-line: `from .table import Name1, Name2`
+            # — captured group runs to end-of-line.
+            # Observed failure on astropy-13236: parenthesized multi-line
+            # imports were captured only up to the first newline, missing
+            # names on continuation lines. Guard returned 0 findings →
+            # bad deletion shipped → 644 tests regressed.
             real_consumers: list[str] = []
             patterns = [
                 re.compile(
-                    rf"from\s+{re.escape(module_path)}\s+import\s+([^\n;]+)"
+                    rf"from\s+{re.escape(module_path)}\s+import\s+(\([^)]*\)|[^\n;]+)",
+                    re.DOTALL,
                 ),
             ]
             if basename:
                 patterns.append(re.compile(
-                    rf"from\s+\.+{re.escape(basename)}\s+import\s+([^\n;]+)"
+                    rf"from\s+\.+{re.escape(basename)}\s+import\s+(\([^)]*\)|[^\n;]+)",
+                    re.DOTALL,
                 ))
 
             for cf in candidate_files:
@@ -5907,11 +5918,17 @@ def _check_deleted_imports(
                 uniq.append(f)
         candidate_files = uniq[:30]
 
+        # Capture both single-line and parenthesized multi-line imports
+        # — see comment on the imports-mode patterns above.
         import_pat_abs = re.compile(
-            rf"from\s+{re.escape(module_path)}\s+import\s+([^\n;]+)"
+            rf"from\s+{re.escape(module_path)}\s+import\s+(\([^)]*\)|[^\n;]+)",
+            re.DOTALL,
         )
         import_pat_rel = (
-            re.compile(rf"from\s+\.+{re.escape(basename)}\s+import\s+([^\n;]+)")
+            re.compile(
+                rf"from\s+\.+{re.escape(basename)}\s+import\s+(\([^)]*\)|[^\n;]+)",
+                re.DOTALL,
+            )
             if basename else None
         )
         usage_pat = re.compile(rf"\b{re.escape(name)}\b")
@@ -6831,30 +6848,40 @@ def _restore_replace_whitespace(text: str) -> str:
     Legacy: visible markers (· or ⁃ for space, T or → for tab) are also
     converted back, in case the model copied directly from an old view.
     """
-    # PRE-PASS: split mid-line i{N}| segments. The pattern is " i\d+|" with
-    # at least one whitespace before the `i` (so we don't split on tokens
-    # like `i0|` at the very start). This recovers when the model packs
-    # multiple intended lines onto one physical line.
-    # Be conservative: only split if the line ALREADY starts with i{N}| —
-    # that's our signal the model meant to use the format, and any further
-    # i{N}| on the same line is almost certainly a missed newline.
-    split_re = re.compile(r'\s+(i\d+\|)')
+    # PRE-PASS: split mid-line i{N}| segments. Whenever a physical line
+    # already starts with `i{N}|`, ANY further occurrence of `i\d+|` later
+    # in that same line is a missed newline (the model packed multiple
+    # intended lines into one). Split each into its own physical line.
+    #
+    # Previous version required `\s+` before the mid-line `i\d+|` — that
+    # missed cases like `"required "i33|"continuation"` where the model
+    # placed the prefix directly after a closing quote. Observed failure
+    # (astropy-13033): the second/third `i33|` segments stayed as literal
+    # text in the output because no whitespace preceded them. Now we use
+    # `re.finditer` to find every `i\d+|` and split at every one after
+    # the first (which is the leading indent prefix at position 0).
+    indent_marker_re = re.compile(r'i\d+\|')
     lines_in = text.split('\n')
     lines_out = []
     for line in lines_in:
-        if re.match(r'^i\d+\|', line) and split_re.search(line):
-            # Split on every " i{N}|" boundary, then re-prepend the marker
-            # to each fragment after the first.
-            parts = split_re.split(line)
-            # parts is [pre, marker1, between1, marker2, between2, ...]
-            # First fragment is pre as-is; subsequent are marker + between.
-            lines_out.append(parts[0])
-            i = 1
-            while i < len(parts):
-                marker = parts[i]
-                rest = parts[i + 1] if i + 1 < len(parts) else ''
-                lines_out.append(marker + rest)
-                i += 2
+        matches = list(indent_marker_re.finditer(line))
+        if (
+            len(matches) >= 2
+            and matches[0].start() == 0
+            # Avoid splitting if the second match has a digit or letter
+            # immediately before — that would be a real identifier ending
+            # in `i\d+|` (extremely unlikely but defensive).
+            and (matches[1].start() == 0
+                 or not line[matches[1].start() - 1].isalnum()
+                 or line[matches[1].start() - 1] in '"\')]}>:'  # statement-end chars
+            )
+        ):
+            # First segment: everything from start through just before the
+            # second marker. Subsequent segments: each marker through the
+            # next (or end).
+            split_points = [0] + [m.start() for m in matches[1:]] + [len(line)]
+            for i in range(len(split_points) - 1):
+                lines_out.append(line[split_points[i]:split_points[i + 1]].rstrip())
         else:
             lines_out.append(line)
     text = '\n'.join(lines_out)
