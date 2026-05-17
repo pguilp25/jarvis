@@ -7058,20 +7058,12 @@ def _restore_replace_whitespace(text: str) -> str:
     lines_out = []
     for line in lines_in:
         matches = list(indent_marker_re.finditer(line))
-        if (
-            len(matches) >= 2
-            and matches[0].start() == 0
-            # Avoid splitting if the second match has a digit or letter
-            # immediately before — that would be a real identifier ending
-            # in `i\d+|` (extremely unlikely but defensive).
-            and (matches[1].start() == 0
-                 or not line[matches[1].start() - 1].isalnum()
-                 or line[matches[1].start() - 1] in '"\')]}>:'  # statement-end chars
-            )
-        ):
-            # First segment: everything from start through just before the
-            # second marker. Subsequent segments: each marker through the
-            # next (or end).
+        # Rule: if a line ALREADY starts with i{N}| AND contains another
+        # i{N}| marker later, every subsequent marker is a missed newline.
+        # Split unconditionally. The starts-with-prefix check is the only
+        # gate we need — a regular Python line like `if i33|0:` does NOT
+        # start with i{N}|, so it's untouched.
+        if len(matches) >= 2 and matches[0].start() == 0:
             split_points = [0] + [m.start() for m in matches[1:]] + [len(line)]
             for i in range(len(split_points) - 1):
                 lines_out.append(line[split_points[i]:split_points[i + 1]].rstrip())
@@ -7096,7 +7088,16 @@ def _restore_replace_whitespace(text: str) -> str:
     #
     # The heuristic does NOT strip when the digit is an operator-preceded
     # operand (`x = 5`, `n = 4`) — those stay legitimate.
-    _STATEMENT_END = r'[\w\)\]\}\:\"\'─-╿]'  # word, brackets, quote, colon, box-drawing
+    # Trailing-lineno stripper: ONLY trigger after a true statement-end
+    # character — closing bracket, quote, colon, or box-drawing rule.
+    # We deliberately DO NOT include word chars `\w` here. Including word
+    # chars (the previous behaviour) caused `return 1` to be stripped to
+    # `return` because `n` matches `\w`, breaking valid one-liner returns.
+    # The trade-off: lines like `i4|x = 5 23` (legit value + lineno tail)
+    # are no longer auto-stripped — but those produce a syntax error the
+    # syntax-check loop catches, whereas a silently-eaten value would
+    # ship as a silently-wrong fix.
+    _STATEMENT_END = r'[\)\]\}\:\"\'─-╿]'  # brackets, quote, colon, box-drawing
     _TRAILING_LINENO = re.compile(rf'(?<={_STATEMENT_END})\s+\d{{1,6}}\s*$')
     # Pure-trailer line: only whitespace + digits (the blank-line trailer case)
     _PURE_LINENO = re.compile(r'^\s*\d{1,6}\s*$')

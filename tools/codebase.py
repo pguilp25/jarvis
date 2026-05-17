@@ -32,7 +32,8 @@ def to_forward_slash(p: str) -> str:
 LARGE_FILE_THRESHOLD = 50_000  # chars — warn to use KEEP above this
 MAX_SEARCH_RESULTS = 30      # ripgrep matches
 IGNORE_DIRS = {
-    # Python
+    # Python — caches and virtualenvs only. NOT "lib", "libs", "packages":
+    # these are real source-directory names in many Python projects.
     "__pycache__", ".venv", "venv", "env", ".env", "virtualenv",
     "site-packages", ".eggs",
     ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
@@ -40,21 +41,18 @@ IGNORE_DIRS = {
     # Node / JS
     "node_modules", "bower_components", ".npm", ".yarn",
     ".next", ".nuxt", ".svelte-kit", ".astro",
-    # Build / dist
-    "build", "dist", "out", "_build", "target", "release", "debug",
-    "bin", "obj", "cmake-build-debug", "cmake-build-release",
+    # Build / dist — keep only the obviously-build ones. NOT "bin", "obj"
+    # since some C/C++ projects use them as source directories.
+    "build", "dist", "out", "_build", "release", "debug",
+    "cmake-build-debug", "cmake-build-release",
     # Version control
     ".git", ".svn", ".hg", ".bzr",
     # IDE / editor
     ".idea", ".vscode", ".vs", ".eclipse", ".settings",
     # Package managers / caches
     ".cache", ".gradle", ".m2", ".cargo",
-    "vendor", "third_party", "3rdparty", "external", "deps",
-    "lib", "libs", "packages",
     # Rust
-    ".rustup",
-    # Go
-    "pkg",
+    ".rustup", "target",  # target is rust's build output
     # Ruby
     ".bundle",
     # Docker
@@ -62,7 +60,16 @@ IGNORE_DIRS = {
     # Misc
     ".jarvis", ".jarvis_sandbox", "coverage", "htmlcov",
     ".terraform", ".serverless",
-    "logs", "tmp", "temp",
+    # NOTE: previously these were here but caused silent false-negatives
+    # in projects where they're real source dirs:
+    #   "pkg"       → Python projects use pkg/ as a regular package name
+    #                 (e.g. django's, astropy's. Go conv stays unhandled.)
+    #   "lib"/"libs" → common source directory in many projects
+    #   "packages"  → common monorepo pattern
+    #   "vendor"    → some Python projects vendor deps here as source
+    #   "third_party"/"3rdparty"/"external"/"deps" → ditto
+    #   "bin"/"obj" → some C projects use these as source
+    #   "logs"/"tmp"/"temp" → user-named source dirs sometimes
 }
 
 # Directories matching these suffixes are also ignored
