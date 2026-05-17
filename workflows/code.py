@@ -437,6 +437,80 @@ this shape: an open-thinking preamble, the 5 phases of analysis, and
 the hard format rules. Read it, but always know what you're heading for.
 
 ══════════════════════════════════════════════════════════════════════
+READ EVERY ARTIFACT THE USER GAVE YOU — the spec lives in evidence
+══════════════════════════════════════════════════════════════════════
+
+The user describes the task in prose AND attaches evidence. The two
+are not redundant — they say different things:
+
+  PROSE          — the user's MENTAL MODEL of what's wrong / wanted.
+                   Often imprecise, sometimes incomplete, occasionally
+                   misleading about where the issue actually lives.
+  EVIDENCE       — the precise contract the code must satisfy:
+                    • a failing test  → its `assert` IS the spec
+                    • an error trace  → the exact exception + location
+                    • a code snippet  → the exact behavior expected
+                    • a linked doc / RFC / API spec
+                    • a reference output / diff / expected log
+                   Each is a CONTRACT. The prose paraphrases it; the
+                   evidence is binding.
+
+THE TRAP: paraphrasing the prose without reading the evidence
+─────────────────────────────────────────────────────────────
+Plans that 'address the symptom' commonly fail because the planner
+read the description ("improve the error message") and skipped the
+attached evidence ("the test asserts msg == 'X'"). The patch then
+produces a BETTER error message that the test rejects because the
+test wants the SPECIFIC string. The fix looks reasonable in
+isolation but doesn't satisfy the contract.
+
+This is the #1 cause of 'almost right' patches — and it is entirely
+preventable by reading first.
+
+WHAT TO READ — explicitly, before finalizing your plan
+──────────────────────────────────────────────────────
+For every artifact the user attached, named, or linked:
+
+  ▸ Failing test(s) — open the test file with [CODE: <path>]. Read
+    the assertions. They tell you the EXACT expected output, error
+    message, return value, attribute, or behavior.
+  ▸ Error trace — read up the stack from the failure point. Often
+    the failure surfaces in a wrapper but originates in a deeper
+    call. The fix usually belongs at the origin, not the surface.
+  ▸ Cited file:line locations — open them. If the user says
+    "the bug is in foo.py around line 200", read foo.py 150-250 to
+    see the full context. Don't trust the prose's diagnosis without
+    confirming.
+  ▸ Linked issues / PRs / commits — they often contain the actual
+    intent the user couldn't articulate in prose.
+  ▸ Documentation citations — they pin the contract the new code
+    must satisfy.
+
+WHEN THE USER GIVES YOU TEST NAMES (no file path) — find them
+─────────────────────────────────────────────────────────────
+A bug report that says "test_foo fails" without giving you the
+file is a near-universal pattern. Your move:
+  [SEARCH: def test_foo]      → finds the test file
+  [CODE: <that_file>]         → read the assertions
+Then plan the fix.
+
+WHEN THE USER PASTES AN ERROR MESSAGE — match it character-by-character
+──────────────────────────────────────────────────────────────────────
+If the bug report includes a literal error string, ANY change you
+make to that string must produce it EXACTLY. Single quotes vs
+double quotes, list repr vs scalar, "expected" vs "required" — all
+matter when a test asserts against the exact string. Read the test
+that catches the message; do NOT improvise a "cleaner" wording.
+
+THIS APPLIES UNIVERSALLY — not just to benchmark instances
+─────────────────────────────────────────────────────────
+Whenever a user gives you concrete evidence, it represents work
+they did to communicate the contract precisely. Honoring that work
+means reading what they wrote — not guessing what they meant. A
+patch built on guesses passes review only when the guesses happen
+to be right; one built on the evidence passes by construction.
+
+══════════════════════════════════════════════════════════════════════
 CLASSIFY THE TASK SHAPE FIRST — fix-vs-add calibrates everything
 ══════════════════════════════════════════════════════════════════════
 
@@ -2122,6 +2196,49 @@ You are a coder in JARVIS. You receive ONE step from a plan. Your goal:
 after your edits, the specific requirement this step satisfies must be
 TRUE in the code. You don't question the plan. You don't add extras.
 You make the requirement true.
+
+READ THE EVIDENCE BEFORE PATCHING
+─────────────────────────────────
+If the step description references a failing test, a specific error
+message, a file:line location, or any other concrete artifact, OPEN
+THAT ARTIFACT before writing your edit:
+  ▸ Test mentioned by name?           → [CODE: <test_file>]
+  ▸ Error trace cited?                → [CODE:] each file in the trace
+  ▸ Expected output / error string?   → match it CHARACTER-BY-CHARACTER
+  ▸ file:line cited?                  → [VIEW: file LINE] to read it
+
+The test's `assert` is the spec — your edit must satisfy it EXACTLY.
+A "better" error message that the test rejects is a failed fix.
+
+DO THE ACTUAL FIX — never modify the test, never shortcut
+─────────────────────────────────────────────────────────
+When the user reports a bug, you fix the source code. When the user
+asks for a feature, you implement it. NEVER take a shortcut that
+makes the test pass without doing the real work:
+
+  ✗ Modify the test to relax its assertion
+  ✗ Delete the code the test exercises so it skips / passes
+  ✗ Wrap the failing code in try/except that swallows the failure
+  ✗ Hardcode the expected output in the function being tested
+  ✗ Comment out / rename / delete the failing test
+  ✗ Add a no-op patch that doesn't actually change behavior
+  ✗ Add a flag that bypasses the failing code path
+
+These shortcuts ship a system where the bug is still there and the
+test that was supposed to catch it no longer does. The user trusts
+you to do real work — gaming the test breaks that trust.
+
+ALLOWED test changes (rare): only when the user EXPLICITLY asks to
+add tests, fix test-infrastructure bugs, or update tests to codify
+a behavior change THEY requested. If the user says "add a test for
+X", changing tests is fine. If the user says "X is broken", the
+fix goes in the source code that produces X, never in the test that
+verifies X.
+
+A simple check before writing an edit: if the step is a FIX and
+your target file path contains `/tests/`, `test_*.py`, or
+`*_test.py`, pause in `[think]` and confirm you are NOT silencing
+the failing test. The default answer is: route the edit to source.
 
 REASONING LIVES IN [think] BLOCKS OR YOUR REASONING CHANNEL — never in
 your visible patch. Your visible response is just the edit blocks the
@@ -4564,6 +4681,33 @@ the user hits — but every line you needlessly rewrite, the user ALSO
 hits, because rewrites have a much higher chance of corrupting the
 surrounding file than the bug they are trying to fix.
 
+VERIFY AGAINST THE EVIDENCE — the test is the spec
+──────────────────────────────────────────────────
+If the user supplied a failing test or a literal expected output,
+the patched code must satisfy it EXACTLY. Before APPROVING:
+  ▸ Open the failing test file with [CODE:] and read the asserts.
+  ▸ Mentally trace the patched function with the test's input.
+  ▸ Does the output match the assertion CHARACTER-BY-CHARACTER?
+    Quotes, brackets, exact wording — all of it.
+A patch that produces a "cleaner" error message the test rejects is
+a FAIL, not an APPROVED — your role is to catch that.
+
+CHECK FOR SHORTCUTS IN THE COMMITTED DIFF
+─────────────────────────────────────────
+Skim the diff for shortcut patterns. If you see ANY of these in a
+FIX task, the patch is wrong and you should issue corrective edits
+that restore the source-side fix:
+  ▸ Test file modifications when the user asked for a FIX (assertion
+    loosened, test renamed, test deleted, expected-value changed).
+  ▸ try/except wrapping the failing condition without addressing it.
+  ▸ Hardcoded return value in the function under test.
+  ▸ A new flag that bypasses the failing code path.
+  ▸ The source-side function deleted instead of fixed.
+
+ALLOWED test changes (rare): user explicitly asked to add tests,
+fix test-infrastructure bugs, or codify a requested behavior change.
+Otherwise, source-side fix only.
+
 REASONING — in your thinking, not in your visible patch:
   BEFORE you write any fix, in your thinking (reasoning channel or
   `<think>...</think>` tags) walk this checklist for EACH gap you find:
@@ -5548,23 +5692,29 @@ _SECTION_BOUNDARY_RE = re.compile(
 def _check_deleted_imports(
     rel_path: str, original: str, modified: str, project_root,
 ) -> list[tuple[str, str]]:
-    """Detect when a coder edit removes a top-level import that other files
-    re-export from this module.
+    """Detect when a coder edit removes a top-level import OR a top-level
+    class / function definition that other files in the project still
+    reference. Both modes lead to ImportError or NameError at module-load
+    time downstream.
 
-    Observed failure on astropy__astropy-13236: the coder removed
-    `from .ndarray_mixin import NdarrayMixin` from `astropy/table/table.py`
-    because it looked unused inside the file. But `astropy/table/__init__.py`
-    does `from .table import (..., NdarrayMixin, ...)` — so the deletion
-    nuked a PUBLIC re-export → ImportError at module load → 644 tests
-    failed at collection.
+    Mode A — deleted imports. Observed failure (astropy__astropy-13236):
+    the coder removed `from .ndarray_mixin import NdarrayMixin` from
+    `astropy/table/table.py`. `astropy/table/__init__.py` does
+    `from .table import (..., NdarrayMixin, ...)` — so the deletion nuked
+    a PUBLIC re-export → ImportError at module load → 644 tests failed.
 
-    Returns a list of `(deleted_import_line, evidence)` tuples for each
+    Mode B — deleted top-level `class` / `def`. Observed failure
+    (astropy__astropy-13398): the coder deleted the entire `ITRS` class
+    body from `astropy/coordinates/builtin_frames/itrs.py` while moving
+    things to a new file. Other files still import / instantiate `ITRS`,
+    so the deletion broke import time → 68 P→P tests regressed.
+
+    Returns a list of `(deleted_signature, evidence)` tuples for each
     deletion that has at least one external consumer. Empty list means
     the edit is safe to apply.
 
-    Only checks `.py` files. The grep is bounded to ~10 candidate files
-    per removed name and uses subprocess `grep -rln` for speed; the actual
-    name-binding check is done in Python after the grep narrows the set.
+    Only checks `.py` files. The grep is bounded; the actual name-binding
+    check is done in Python after the grep narrows the set.
     """
     if not rel_path.endswith(".py"):
         return []
@@ -5579,8 +5729,31 @@ def _check_deleted_imports(
                 out.add(stripped)
         return out
 
-    removed = _top_level_imports(original) - _top_level_imports(modified)
-    if not removed:
+    def _top_level_defs(text: str) -> dict[str, str]:
+        """Returns {name: 'kind <name>' signature line} for every top-level
+        `class Name` or `(async )def Name`. Kind = 'class' or 'def'."""
+        out: dict[str, str] = {}
+        for line in text.splitlines():
+            if not line or line[0] in (" ", "\t"):
+                continue
+            stripped = line.rstrip()
+            m_class = re.match(r"^class\s+([A-Za-z_]\w*)", stripped)
+            m_def = re.match(r"^(?:async\s+)?def\s+([A-Za-z_]\w*)", stripped)
+            if m_class:
+                out[m_class.group(1)] = stripped
+            elif m_def:
+                out[m_def.group(1)] = stripped
+        return out
+
+    removed_imports = _top_level_imports(original) - _top_level_imports(modified)
+    orig_defs = _top_level_defs(original)
+    new_defs = _top_level_defs(modified)
+    removed_def_names = [
+        n for n in orig_defs.keys() - new_defs.keys()
+        # Skip dunder methods at module level (unusual but seen in fixtures)
+        if not (n.startswith("__") and n.endswith("__"))
+    ]
+    if not removed_imports and not removed_def_names:
         return []
 
     if rel_path.endswith("/__init__.py"):
@@ -5621,7 +5794,7 @@ def _check_deleted_imports(
                 cached_grep[key] = []
         return cached_grep[key]
 
-    for imp_line in removed:
+    for imp_line in removed_imports:
         names: list[str] = []
         m_from = re.match(r"^from\s+\S+\s+import\s+(.+)$", imp_line)
         m_imp = re.match(r"^import\s+(\S+)", imp_line)
@@ -5701,6 +5874,89 @@ def _check_deleted_imports(
                 findings.append(
                     (imp_line, f"`{name}` re-exported via {', '.join(real_consumers[:3])}")
                 )
+
+    # ── Mode B: deleted top-level class / def ────────────────────────
+    # For each removed top-level definition, look for consumers anywhere
+    # in the project: absolute imports, relative imports, or direct
+    # symbol usage (`Name(`, `Name.x`, `isinstance(x, Name)`).
+    for name in removed_def_names:
+        signature = orig_defs[name]  # e.g. "class ITRS(BaseCoordinateFrame):"
+        # Skip names so short / common they would false-positive
+        if len(name) <= 2:
+            continue
+
+        # Three candidate-file sources, deduped:
+        candidate_files: list[str] = []
+        candidate_files += _do_grep(f"from {module_path} import")
+        if basename:
+            candidate_files += _do_grep(f"from .{basename} import", own_dir)
+            if own_dir.parent != project_root_path:
+                candidate_files += _do_grep(
+                    f"from ..{basename} import", own_dir.parent
+                )
+        # Direct symbol-usage grep — fast pre-filter for files that
+        # mention the name at all. We word-boundary verify in Python.
+        candidate_files += _do_grep(name)
+
+        # De-dup, cap
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for f in candidate_files:
+            if f not in seen:
+                seen.add(f)
+                uniq.append(f)
+        candidate_files = uniq[:30]
+
+        import_pat_abs = re.compile(
+            rf"from\s+{re.escape(module_path)}\s+import\s+([^\n;]+)"
+        )
+        import_pat_rel = (
+            re.compile(rf"from\s+\.+{re.escape(basename)}\s+import\s+([^\n;]+)")
+            if basename else None
+        )
+        usage_pat = re.compile(rf"\b{re.escape(name)}\b")
+
+        real_consumers: list[tuple[str, str]] = []  # (rel_path:line, kind)
+        for cf in candidate_files:
+            try:
+                txt = Path(cf).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            # Strongest signal: import line that names it
+            hit = None
+            for pat in (import_pat_abs, import_pat_rel):
+                if pat is None:
+                    continue
+                for m in pat.finditer(txt):
+                    if re.search(rf"\b{re.escape(name)}\b", m.group(1)):
+                        line_num = txt[: m.start()].count("\n") + 1
+                        hit = (line_num, "import")
+                        break
+                if hit:
+                    break
+            # Fallback: direct usage anywhere (e.g. `ITRS()` in a test)
+            if hit is None:
+                m = usage_pat.search(txt)
+                if m:
+                    line_num = txt[: m.start()].count("\n") + 1
+                    hit = (line_num, "usage")
+            if hit:
+                try:
+                    rel_consumer = str(Path(cf).relative_to(project_root_path))
+                except ValueError:
+                    rel_consumer = cf
+                real_consumers.append((f"{rel_consumer}:{hit[0]}", hit[1]))
+                if len(real_consumers) >= 5:
+                    break
+
+        if real_consumers:
+            kinds = sorted({k for _, k in real_consumers})
+            locs = ", ".join(loc for loc, _ in real_consumers[:3])
+            findings.append((
+                signature,
+                f"top-level `{name}` referenced ({'+'.join(kinds)}) in {locs}",
+            ))
 
     return findings
 
