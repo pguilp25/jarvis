@@ -6286,14 +6286,23 @@ def _extract_code_blocks(response: str) -> dict:
         response, re.DOTALL,
     ):
         _early_consumed_spans.append(m.span())
+    # NEW-FILE bodies — used by both REVERT and EDIT extraction loops to
+    # skip patterns that live inside `=== FILE: ... === END FILE ===`.
+    # Tracked separately so EDIT extraction can skip only FILE-body spans
+    # (not other EDIT spans, which it must legitimately iterate).
+    _file_body_spans: list[tuple[int, int]] = []
     for m in re.finditer(
         r'===\s*FILE:\s*(\S+).*?===\s*END\s+FILE\s*===',
         response, re.DOTALL,
     ):
         _early_consumed_spans.append(m.span())
+        _file_body_spans.append(m.span())
 
     def _early_in_consumed(pos: int) -> bool:
         return any(s <= pos < e for s, e in _early_consumed_spans)
+
+    def _in_file_body(pos: int) -> bool:
+        return any(s <= pos < e for s, e in _file_body_spans)
 
     # ── Extract REVERT directives ─────────────────────────────────────────
     # Single-line directive: `[REVERT FILE: path]` — restores filepath to its
@@ -6325,6 +6334,14 @@ def _extract_code_blocks(response: str) -> dict:
         re.DOTALL
     )
     for edit_match in edit_pattern.finditer(response):
+        # Skip EDIT patterns that live INSIDE a `=== FILE: ... === END FILE ===`
+        # body — those are file CONTENT (the model is creating a new file
+        # whose source code happens to contain literal `=== EDIT:` text,
+        # e.g. JARVIS source rewriting its own prompts). Bug surfaced by
+        # fuzz: a TEMPLATE = '''=== EDIT: fake.py ===''' string inside a
+        # new file used to trigger a spurious edit on `fake.py`.
+        if _in_file_body(edit_match.start()):
+            continue
         filepath = edit_match.group(1).strip()
         edit_body = edit_match.group(2)
 
