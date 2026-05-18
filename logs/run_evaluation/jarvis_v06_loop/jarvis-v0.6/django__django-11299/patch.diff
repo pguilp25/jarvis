@@ -1,0 +1,41 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index b99f03cd88..766f5713ba 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1338,7 +1338,9 @@ class Query(BaseExpression):
+             if isinstance(child, Node):
+                 child_clause, needed_inner = self._add_q(
+                     child, used_aliases, branch_negated,
+-                    current_negated, allow_joins, split_subq)
++                    current_negated, allow_joins, split_subq,
++                    simple_col=simple_col,
++                )
+                 joinpromoter.add_votes(needed_inner)
+             else:
+                 child_clause, needed_inner = self.build_filter(
+diff --git a/tests/queries/test_query.py b/tests/queries/test_query.py
+index bef79c992e..e52df46cae 100644
+--- a/tests/queries/test_query.py
++++ b/tests/queries/test_query.py
+@@ -38,7 +38,20 @@ class TestQuery(SimpleTestCase):
+         self.assertEqual(lookup.rhs, 0)
+         self.assertEqual(lookup.lhs.target, Author._meta.get_field('num'))
+ 
+-    def test_multiple_fields(self):
++    def test_combine_or(self):
++        query = Query(Author)
++        where = query.build_where(Q(num__gt=2) | Q(num__lt=0))
++        self.assertEqual(where.connector, OR)
++        lookup = where.children[0]
++        self.assertIsInstance(lookup, GreaterThan)
++        self.assertIsInstance(lookup.lhs, SimpleCol)
++        self.assertEqual(lookup.lhs.target, Author._meta.get_field('num'))
++        lookup = where.children[1]
++        self.assertIsInstance(lookup, LessThan)
++        self.assertIsInstance(lookup.lhs, SimpleCol)
++        self.assertEqual(lookup.lhs.target, Author._meta.get_field('num'))
++
++def test_multiple_fields(self):
+         query = Query(Item)
+         where = query.build_where(Q(modified__gt=F('created')))
+         lookup = where.children[0]

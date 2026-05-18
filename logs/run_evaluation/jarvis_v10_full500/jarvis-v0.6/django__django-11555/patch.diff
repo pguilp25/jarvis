@@ -1,0 +1,21 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index eaccc96d7d..b416295f5a 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -722,6 +722,16 @@ class SQLCompiler:
+ 
+             results = []
+             for item in opts.ordering:
++                if hasattr(item, 'resolve_expression'):
++                    if isinstance(item, Value):
++                        item = Cast(item, item.output_field)
++                    if not isinstance(item, OrderBy):
++                        item = item.asc()
++                    if not self.query.standard_ordering:
++                        item = item.copy()
++                        item.reverse_ordering()
++                    results.append((item, False))
++                    continue
+                 results.extend(self.find_ordering_name(item, opts, alias,
+                                                        order, already_seen))
+             return results

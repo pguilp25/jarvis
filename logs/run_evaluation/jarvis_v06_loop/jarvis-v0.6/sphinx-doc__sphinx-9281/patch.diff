@@ -1,0 +1,20 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index a415a7074..fe676d25b 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -456,9 +456,12 @@ def object_description(object: Any) -> str:
+             pass  # Cannot sort frozenset values, fall back to generic repr
+         else:
+             return "frozenset({%s})" % ", ".join(object_description(x)
+-                                                 for x in sorted_values)
+-    try:
+-        s = repr(object)
++                                                     for x in sorted_values)
++        if isinstance(object, enum.Enum):
++            if object.name is not None:
++                return f"{object.__class__.__name__}.{object.name}"
++        try:
++            s = repr(object)
+     except Exception as exc:
+         raise ValueError from exc
+     # Strip non-deterministic memory addresses such as

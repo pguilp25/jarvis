@@ -1,0 +1,71 @@
+2026-05-17 11:38:26,183 - INFO - Creating container for django__django-12419...
+2026-05-17 11:38:26,373 - INFO - Container for django__django-12419 created: 34213b61534e78ccbf8033c6271b327b4fa5b9e02250ea600870c9b0ca06f537
+2026-05-17 11:38:27,079 - INFO - Container for django__django-12419 started: 34213b61534e78ccbf8033c6271b327b4fa5b9e02250ea600870c9b0ca06f537
+2026-05-17 11:38:27,080 - INFO - Intermediate patch for django__django-12419 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12419/patch.diff, now applying to container...
+2026-05-17 11:38:27,247 - INFO - >>>>> Applied Patch:
+Checking patch django/conf/global_settings.py...
+Checking patch django/core/checks/security/base.py...
+Applied patch django/conf/global_settings.py cleanly.
+Applied patch django/core/checks/security/base.py cleanly.
+
+2026-05-17 11:38:28,224 - INFO - Git diff before:
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index 09c9b95d26..8bb59a4037 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -637,6 +637,6 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+ SECURE_HSTS_PRELOAD = False
+ SECURE_HSTS_SECONDS = 0
+ SECURE_REDIRECT_EXEMPT = []
+-SECURE_REFERRER_POLICY = None
++SECURE_REFERRER_POLICY = 'same-origin'
+ SECURE_SSL_HOST = None
+ SECURE_SSL_REDIRECT = False
+diff --git a/django/core/checks/security/base.py b/django/core/checks/security/base.py
+index b69c2a11da..5ad952ad87 100644
+--- a/django/core/checks/security/base.py
++++ b/django/core/checks/security/base.py
+@@ -103,7 +103,7 @@ W021 = Warning(
+ )
+ 
+ W022 = Warning(
+-    'You have not set the SECURE_REFERRER_POLICY setting. Without this, your '
++    'Your SECURE_REFERRER_POLICY setting is set to None. Without this, your '
+     'site will not send a Referrer-Policy header. You should consider '
+     'enabling this header to protect user privacy.',
+     id='security.W022',
+2026-05-17 11:38:28,224 - INFO - Eval script for django__django-12419 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12419/eval.sh; copying to container...
+2026-05-17 11:38:33,857 - INFO - Test runtime: 5.50 seconds
+2026-05-17 11:38:33,858 - INFO - Test output for django__django-12419 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12419/test_output.txt
+2026-05-17 11:38:33,930 - INFO - Git diff after:
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index 09c9b95d26..8bb59a4037 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -637,6 +637,6 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+ SECURE_HSTS_PRELOAD = False
+ SECURE_HSTS_SECONDS = 0
+ SECURE_REDIRECT_EXEMPT = []
+-SECURE_REFERRER_POLICY = None
++SECURE_REFERRER_POLICY = 'same-origin'
+ SECURE_SSL_HOST = None
+ SECURE_SSL_REDIRECT = False
+diff --git a/django/core/checks/security/base.py b/django/core/checks/security/base.py
+index b69c2a11da..5ad952ad87 100644
+--- a/django/core/checks/security/base.py
++++ b/django/core/checks/security/base.py
+@@ -103,7 +103,7 @@ W021 = Warning(
+ )
+ 
+ W022 = Warning(
+-    'You have not set the SECURE_REFERRER_POLICY setting. Without this, your '
++    'Your SECURE_REFERRER_POLICY setting is set to None. Without this, your '
+     'site will not send a Referrer-Policy header. You should consider '
+     'enabling this header to protect user privacy.',
+     id='security.W022',
+2026-05-17 11:38:33,930 - INFO - Grading answer for django__django-12419...
+2026-05-17 11:38:33,932 - INFO - report: {'django__django-12419': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_middleware_headers (project_template.test_settings.TestStartProjectSettings)'], 'failure': []}, 'PASS_TO_PASS': {'success': [], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-12419: resolved: True
+2026-05-17 11:38:33,932 - INFO - Attempting to stop container sweb.eval.django__django-12419.jarvis_v10_full500...
+2026-05-17 11:38:49,720 - INFO - Attempting to remove container sweb.eval.django__django-12419.jarvis_v10_full500...
+2026-05-17 11:38:49,812 - INFO - Container sweb.eval.django__django-12419.jarvis_v10_full500 removed.

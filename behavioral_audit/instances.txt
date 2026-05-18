@@ -1,0 +1,10 @@
+astropy__astropy-13977
+astropy__astropy-14182
+astropy__astropy-14365
+astropy__astropy-12907
+astropy__astropy-14309
+sympy__sympy-11618
+scikit-learn__scikit-learn-10297
+sphinx-doc__sphinx-10323
+matplotlib__matplotlib-13989
+django__django-10880

@@ -1,0 +1,26 @@
+diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py
+index de3fb01d18..c4602489bb 100644
+--- a/astropy/utils/misc.py
++++ b/astropy/utils/misc.py
+@@ -496,9 +496,9 @@ def did_you_mean(s, candidates, n=3, cutoff=0.8, fix=None):
+ 
+ class InheritDocstrings(type):
+     """
+-    This metaclass makes methods of a class automatically have their
+-    docstrings filled in from the methods they override in the base
+-    class.
++    This metaclass makes methods and properties of a class automatically
++    have their docstrings filled in from the methods they override in
++    the base class.
+ 
+     If the class uses multiple inheritance, the docstring will be
+     chosen from the first class in the bases list, in the same way as
+@@ -528,7 +528,7 @@ class InheritDocstrings(type):
+                 not key.startswith('_'))
+ 
+         for key, val in dct.items():
+-            if (inspect.isfunction(val) and
++            if ((inspect.isfunction(val) or isinstance(val, property)) and
+                 is_public_member(key) and
+                 val.__doc__ is None):
+                 for base in cls.__mro__[1:]:

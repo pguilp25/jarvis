@@ -1,0 +1,59 @@
+diff --git a/astropy/coordinates/builtin_frames/__init__.py b/astropy/coordinates/builtin_frames/__init__.py
+index 6fd688c285..17b524478e 100644
+--- a/astropy/coordinates/builtin_frames/__init__.py
++++ b/astropy/coordinates/builtin_frames/__init__.py
+@@ -48,6 +48,7 @@ from . import supergalactic_transforms
+ from . import icrs_cirs_transforms
+ from . import cirs_observed_transforms
+ from . import icrs_observed_transforms
++from . import itrs_observed_transforms
+ from . import intermediate_rotation_transforms
+ from . import ecliptic_transforms
+ 
+diff --git a/astropy/coordinates/builtin_frames/itrs.py b/astropy/coordinates/builtin_frames/itrs.py
+index e121ec9064..436f954df0 100644
+--- a/astropy/coordinates/builtin_frames/itrs.py
++++ b/astropy/coordinates/builtin_frames/itrs.py
+@@ -1,38 +1,3 @@
+-# Licensed under a 3-clause BSD style license - see LICENSE.rst
+-
+-from astropy.utils.decorators import format_doc
+-from astropy.coordinates.representation import CartesianRepresentation, CartesianDifferential
+-from astropy.coordinates.baseframe import BaseCoordinateFrame, base_doc
+-from astropy.coordinates.attributes import TimeAttribute
+-from .utils import DEFAULT_OBSTIME
+-
+-__all__ = ['ITRS']
+-
+-
+-@format_doc(base_doc, components="", footer="")
+-class ITRS(BaseCoordinateFrame):
+-    """
+-    A coordinate or frame in the International Terrestrial Reference System
+-    (ITRS).  This is approximately a geocentric system, although strictly it is
+-    defined by a series of reference locations near the surface of the Earth.
+-    For more background on the ITRS, see the references provided in the
+-    :ref:`astropy:astropy-coordinates-seealso` section of the documentation.
+-    """
+-
+-    default_representation = CartesianRepresentation
+-    default_differential = CartesianDifferential
+-
+-    obstime = TimeAttribute(default=DEFAULT_OBSTIME)
+-
+-    @property
+-    def earth_location(self):
+-        """
+-        The data in this frame as an `~astropy.coordinates.EarthLocation` class.
+-        """
+-        from astropy.coordinates.earth import EarthLocation
+-
+-        cart = self.represent_as(CartesianRepresentation)
+-        return EarthLocation(x=cart.x, y=cart.y, z=cart.z)
+-
+-# Self-transform is in intermediate_rotation_transforms.py with all the other
+-# ITRS transforms
++i0|# Self-transform is in intermediate_rotation_transforms.py with all the other
++i0|# ITRS transforms. Direct ITRS->AltAz and ITRS->HADec transforms are also
++i0|# there to avoid the ITRS->CIRS->Observed path which includes aberration.
+\ No newline at end of file

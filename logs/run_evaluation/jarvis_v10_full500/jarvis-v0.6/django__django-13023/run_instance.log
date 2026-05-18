@@ -1,0 +1,45 @@
+2026-05-17 13:22:29,838 - INFO - Creating container for django__django-13023...
+2026-05-17 13:22:30,095 - INFO - Container for django__django-13023 created: 960b5b497448e31900d308ea806a83fdd3a857490e049e2e785a24e9078727c3
+2026-05-17 13:22:30,710 - INFO - Container for django__django-13023 started: 960b5b497448e31900d308ea806a83fdd3a857490e049e2e785a24e9078727c3
+2026-05-17 13:22:30,711 - INFO - Intermediate patch for django__django-13023 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-13023/patch.diff, now applying to container...
+2026-05-17 13:22:30,880 - INFO - >>>>> Applied Patch:
+Checking patch django/db/models/fields/__init__.py...
+Applied patch django/db/models/fields/__init__.py cleanly.
+
+2026-05-17 13:22:32,171 - INFO - Git diff before:
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 0fd69059ee..693eee36a7 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -1501,7 +1501,7 @@ class DecimalField(Field):
+             return self.context.create_decimal_from_float(value)
+         try:
+             return decimal.Decimal(value)
+-        except decimal.InvalidOperation:
++        except (decimal.InvalidOperation, TypeError):
+             raise exceptions.ValidationError(
+                 self.error_messages['invalid'],
+                 code='invalid',
+2026-05-17 13:22:32,171 - INFO - Eval script for django__django-13023 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-13023/eval.sh; copying to container...
+2026-05-17 13:22:38,796 - INFO - Test runtime: 6.49 seconds
+2026-05-17 13:22:38,797 - INFO - Test output for django__django-13023 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-13023/test_output.txt
+2026-05-17 13:22:38,947 - INFO - Git diff after:
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 0fd69059ee..693eee36a7 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -1501,7 +1501,7 @@ class DecimalField(Field):
+             return self.context.create_decimal_from_float(value)
+         try:
+             return decimal.Decimal(value)
+-        except decimal.InvalidOperation:
++        except (decimal.InvalidOperation, TypeError):
+             raise exceptions.ValidationError(
+                 self.error_messages['invalid'],
+                 code='invalid',
+2026-05-17 13:22:38,948 - INFO - Grading answer for django__django-13023...
+2026-05-17 13:22:38,972 - INFO - report: {'django__django-13023': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_invalid_value (model_fields.test_decimalfield.DecimalFieldTests)', 'test_lookup_really_big_value (model_fields.test_decimalfield.DecimalFieldTests)']}, 'PASS_TO_PASS': {'success': ['test_default (model_fields.test_decimalfield.DecimalFieldTests)', 'test_filter_with_strings (model_fields.test_decimalfield.DecimalFieldTests)', 'test_get_prep_value (model_fields.test_decimalfield.DecimalFieldTests)', 'test_max_decimal_places_validation (model_fields.test_decimalfield.DecimalFieldTests)', 'test_max_digits_validation (model_fields.test_decimalfield.DecimalFieldTests)', 'test_max_whole_digits_validation (model_fields.test_decimalfield.DecimalFieldTests)', "Trailing zeros in the fractional part aren't truncated.", 'test_save_without_float_conversion (model_fields.test_decimalfield.DecimalFieldTests)', 'test_to_python (model_fields.test_decimalfield.DecimalFieldTests)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-13023: resolved: False
+2026-05-17 13:22:38,973 - INFO - Attempting to stop container sweb.eval.django__django-13023.jarvis_v10_full500...
+2026-05-17 13:22:55,089 - INFO - Attempting to remove container sweb.eval.django__django-13023.jarvis_v10_full500...
+2026-05-17 13:22:55,212 - INFO - Container sweb.eval.django__django-13023.jarvis_v10_full500 removed.

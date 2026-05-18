@@ -1,0 +1,45 @@
+2026-05-17 08:44:36,297 - INFO - Creating container for django__django-11951...
+2026-05-17 08:44:36,454 - INFO - Container for django__django-11951 created: 539ac5eb784ea73d06a2f4a82484b137c49a7725671bbb5d587f512b022d6d9b
+2026-05-17 08:44:36,824 - INFO - Container for django__django-11951 started: 539ac5eb784ea73d06a2f4a82484b137c49a7725671bbb5d587f512b022d6d9b
+2026-05-17 08:44:36,824 - INFO - Intermediate patch for django__django-11951 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11951/patch.diff, now applying to container...
+2026-05-17 08:44:36,960 - INFO - >>>>> Applied Patch:
+Checking patch django/db/models/query.py...
+Applied patch django/db/models/query.py cleanly.
+
+2026-05-17 08:44:37,439 - INFO - Git diff before:
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 794e0faae7..c445edc5a1 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -470,6 +470,8 @@ class QuerySet:
+         opts = self.model._meta
+         fields = opts.concrete_fields
+         objs = list(objs)
++        max_batch_size = connection.ops.bulk_batch_size(fields, objs)
++        batch_size = min(batch_size, max_batch_size) if batch_size else max_batch_size
+         self._populate_pk_values(objs)
+         with transaction.atomic(using=self.db, savepoint=False):
+             objs_with_pk, objs_without_pk = partition(lambda o: o.pk is None, objs)
+2026-05-17 08:44:37,440 - INFO - Eval script for django__django-11951 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11951/eval.sh; copying to container...
+2026-05-17 08:44:42,560 - INFO - Test runtime: 5.07 seconds
+2026-05-17 08:44:42,560 - INFO - Test output for django__django-11951 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11951/test_output.txt
+2026-05-17 08:44:42,619 - INFO - Git diff after:
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 794e0faae7..c445edc5a1 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -470,6 +470,8 @@ class QuerySet:
+         opts = self.model._meta
+         fields = opts.concrete_fields
+         objs = list(objs)
++        max_batch_size = connection.ops.bulk_batch_size(fields, objs)
++        batch_size = min(batch_size, max_batch_size) if batch_size else max_batch_size
+         self._populate_pk_values(objs)
+         with transaction.atomic(using=self.db, savepoint=False):
+             objs_with_pk, objs_without_pk = partition(lambda o: o.pk is None, objs)
+2026-05-17 08:44:42,619 - INFO - Grading answer for django__django-11951...
+2026-05-17 08:44:42,621 - INFO - report: {'django__django-11951': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_explicit_batch_size_respects_max_batch_size (bulk_create.tests.BulkCreateTests)']}, 'PASS_TO_PASS': {'success': ['test_batch_same_vals (bulk_create.tests.BulkCreateTests)', 'test_bulk_insert_expressions (bulk_create.tests.BulkCreateTests)', 'test_bulk_insert_nullable_fields (bulk_create.tests.BulkCreateTests)', 'test_efficiency (bulk_create.tests.BulkCreateTests)', 'test_empty_model (bulk_create.tests.BulkCreateTests)', 'test_explicit_batch_size (bulk_create.tests.BulkCreateTests)', 'test_explicit_batch_size_efficiency (bulk_create.tests.BulkCreateTests)', 'test_ignore_conflicts_ignore (bulk_create.tests.BulkCreateTests)', 'test_large_batch (bulk_create.tests.BulkCreateTests)', 'test_large_batch_efficiency (bulk_create.tests.BulkCreateTests)', 'test_large_batch_mixed (bulk_create.tests.BulkCreateTests)', 'test_large_batch_mixed_efficiency (bulk_create.tests.BulkCreateTests)', 'test_large_single_field_batch (bulk_create.tests.BulkCreateTests)', 'test_long_and_short_text (bulk_create.tests.BulkCreateTests)', 'test_long_non_ascii_text (bulk_create.tests.BulkCreateTests)', 'test_multi_table_inheritance_unsupported (bulk_create.tests.BulkCreateTests)', 'test_non_auto_increment_pk (bulk_create.tests.BulkCreateTests)', 'test_non_auto_increment_pk_efficiency (bulk_create.tests.BulkCreateTests)', 'test_proxy_inheritance_supported (bulk_create.tests.BulkCreateTests)', 'test_set_state_with_pk_specified (bulk_create.tests.BulkCreateTests)', 'test_simple (bulk_create.tests.BulkCreateTests)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-11951: resolved: False
+2026-05-17 08:44:42,622 - INFO - Attempting to stop container sweb.eval.django__django-11951.jarvis_v10_full500...
+2026-05-17 08:44:57,919 - INFO - Attempting to remove container sweb.eval.django__django-11951.jarvis_v10_full500...
+2026-05-17 08:44:57,986 - INFO - Container sweb.eval.django__django-11951.jarvis_v10_full500 removed.

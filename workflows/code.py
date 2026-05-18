@@ -63,29 +63,24 @@ from tools.sandbox import Sandbox
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 
+# NVIDIA deepseek-v4-pro/flash endpoints unresponsive on 2026-05-18
+# (full 30s ReadTimeout). Dropped from racing pools to avoid blowing
+# per-instance budget; re-add when endpoints recover. kimi-k2.6 + glm-5.1
+# are the only NIM-hosted models that respond reliably right now.
 UNDERSTAND_MODELS = [
-    "nvidia/deepseek-v4-pro",
-    "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
 ]
 
 IMPLEMENT_MODEL = "nvidia/glm-5.1"
 
-# Active NVIDIA NIM models (4 distinct after the May 2026 swap that
-# replaced minimax-m2.7 → glm-5.1 and qwen-3.5 → deepseek-v4-flash).
-# Name kept as NVIDIA_5 for backward-compat with any external reference;
-# the active pool now has 4 entries.
 NVIDIA_5 = [
-    "nvidia/deepseek-v4-pro",
-    "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
     "nvidia/kimi-k2.6",
 ]
 
 NVIDIA_3 = [
-    "nvidia/deepseek-v4-pro",
-    "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
+    "nvidia/kimi-k2.6",
 ]
 
 
@@ -7815,9 +7810,13 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # lines from context. Both happen inside the tool loop automatically.
     research_cache: dict[str, str] = {}
 
+    # NVIDIA deepseek-v4-pro/flash endpoints are timing out as of
+    # 2026-05-18 (full 30s ReadTimeout on simple "hi" prompts). Including
+    # them in the race makes the planner wait for them to time out before
+    # falling back, blowing the per-instance budget. Drop to the two
+    # responsive models (glm-5.1 + kimi-k2.6). Re-add deepseek when the
+    # endpoints recover.
     PLAN_MODELS = [
-        "nvidia/deepseek-v4-pro",
-        "nvidia/deepseek-v4-flash",
         "nvidia/glm-5.1",
         "nvidia/kimi-k2.6",
     ]

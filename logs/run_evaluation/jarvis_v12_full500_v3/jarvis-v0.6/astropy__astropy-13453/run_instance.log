@@ -1,0 +1,67 @@
+2026-05-17 16:44:30,487 - INFO - Creating container for astropy__astropy-13453...
+2026-05-17 16:44:30,962 - INFO - Container for astropy__astropy-13453 created: df12b8fef81d4c608ea1f7a175bbf3636a46d846bed1b154bc207f3dbd5ae5d5
+2026-05-17 16:44:31,457 - INFO - Container for astropy__astropy-13453 started: df12b8fef81d4c608ea1f7a175bbf3636a46d846bed1b154bc207f3dbd5ae5d5
+2026-05-17 16:44:31,461 - INFO - Intermediate patch for astropy__astropy-13453 written to logs/run_evaluation/jarvis_v12_full500_v3/jarvis-v0.6/astropy__astropy-13453/patch.diff, now applying to container...
+2026-05-17 16:44:31,663 - INFO - >>>>> Applied Patch:
+Checking patch astropy/io/ascii/html.py...
+Applied patch astropy/io/ascii/html.py cleanly.
+
+2026-05-17 16:44:32,855 - INFO - Git diff before:
+diff --git a/astropy/io/ascii/html.py b/astropy/io/ascii/html.py
+index 266cf229c..07353131c 100644
+--- a/astropy/io/ascii/html.py
++++ b/astropy/io/ascii/html.py
+@@ -355,6 +355,10 @@ class HTML(core.BaseReader):
+ 
+         self.data._set_fill_values(cols)
+ 
++        for col in cols:
++            if col.info.name in self.data.formats:
++                col.info.format = self.data.formats[col.info.name]
++
+         lines = []
+ 
+         # Set HTML escaping to False for any column in the raw_html_cols input
+@@ -429,6 +433,8 @@ class HTML(core.BaseReader):
+                                 for i in range(span):
+                                     # Split up multicolumns into separate columns
+                                     new_col = Column([el[i] for el in col])
++                                    if col.info.name in self.data.formats:
++                                        new_col.info.format = self.data.formats[col.info.name]
+ 
+                                     new_col_iter_str_vals = self.fill_values(
+                                         col, new_col.info.iter_str_vals())
+2026-05-17 16:44:32,870 - INFO - Eval script for astropy__astropy-13453 written to logs/run_evaluation/jarvis_v12_full500_v3/jarvis-v0.6/astropy__astropy-13453/eval.sh; copying to container...
+2026-05-17 16:45:32,265 - INFO - Test runtime: 59.20 seconds
+2026-05-17 16:45:32,288 - INFO - Test output for astropy__astropy-13453 written to logs/run_evaluation/jarvis_v12_full500_v3/jarvis-v0.6/astropy__astropy-13453/test_output.txt
+2026-05-17 16:45:32,676 - INFO - Git diff after:
+diff --git a/astropy/io/ascii/html.py b/astropy/io/ascii/html.py
+index 266cf229c..07353131c 100644
+--- a/astropy/io/ascii/html.py
++++ b/astropy/io/ascii/html.py
+@@ -355,6 +355,10 @@ class HTML(core.BaseReader):
+ 
+         self.data._set_fill_values(cols)
+ 
++        for col in cols:
++            if col.info.name in self.data.formats:
++                col.info.format = self.data.formats[col.info.name]
++
+         lines = []
+ 
+         # Set HTML escaping to False for any column in the raw_html_cols input
+@@ -429,6 +433,8 @@ class HTML(core.BaseReader):
+                                 for i in range(span):
+                                     # Split up multicolumns into separate columns
+                                     new_col = Column([el[i] for el in col])
++                                    if col.info.name in self.data.formats:
++                                        new_col.info.format = self.data.formats[col.info.name]
+ 
+                                     new_col_iter_str_vals = self.fill_values(
+                                         col, new_col.info.iter_str_vals())
+2026-05-17 16:45:32,677 - INFO - Grading answer for astropy__astropy-13453...
+2026-05-17 16:45:32,685 - INFO - report: {'astropy__astropy-13453': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/io/ascii/tests/test_html.py::test_write_table_formatted_columns'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/io/ascii/tests/test_html.py::test_listwriter', 'astropy/io/ascii/tests/test_html.py::test_htmlinputter_no_bs4', 'astropy/io/ascii/tests/test_html.py::test_multicolumn_write', 'astropy/io/ascii/tests/test_html.py::test_write_no_multicols', 'astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values', 'astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values_optional_columns', 'astropy/io/ascii/tests/test_html.py::test_write_table_html_fill_values_masked', 'astropy/io/ascii/tests/test_html.py::test_multicolumn_table_html_fill_values', 'astropy/io/ascii/tests/test_html.py::test_multi_column_write_table_html_fill_values_masked'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-13453: resolved: True
+2026-05-17 16:45:32,685 - INFO - Attempting to stop container sweb.eval.astropy__astropy-13453.jarvis_v12_full500_v3...
+2026-05-17 16:45:48,710 - INFO - Attempting to remove container sweb.eval.astropy__astropy-13453.jarvis_v12_full500_v3...
+2026-05-17 16:45:48,867 - INFO - Container sweb.eval.astropy__astropy-13453.jarvis_v12_full500_v3 removed.

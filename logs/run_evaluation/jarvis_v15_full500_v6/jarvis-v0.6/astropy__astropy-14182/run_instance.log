@@ -1,0 +1,57 @@
+2026-05-17 19:29:24,066 - INFO - Creating container for astropy__astropy-14182...
+2026-05-17 19:29:24,259 - INFO - Container for astropy__astropy-14182 created: 758026c0560eaa00eab132f69280e942f9bdb0cac5e28111f89401e0022b00b4
+2026-05-17 19:29:25,322 - INFO - Container for astropy__astropy-14182 started: 758026c0560eaa00eab132f69280e942f9bdb0cac5e28111f89401e0022b00b4
+2026-05-17 19:29:25,341 - INFO - Intermediate patch for astropy__astropy-14182 written to logs/run_evaluation/jarvis_v15_full500_v6/jarvis-v0.6/astropy__astropy-14182/patch.diff, now applying to container...
+2026-05-17 19:29:25,542 - INFO - >>>>> Applied Patch:
+Checking patch astropy/io/ascii/rst.py...
+Applied patch astropy/io/ascii/rst.py cleanly.
+
+2026-05-17 19:29:27,013 - INFO - Git diff before:
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8ef..bde0e3ccf 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -57,10 +57,11 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+ 
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++    def __init__(self, header_rows=None):
++        super().__init__(header_rows=header_rows, delimiter_pad=None, bookend=False)
+ 
+     def write(self, lines):
+         lines = super().write(lines)
+-        lines = [lines[1]] + lines + [lines[1]]
++        sep_line_idx = len(self.data.header_rows)
++        lines = [lines[sep_line_idx]] + lines + [lines[sep_line_idx]]
+         return lines
+2026-05-17 19:29:27,023 - INFO - Eval script for astropy__astropy-14182 written to logs/run_evaluation/jarvis_v15_full500_v6/jarvis-v0.6/astropy__astropy-14182/eval.sh; copying to container...
+2026-05-17 19:30:49,314 - INFO - Test runtime: 82.16 seconds
+2026-05-17 19:30:49,325 - INFO - Test output for astropy__astropy-14182 written to logs/run_evaluation/jarvis_v15_full500_v6/jarvis-v0.6/astropy__astropy-14182/test_output.txt
+2026-05-17 19:30:49,488 - INFO - Git diff after:
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8ef..bde0e3ccf 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -57,10 +57,11 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+ 
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++    def __init__(self, header_rows=None):
++        super().__init__(header_rows=header_rows, delimiter_pad=None, bookend=False)
+ 
+     def write(self, lines):
+         lines = super().write(lines)
+-        lines = [lines[1]] + lines + [lines[1]]
++        sep_line_idx = len(self.data.header_rows)
++        lines = [lines[sep_line_idx]] + lines + [lines[sep_line_idx]]
+         return lines
+2026-05-17 19:30:49,488 - INFO - Grading answer for astropy__astropy-14182...
+2026-05-17 19:30:49,493 - INFO - report: {'astropy__astropy-14182': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['astropy/io/ascii/tests/test_rst.py::test_rst_with_header_rows']}, 'PASS_TO_PASS': {'success': ['astropy/io/ascii/tests/test_rst.py::test_read_normal', 'astropy/io/ascii/tests/test_rst.py::test_read_normal_names', 'astropy/io/ascii/tests/test_rst.py::test_read_normal_names_include', 'astropy/io/ascii/tests/test_rst.py::test_read_normal_exclude', 'astropy/io/ascii/tests/test_rst.py::test_read_unbounded_right_column', 'astropy/io/ascii/tests/test_rst.py::test_read_unbounded_right_column_header', 'astropy/io/ascii/tests/test_rst.py::test_read_right_indented_table', 'astropy/io/ascii/tests/test_rst.py::test_trailing_spaces_in_row_definition', 'astropy/io/ascii/tests/test_rst.py::test_write_normal'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-14182: resolved: False
+2026-05-17 19:30:49,494 - INFO - Attempting to stop container sweb.eval.astropy__astropy-14182.jarvis_v15_full500_v6...
+2026-05-17 19:31:05,114 - INFO - Attempting to remove container sweb.eval.astropy__astropy-14182.jarvis_v15_full500_v6...
+2026-05-17 19:31:05,307 - INFO - Container sweb.eval.astropy__astropy-14182.jarvis_v15_full500_v6 removed.

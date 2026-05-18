@@ -1,0 +1,45 @@
+2026-05-15 18:51:43,384 - INFO - Creating container for sympy__sympy-20916...
+2026-05-15 18:51:43,628 - INFO - Container for sympy__sympy-20916 created: 007a33198f05f8a190ee0384f2fb3cf7fa08e11a0e138c787d8aa2f1c2bdbead
+2026-05-15 18:51:44,534 - INFO - Container for sympy__sympy-20916 started: 007a33198f05f8a190ee0384f2fb3cf7fa08e11a0e138c787d8aa2f1c2bdbead
+2026-05-15 18:51:44,547 - INFO - Intermediate patch for sympy__sympy-20916 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/sympy__sympy-20916/patch.diff, now applying to container...
+2026-05-15 18:51:44,714 - INFO - >>>>> Applied Patch:
+Checking patch sympy/printing/conventions.py...
+Applied patch sympy/printing/conventions.py cleanly.
+
+2026-05-15 18:51:45,101 - INFO - Git diff before:
+diff --git a/sympy/printing/conventions.py b/sympy/printing/conventions.py
+index 9a3be6bbe9..5e3aa1ab54 100644
+--- a/sympy/printing/conventions.py
++++ b/sympy/printing/conventions.py
+@@ -7,7 +7,7 @@
+ from collections.abc import Iterable
+ from sympy import Derivative
+ 
+-_name_with_digits_p = re.compile(r'^([a-zA-Z]+)([0-9]+)$')
++_name_with_digits_p = re.compile(r'^([^\W\d_]+)([0-9]+)$')
+ 
+ 
+ def split_super_sub(text):
+2026-05-15 18:51:45,102 - INFO - Eval script for sympy__sympy-20916 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/sympy__sympy-20916/eval.sh; copying to container...
+2026-05-15 18:51:48,501 - INFO - Test runtime: 3.33 seconds
+2026-05-15 18:51:48,503 - INFO - Test output for sympy__sympy-20916 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/sympy__sympy-20916/test_output.txt
+2026-05-15 18:51:48,547 - INFO - Git diff after:
+diff --git a/sympy/printing/conventions.py b/sympy/printing/conventions.py
+index 9a3be6bbe9..5e3aa1ab54 100644
+--- a/sympy/printing/conventions.py
++++ b/sympy/printing/conventions.py
+@@ -7,7 +7,7 @@
+ from collections.abc import Iterable
+ from sympy import Derivative
+ 
+-_name_with_digits_p = re.compile(r'^([a-zA-Z]+)([0-9]+)$')
++_name_with_digits_p = re.compile(r'^([^\W\d_]+)([0-9]+)$')
+ 
+ 
+ def split_super_sub(text):
+2026-05-15 18:51:48,547 - INFO - Grading answer for sympy__sympy-20916...
+2026-05-15 18:51:48,548 - INFO - report: {'sympy__sympy-20916': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_super_sub']}, 'PASS_TO_PASS': {'success': ['test_requires_partial'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-20916: resolved: False
+2026-05-15 18:51:48,548 - INFO - Attempting to stop container sweb.eval.sympy__sympy-20916.jarvis_v06_loop...
+2026-05-15 18:52:03,897 - INFO - Attempting to remove container sweb.eval.sympy__sympy-20916.jarvis_v06_loop...
+2026-05-15 18:52:04,026 - INFO - Container sweb.eval.sympy__sympy-20916.jarvis_v06_loop removed.

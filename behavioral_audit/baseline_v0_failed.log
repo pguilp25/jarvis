@@ -1,0 +1,424 @@
+/home/pguilp25/jarvis/venv/lib/python3.11/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (7.4.3)/charset_normalizer (3.4.6) doesn't match a supported version!
+  warnings.warn(
+Loading princeton-nlp/SWE-bench_Verified split=test...
+Using the latest cached version of the dataset since princeton-nlp/SWE-bench_Verified couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /home/pguilp25/.cache/huggingface/datasets/princeton-nlp___swe-bench_verified/default/0.0.0/c104f840cc67f8b6eec6f759ebc8b2693d585d4a (last modified on Thu May 14 00:12:45 2026).
+Running 10 instance(s), parallel=5, timeout=1800s, model_name=jarvis-v0.6
+[22:44:31] START  astropy__astropy-12907  (astropy/astropy)
+[22:44:32] START  astropy__astropy-13977  (astropy/astropy)
+[22:44:33] START  astropy__astropy-14182  (astropy/astropy)
+[22:44:34] START  astropy__astropy-14309  (astropy/astropy)
+[22:44:36] START  astropy__astropy-14365  (astropy/astropy)
+[astropy__astropy-12907]   [94m▸ ═══ CODING AGENT ═══[0m
+[astropy__astropy-12907]   [96m▸ Project: /home/pguilp25/.swebench_work/astropy__astropy-12907[0m
+[astropy__astropy-12907]   [96m▸ Complexity: 7[0m
+[astropy__astropy-12907]   [96m▸ Code map: 0 sections indexed[0m
+[astropy__astropy-12907]   [96m▸ Sandbox created: 1861 files copied to /home/pguilp25/.swebench_work/astropy__astropy-12907/.jarvis_sandbox[0m
+[astropy__astropy-12907]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[astropy__astropy-12907]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[astropy__astropy-13977]   [94m▸ ═══ CODING AGENT ═══[0m
+[astropy__astropy-13977]   [96m▸ Project: /home/pguilp25/.swebench_work/astropy__astropy-13977[0m
+[astropy__astropy-13977]   [96m▸ Complexity: 7[0m
+[astropy__astropy-13977]   [96m▸ Code map: 0 sections indexed[0m
+[astropy__astropy-13977]   [96m▸ Sandbox created: 1858 files copied to /home/pguilp25/.swebench_work/astropy__astropy-13977/.jarvis_sandbox[0m
+[astropy__astropy-13977]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[astropy__astropy-13977]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[astropy__astropy-14182]   [94m▸ ═══ CODING AGENT ═══[0m
+[astropy__astropy-14182]   [96m▸ Project: /home/pguilp25/.swebench_work/astropy__astropy-14182[0m
+[astropy__astropy-14182]   [96m▸ Complexity: 7[0m
+[astropy__astropy-14182]   [96m▸ Code map: 0 sections indexed[0m
+[astropy__astropy-14182]   [96m▸ Sandbox created: 1860 files copied to /home/pguilp25/.swebench_work/astropy__astropy-14182/.jarvis_sandbox[0m
+[astropy__astropy-14182]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[astropy__astropy-14182]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[astropy__astropy-14309]   [94m▸ ═══ CODING AGENT ═══[0m
+[astropy__astropy-14309]   [96m▸ Project: /home/pguilp25/.swebench_work/astropy__astropy-14309[0m
+[astropy__astropy-14309]   [96m▸ Complexity: 7[0m
+[astropy__astropy-14309]   [96m▸ Code map: 0 sections indexed[0m
+[astropy__astropy-14309]   [96m▸ Sandbox created: 1804 files copied to /home/pguilp25/.swebench_work/astropy__astropy-14309/.jarvis_sandbox[0m
+[astropy__astropy-14309]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[astropy__astropy-14309]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[astropy__astropy-14365]   [94m▸ ═══ CODING AGENT ═══[0m
+[astropy__astropy-14365]   [96m▸ Project: /home/pguilp25/.swebench_work/astropy__astropy-14365[0m
+[astropy__astropy-14365]   [96m▸ Complexity: 7[0m
+[astropy__astropy-14365]   [96m▸ Code map: 0 sections indexed[0m
+[astropy__astropy-14365]   [96m▸ Sandbox created: 1850 files copied to /home/pguilp25/.swebench_work/astropy__astropy-14365/.jarvis_sandbox[0m
+[astropy__astropy-14365]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[astropy__astropy-14365]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:40] ─┐[0m
+[astropy__astropy-14182]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-14182]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[astropy__astropy-14182]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[astropy__astropy-14182]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:41] ─┐[0m
+[astropy__astropy-13977]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-12907]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-13977]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[astropy__astropy-13977]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[astropy__astropy-13977]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:41] ─┐[0m
+[astropy__astropy-14365]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-12907]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[astropy__astropy-12907]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[astropy__astropy-12907]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:41] ─┐[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[astropy__astropy-14309]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[astropy__astropy-14365]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[astropy__astropy-14365]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[astropy__astropy-14309]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:42] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:42] ─┐[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-14365]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[astropy__astropy-14182]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[astropy__astropy-12907]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-pro: NVIDIA deepseek-ai/deepseek-v4-pro HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[astropy__astropy-13977]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[astropy__astropy-14182]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:43] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:43] ─┐[0m
+[astropy__astropy-14182]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[astropy__astropy-12907]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:43] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:43] ─┐[0m
+[astropy__astropy-13977]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[astropy__astropy-12907]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[astropy__astropy-14365]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[astropy__astropy-14309]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:44] ─┐[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[astropy__astropy-14365]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[astropy__astropy-14182]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[astropy__astropy-12907]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:44:45] ─┐[0m
+[astropy__astropy-13977]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[astropy__astropy-14182]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:47] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:47] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:44:47] ─┐[0m
+[astropy__astropy-14182]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:44:48] ─┐[0m
+[astropy__astropy-14365]   [93m▸ NVIDIA rate limit — waiting 52.7s...[0m
+[astropy__astropy-12907]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-13977]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14309]   [93m▸ ⚠️    nvidia/deepseek-v4-pro: Bad request — NVIDIA deepseek-ai/deepseek-v4-pro HTTP 400: {"error":{"message":"1 validation error:\n  {'type': 'literal_error', 'loc'[0m
+[astropy__astropy-14309]   [91m▸ ✗ nvidia/deepseek-v4-pro unreachable. Falling back to nvidia/glm-5.1...[0m
+[astropy__astropy-14365]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with kimi-k2.6...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with glm-5.1...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:45:40] ─┐[0m
+[astropy__astropy-14309]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:41] ─┐[0m
+[astropy__astropy-14365]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:41] ─┐[0m
+[astropy__astropy-14365]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14365]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14365] 
+[astropy__astropy-14365] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:41] ─┐[0m
+[astropy__astropy-13977]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14309]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-13977]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-13977] 
+[astropy__astropy-13977] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:41] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14309] 
+[astropy__astropy-14309] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:41] ─┐[0m
+[astropy__astropy-14309]   [96m▸ Layer 1: 3 finished first, cancelled 1 stragglers[0m
+[astropy__astropy-14309]   [91m▸ ✗ Coding agent failed: All models failed in planning[0m
+[astropy__astropy-14309]   [91m▸ ✗ Traceback (most recent call last):
+[astropy__astropy-14309]   File "/home/pguilp25/jarvis/workflows/code.py", line 10596, in code_agent
+[astropy__astropy-14309]     plan, research_cache = await phase_plan(
+[astropy__astropy-14309]                            ^^^^^^^^^^^^^^^^^
+[astropy__astropy-14309]   File "/home/pguilp25/jarvis/workflows/code.py", line 7868, in phase_plan
+[astropy__astropy-14309]     raise RuntimeError("All models failed in planning")
+[astropy__astropy-14309] RuntimeError: All models failed in planning
+[astropy__astropy-14309] [0m
+[22:45:41] DONE   astropy__astropy-14309  elapsed=    67s  patch=     0B  ok
+[22:45:41] START  django__django-10880  (django/django)
+[django__django-10880]   [94m▸ ═══ CODING AGENT ═══[0m
+[django__django-10880]   [96m▸ Project: /home/pguilp25/.swebench_work/django__django-10880[0m
+[django__django-10880]   [96m▸ Complexity: 7[0m
+[django__django-10880]   [96m▸ Code map: 0 sections indexed[0m
+[django__django-10880]   [96m▸ Sandbox created: 6049 files copied to /home/pguilp25/.swebench_work/django__django-10880/.jarvis_sandbox[0m
+[django__django-10880]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[django__django-10880]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[django__django-10880] 
+[django__django-10880] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[django__django-10880] 
+[django__django-10880] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[django__django-10880]   [96m▸ Thinking with glm-5.1...[0m
+[django__django-10880] 
+[django__django-10880] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[django__django-10880]   [96m▸ Thinking with kimi-k2.6...[0m
+[django__django-10880] 
+[django__django-10880] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[astropy__astropy-14182]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-14182]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-14182] 
+[astropy__astropy-14182] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[astropy__astropy-12907]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[astropy__astropy-12907]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[astropy__astropy-12907] 
+[astropy__astropy-12907] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:47] ─┐[0m
+[django__django-10880]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[django__django-10880]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[django__django-10880]   [96m▸ Thinking with kimi-k2.6...[0m
+[django__django-10880] 
+[django__django-10880] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:48] ─┐[0m
+[astropy__astropy-13977]   [96m▸ Layer 1: 3 finished first, cancelled 1 stragglers[0m
+[astropy__astropy-13977]   [91m▸ ✗ Coding agent failed: All models failed in planning[0m
+[astropy__astropy-13977]   [91m▸ ✗ Traceback (most recent call last):
+[astropy__astropy-13977]   File "/home/pguilp25/jarvis/workflows/code.py", line 10596, in code_agent
+[astropy__astropy-13977]     plan, research_cache = await phase_plan(
+[astropy__astropy-13977]                            ^^^^^^^^^^^^^^^^^
+[astropy__astropy-13977]   File "/home/pguilp25/jarvis/workflows/code.py", line 7868, in phase_plan
+[astropy__astropy-13977]     raise RuntimeError("All models failed in planning")
+[astropy__astropy-13977] RuntimeError: All models failed in planning
+[astropy__astropy-13977] [0m
+[22:45:48] DONE   astropy__astropy-13977  elapsed=    75s  patch=     0B  ok
+[22:45:48] START  matplotlib__matplotlib-13989  (matplotlib/matplotlib)
+[matplotlib__matplotlib-13989]   [94m▸ ═══ CODING AGENT ═══[0m
+[matplotlib__matplotlib-13989]   [96m▸ Project: /home/pguilp25/.swebench_work/matplotlib__matplotlib-13989[0m
+[matplotlib__matplotlib-13989]   [96m▸ Complexity: 7[0m
+[matplotlib__matplotlib-13989]   [96m▸ Code map: 0 sections indexed[0m
+[matplotlib__matplotlib-13989]   [96m▸ Sandbox created: 4279 files copied to /home/pguilp25/.swebench_work/matplotlib__matplotlib-13989/.jarvis_sandbox[0m
+[matplotlib__matplotlib-13989]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[matplotlib__matplotlib-13989]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:51] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:51] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with glm-5.1...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [92m┌─ glm-5.1 — planning (Layer 1) — R1  [22:45:51] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with kimi-k2.6...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:51] ─┐[0m
+[django__django-10880]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[django__django-10880]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    nvidia/glm-5.1: permanent error (NVIDIA z-ai/glm5 HTTP 410: {"type":"about:blank","title":"Gone","status":410,"detail":"The model 'z-ai/glm5' has reached) — skipping retries, going to fallback[0m
+[matplotlib__matplotlib-13989]   [91m▸ ✗ nvidia/glm-5.1 unreachable. Falling back to nvidia/kimi-k2.6...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with kimi-k2.6...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:51] ─┐[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-pro: NVIDIA deepseek-ai/deepseek-v4-pro HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 1/3 in 2s...[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 1/3 in 2s...[0m
+[django__django-10880]   [96m▸ Thinking with kimi-k2.6...[0m
+[django__django-10880] 
+[django__django-10880] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:53] ─┐[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[django__django-10880] 
+[django__django-10880] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:53] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:53] ─┐[0m
+[django__django-10880]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with kimi-k2.6...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:53] ─┐[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    ⚠️  nvidia/kimi-k2.6: NVIDIA moonshotai/kimi-k2.6 HTTP 429: {"status":429,"title":"Too Many Requests"}. Retry 2/3 in 4s...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:53] ─┐[0m
+[django__django-10880]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[matplotlib__matplotlib-13989]   [93m▸ ⚠️    ⚠️  nvidia/deepseek-v4-flash: NVIDIA deepseek-ai/DeepSeek-V4-Flash HTTP 402: {"detail":{"error":"You need positive balance to do inference. Please add. Retry 2/3 in 4s...[0m
+[django__django-10880]   [96m▸ Thinking with kimi-k2.6...[0m
+[django__django-10880] 
+[django__django-10880] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:57] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with kimi-k2.6...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [97m┌─ kimi-k2.6 — planning (Layer 1) — R1  [22:45:57] ─┐[0m
+[django__django-10880]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[django__django-10880] 
+[django__django-10880] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:57] ─┐[0m
+[matplotlib__matplotlib-13989]   [91m▸ ✗ nvidia/kimi-k2.6 unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:57] ─┐[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[django__django-10880] 
+[django__django-10880] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:58] ─┐[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-flash...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [96m┌─ deepseek-v4-flash — planning (Layer 1) — R1  [22:45:58] ─┐[0m
+[django__django-10880]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[django__django-10880]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[django__django-10880] 
+[django__django-10880] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:58] ─┐[0m
+[matplotlib__matplotlib-13989]   [91m▸ ✗ nvidia/deepseek-v4-flash unreachable. Falling back to nvidia/deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Thinking with deepseek-v4-pro...[0m
+[matplotlib__matplotlib-13989] 
+[matplotlib__matplotlib-13989] [95m┌─ deepseek-v4-pro — planning (Layer 1) — R1  [22:45:58] ─┐[0m
+[django__django-10880]   [96m▸ Layer 1: 3 finished first, cancelled 1 stragglers[0m
+[django__django-10880]   [91m▸ ✗ Coding agent failed: All models failed in planning[0m
+[django__django-10880]   [91m▸ ✗ Traceback (most recent call last):
+[django__django-10880]   File "/home/pguilp25/jarvis/workflows/code.py", line 10596, in code_agent
+[django__django-10880]     plan, research_cache = await phase_plan(
+[django__django-10880]                            ^^^^^^^^^^^^^^^^^
+[django__django-10880]   File "/home/pguilp25/jarvis/workflows/code.py", line 7868, in phase_plan
+[django__django-10880]     raise RuntimeError("All models failed in planning")
+[django__django-10880] RuntimeError: All models failed in planning
+[django__django-10880] [0m
+[22:45:59] DONE   django__django-10880  elapsed=    82s  patch=     0B  ok
+[22:45:59] START  scikit-learn__scikit-learn-10297  (scikit-learn/scikit-learn)
+[scikit-learn__scikit-learn-10297]   [94m▸ ═══ CODING AGENT ═══[0m
+[scikit-learn__scikit-learn-10297]   [96m▸ Project: /home/pguilp25/.swebench_work/scikit-learn__scikit-learn-10297[0m
+[scikit-learn__scikit-learn-10297]   [96m▸ Complexity: 7[0m
+[scikit-learn__scikit-learn-10297]   [96m▸ Code map: 0 sections indexed[0m
+[scikit-learn__scikit-learn-10297]   [96m▸ Sandbox created: 1104 files copied to /home/pguilp25/.swebench_work/scikit-learn__scikit-learn-10297/.jarvis_sandbox[0m
+[scikit-learn__scikit-learn-10297]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[scikit-learn__scikit-learn-10297]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m
+[scikit-learn__scikit-learn-10297]   [93m▸ NVIDIA rate limit — waiting 40.4s...[0m
+[matplotlib__matplotlib-13989]   [96m▸ Layer 1: 3 finished first, cancelled 1 stragglers[0m
+[matplotlib__matplotlib-13989]   [91m▸ ✗ Coding agent failed: All models failed in planning[0m
+[matplotlib__matplotlib-13989]   [91m▸ ✗ Traceback (most recent call last):
+[matplotlib__matplotlib-13989]   File "/home/pguilp25/jarvis/workflows/code.py", line 10596, in code_agent
+[matplotlib__matplotlib-13989]     plan, research_cache = await phase_plan(
+[matplotlib__matplotlib-13989]                            ^^^^^^^^^^^^^^^^^
+[matplotlib__matplotlib-13989]   File "/home/pguilp25/jarvis/workflows/code.py", line 7868, in phase_plan
+[matplotlib__matplotlib-13989]     raise RuntimeError("All models failed in planning")
+[matplotlib__matplotlib-13989] RuntimeError: All models failed in planning
+[matplotlib__matplotlib-13989] [0m
+[22:46:00] DONE   matplotlib__matplotlib-13989  elapsed=    84s  patch=     0B  ok
+[22:46:00] START  sphinx-doc__sphinx-10323  (sphinx-doc/sphinx)
+[sphinx-doc__sphinx-10323]   [94m▸ ═══ CODING AGENT ═══[0m
+[sphinx-doc__sphinx-10323]   [96m▸ Project: /home/pguilp25/.swebench_work/sphinx-doc__sphinx-10323[0m
+[sphinx-doc__sphinx-10323]   [96m▸ Complexity: 7[0m
+[sphinx-doc__sphinx-10323]   [96m▸ Code map: 0 sections indexed[0m
+[sphinx-doc__sphinx-10323]   [96m▸ Sandbox created: 1577 files copied to /home/pguilp25/.swebench_work/sphinx-doc__sphinx-10323/.jarvis_sandbox[0m
+[sphinx-doc__sphinx-10323]   [94m▸ === Phase 2: PLAN [EXTENDED 3-layer] ===[0m
+[sphinx-doc__sphinx-10323]   [94m▸ Layer 1: 4 models racing (first 3 win)...[0m

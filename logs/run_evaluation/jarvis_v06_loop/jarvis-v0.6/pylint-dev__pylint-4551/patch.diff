@@ -1,0 +1,70 @@
+diff --git a/pylint/pyreverse/inspector.py b/pylint/pyreverse/inspector.py
+index 8fa122022..78e11eb61 100644
+--- a/pylint/pyreverse/inspector.py
++++ b/pylint/pyreverse/inspector.py
+@@ -166,6 +166,18 @@ class Linker(IdGeneratorMixIn, utils.LocalsVisitor):
+             for assignattr in assignattrs:
+                 if not isinstance(assignattr, astroid.Unknown):
+                     self.handle_assignattr_type(assignattr, node)
++        # handle annotation-only class attributes (PEP 526)
++        for stmt in node.body:
++            if isinstance(stmt, astroid.AnnAssign):
++                try:
++                    if isinstance(stmt.target, astroid.AssignName):
++                        target_name = stmt.target.name
++                        if stmt.annotation is not None:
++                            for inferred in stmt.annotation.infer():
++                                if inferred is not astroid.Uninferable:
++                                    node.locals_type[target_name].append(inferred)
++                except astroid.InferenceError:
++                    pass
+         # resolve implemented interface
+         try:
+             node.implements = list(interfaces(node, self.inherited_interfaces))
+@@ -222,6 +234,17 @@ class Linker(IdGeneratorMixIn, utils.LocalsVisitor):
+             frame.locals_type[node.name] = list(set(current) | values)
+         except astroid.InferenceError:
+             pass
++        try:
++            if isinstance(node.parent, astroid.AnnAssign):
++                annotation = node.parent.annotation
++                if annotation is not None:
++                    current = frame.locals_type.get(node.name, [])
++                    for inferred in annotation.infer():
++                        if inferred is not astroid.Uninferable:
++                            current.append(inferred)
++                    frame.locals_type[node.name] = current
++        except astroid.InferenceError:
++            pass
+ 
+     @staticmethod
+     def handle_assignattr_type(node, parent):
+@@ -235,6 +258,28 @@ class Linker(IdGeneratorMixIn, utils.LocalsVisitor):
+             parent.instance_attrs_type[node.attrname] = list(current | values)
+         except astroid.InferenceError:
+             pass
++        try:
++            assign = node.parent
++            if isinstance(assign, astroid.Assign):
++                if isinstance(assign.value, astroid.Name):
++                    func = assign.frame()
++                    if isinstance(func, astroid.FunctionDef):
++                        annotation = None
++                        for i, arg in enumerate(func.args.args):
++                            if arg.name == assign.value.name:
++                                annotation = func.args.annotations[i]
++                                break
++                        if annotation is None:
++                            for i, arg in enumerate(func.args.kwonlyargs):
++                                if arg.name == assign.value.name:
++                                    annotation = func.args.kwonlyargs_annotations[i]
++                                    break
++                        if annotation is not None:
++                            for inferred in annotation.infer():
++                                if inferred is not astroid.Uninferable:
++                                    parent.instance_attrs_type[node.attrname].append(inferred)
++        except astroid.InferenceError:
++            pass
+ 
+     def visit_import(self, node):
+         """visit an astroid.Import node

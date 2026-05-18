@@ -1,0 +1,67 @@
+2026-05-17 10:16:34,815 - INFO - Creating container for django__django-11964...
+2026-05-17 10:16:35,133 - INFO - Container for django__django-11964 created: 5860585159f19631fe903fd2f09e35008dacad8ccfbf35514704153d970a37df
+2026-05-17 10:16:35,610 - INFO - Container for django__django-11964 started: 5860585159f19631fe903fd2f09e35008dacad8ccfbf35514704153d970a37df
+2026-05-17 10:16:35,611 - INFO - Intermediate patch for django__django-11964 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11964/patch.diff, now applying to container...
+2026-05-17 10:16:35,781 - INFO - >>>>> Applied Patch:
+Checking patch django/db/models/query_utils.py...
+Applied patch django/db/models/query_utils.py cleanly.
+
+2026-05-17 10:16:36,490 - INFO - Git diff before:
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index 189fb4fa44..420a136dbb 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -6,6 +6,7 @@ large and/or so that they can be used by other modules without getting into
+ circular import difficulties.
+ """
+ import copy
++import enum
+ import functools
+ import inspect
+ from collections import namedtuple
+@@ -119,6 +120,11 @@ class DeferredAttribute:
+     def __init__(self, field):
+         self.field = field
+ 
++    def __set__(self, instance, value):
++        if isinstance(value, enum.Enum):
++            value = value.value
++        instance.__dict__[self.field.attname] = value
++
+     def __get__(self, instance, cls=None):
+         """
+         Retrieve and caches the value from the datastore on the first lookup.
+2026-05-17 10:16:36,490 - INFO - Eval script for django__django-11964 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11964/eval.sh; copying to container...
+2026-05-17 10:16:42,734 - INFO - Test runtime: 6.04 seconds
+2026-05-17 10:16:42,734 - INFO - Test output for django__django-11964 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11964/test_output.txt
+2026-05-17 10:16:43,001 - INFO - Git diff after:
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index 189fb4fa44..420a136dbb 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -6,6 +6,7 @@ large and/or so that they can be used by other modules without getting into
+ circular import difficulties.
+ """
+ import copy
++import enum
+ import functools
+ import inspect
+ from collections import namedtuple
+@@ -119,6 +120,11 @@ class DeferredAttribute:
+     def __init__(self, field):
+         self.field = field
+ 
++    def __set__(self, instance, value):
++        if isinstance(value, enum.Enum):
++            value = value.value
++        instance.__dict__[self.field.attname] = value
++
+     def __get__(self, instance, cls=None):
+         """
+         Retrieve and caches the value from the datastore on the first lookup.
+2026-05-17 10:16:43,001 - INFO - Grading answer for django__django-11964...
+2026-05-17 10:16:43,008 - INFO - report: {'django__django-11964': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_str (model_enums.tests.ChoicesTests)', 'test_textchoices (model_enums.tests.ChoicesTests)']}, 'PASS_TO_PASS': {'success': ['test_integerchoices (model_enums.tests.ChoicesTests)', 'test_integerchoices_auto_label (model_enums.tests.ChoicesTests)', 'test_integerchoices_containment (model_enums.tests.ChoicesTests)', 'test_integerchoices_empty_label (model_enums.tests.ChoicesTests)', 'test_integerchoices_functional_api (model_enums.tests.ChoicesTests)', 'test_invalid_definition (model_enums.tests.ChoicesTests)', 'test_textchoices_auto_label (model_enums.tests.ChoicesTests)', 'test_textchoices_blank_value (model_enums.tests.ChoicesTests)', 'test_textchoices_containment (model_enums.tests.ChoicesTests)', 'test_textchoices_empty_label (model_enums.tests.ChoicesTests)', 'test_textchoices_functional_api (model_enums.tests.ChoicesTests)', 'test_bool_unsupported (model_enums.tests.CustomChoicesTests)', 'test_labels_valid (model_enums.tests.CustomChoicesTests)', 'test_timezone_unsupported (model_enums.tests.CustomChoicesTests)', 'test_uuid_unsupported (model_enums.tests.CustomChoicesTests)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-11964: resolved: False
+2026-05-17 10:16:43,008 - INFO - Attempting to stop container sweb.eval.django__django-11964.jarvis_v10_full500...
+2026-05-17 10:16:58,735 - INFO - Attempting to remove container sweb.eval.django__django-11964.jarvis_v10_full500...
+2026-05-17 10:16:58,859 - INFO - Container sweb.eval.django__django-11964.jarvis_v10_full500 removed.

@@ -1,0 +1,19 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 844c01e95e..345991b4f8 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -569,6 +569,14 @@ class Model(metaclass=ModelBase):
+         return getattr(self, meta.pk.attname)
+ 
+     def _set_pk_val(self, value):
++        for parent_link in self._meta.parents.values():
++            if parent_link:
++                setattr(self, parent_link.attname, value)
++                field = parent_link.target_field
++                setattr(self, field.attname, value)
++                while getattr(getattr(field, 'remote_field', None), 'parent_link', False):
++                    field = field.target_field
++                    setattr(self, field.attname, value)
+         return setattr(self, self._meta.pk.attname, value)
+ 
+     pk = property(_get_pk_val, _set_pk_val)

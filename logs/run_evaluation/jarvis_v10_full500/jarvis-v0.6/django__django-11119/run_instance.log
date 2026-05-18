@@ -1,0 +1,45 @@
+2026-05-17 03:06:07,970 - INFO - Creating container for django__django-11119...
+2026-05-17 03:06:08,177 - INFO - Container for django__django-11119 created: 94c169b9288834741dafb5e44def6f8b33c6ddd04c3270916a18a9ea7430dd33
+2026-05-17 03:06:08,624 - INFO - Container for django__django-11119 started: 94c169b9288834741dafb5e44def6f8b33c6ddd04c3270916a18a9ea7430dd33
+2026-05-17 03:06:08,625 - INFO - Intermediate patch for django__django-11119 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11119/patch.diff, now applying to container...
+2026-05-17 03:06:08,801 - INFO - >>>>> Applied Patch:
+Checking patch django/template/engine.py...
+Applied patch django/template/engine.py cleanly.
+
+2026-05-17 03:06:09,417 - INFO - Git diff before:
+diff --git a/django/template/engine.py b/django/template/engine.py
+index dfaa67ba12..ff9ce58d59 100644
+--- a/django/template/engine.py
++++ b/django/template/engine.py
+@@ -160,7 +160,7 @@ class Engine:
+         if isinstance(context, Context):
+             return t.render(context)
+         else:
+-            return t.render(Context(context))
++            return t.render(Context(context, autoescape=self.autoescape))
+ 
+     def select_template(self, template_name_list):
+         """
+2026-05-17 03:06:09,417 - INFO - Eval script for django__django-11119 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11119/eval.sh; copying to container...
+2026-05-17 03:06:15,358 - INFO - Test runtime: 5.87 seconds
+2026-05-17 03:06:15,358 - INFO - Test output for django__django-11119 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11119/test_output.txt
+2026-05-17 03:06:15,505 - INFO - Git diff after:
+diff --git a/django/template/engine.py b/django/template/engine.py
+index dfaa67ba12..ff9ce58d59 100644
+--- a/django/template/engine.py
++++ b/django/template/engine.py
+@@ -160,7 +160,7 @@ class Engine:
+         if isinstance(context, Context):
+             return t.render(context)
+         else:
+-            return t.render(Context(context))
++            return t.render(Context(context, autoescape=self.autoescape))
+ 
+     def select_template(self, template_name_list):
+         """
+2026-05-17 03:06:15,505 - INFO - Grading answer for django__django-11119...
+2026-05-17 03:06:15,511 - INFO - report: {'django__django-11119': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_autoescape_off (template_tests.test_engine.RenderToStringTest)'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_cached_loader_priority (template_tests.test_engine.LoaderTests)', 'test_loader_priority (template_tests.test_engine.LoaderTests)', 'test_origin (template_tests.test_engine.LoaderTests)', 'test_basic_context (template_tests.test_engine.RenderToStringTest)', 'test_multiple_engines_configured (template_tests.test_engine.GetDefaultTests)', 'test_no_engines_configured (template_tests.test_engine.GetDefaultTests)', 'test_single_engine_configured (template_tests.test_engine.GetDefaultTests)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-11119: resolved: True
+2026-05-17 03:06:15,511 - INFO - Attempting to stop container sweb.eval.django__django-11119.jarvis_v10_full500...
+2026-05-17 03:06:31,184 - INFO - Attempting to remove container sweb.eval.django__django-11119.jarvis_v10_full500...
+2026-05-17 03:06:31,254 - INFO - Container sweb.eval.django__django-11119.jarvis_v10_full500 removed.

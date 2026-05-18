@@ -1,0 +1,42 @@
+{
+    "total_instances": 2,
+    "submitted_instances": 17,
+    "completed_instances": 2,
+    "resolved_instances": 1,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 0,
+    "error_instances": 0,
+    "completed_ids": [
+        "django__django-15916",
+        "sphinx-doc__sphinx-10449"
+    ],
+    "incomplete_ids": [],
+    "empty_patch_ids": [],
+    "submitted_ids": [
+        "django__django-11299",
+        "django__django-11551",
+        "django__django-11749",
+        "django__django-12143",
+        "django__django-12193",
+        "django__django-13012",
+        "django__django-14493",
+        "django__django-14672",
+        "django__django-15916",
+        "django__django-16082",
+        "pydata__xarray-6938",
+        "pytest-dev__pytest-5262",
+        "scikit-learn__scikit-learn-14629",
+        "sphinx-doc__sphinx-10449",
+        "sphinx-doc__sphinx-8459",
+        "sphinx-doc__sphinx-9281",
+        "sympy__sympy-20916"
+    ],
+    "resolved_ids": [
+        "sphinx-doc__sphinx-10449"
+    ],
+    "unresolved_ids": [
+        "django__django-15916"
+    ],
+    "error_ids": [],
+    "schema_version": 2
+}

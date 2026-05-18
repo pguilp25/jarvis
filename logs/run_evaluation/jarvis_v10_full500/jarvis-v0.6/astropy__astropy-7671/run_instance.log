@@ -1,0 +1,93 @@
+2026-05-17 01:16:30,239 - INFO - Creating container for astropy__astropy-7671...
+2026-05-17 01:16:30,361 - INFO - Container for astropy__astropy-7671 created: f2b6fb7f99db1d1cd913b1b25904ba8ca306e996b275d60ef1ed8608a646b316
+2026-05-17 01:16:30,761 - INFO - Container for astropy__astropy-7671 started: f2b6fb7f99db1d1cd913b1b25904ba8ca306e996b275d60ef1ed8608a646b316
+2026-05-17 01:16:30,761 - INFO - Intermediate patch for astropy__astropy-7671 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7671/patch.diff, now applying to container...
+2026-05-17 01:16:30,919 - INFO - >>>>> Applied Patch:
+Checking patch astropy/utils/introspection.py...
+Applied patch astropy/utils/introspection.py cleanly.
+
+2026-05-17 01:16:31,321 - INFO - Git diff before:
+diff --git a/astropy/utils/introspection.py b/astropy/utils/introspection.py
+index 3e784f9fc..14c113a59 100644
+--- a/astropy/utils/introspection.py
++++ b/astropy/utils/introspection.py
+@@ -6,6 +6,7 @@
+ import inspect
+ import types
+ import importlib
++import re
+ from distutils.version import LooseVersion
+ 
+ 
+@@ -15,6 +16,14 @@ __all__ = ['resolve_name', 'minversion', 'find_current_module',
+ 
+ __doctest_skip__ = ['find_current_module']
+ 
++# Regex to strip PEP 440 pre-release and post-release qualifiers from
++# version strings before LooseVersion comparison. This works around a bug
++# in LooseVersion (Python bug #30272) where comparing mixed int/str version
++# components raises TypeError. The regex matches optional dot prefix,
++# qualifier keywords (dev, rc, alpha, beta, post, a, b), optional trailing
++# digits, and end-of-string anchor.
++_version_regex = re.compile(r'(\.?(dev|rc|alpha|beta|post|a|b)\d*)$', re.IGNORECASE)
++
+ 
+ def resolve_name(name, *additional_parts):
+     """Resolve a name like ``module.object`` to an object and return it.
+@@ -139,6 +148,9 @@ def minversion(module, version, inclusive=True, version_path='__version__'):
+     else:
+         have_version = resolve_name(module.__name__, version_path)
+ 
++    have_version = _version_regex.sub('', have_version)
++    version = _version_regex.sub('', version)
++
+     if inclusive:
+         return LooseVersion(have_version) >= LooseVersion(version)
+     else:
+2026-05-17 01:16:31,321 - INFO - Eval script for astropy__astropy-7671 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7671/eval.sh; copying to container...
+2026-05-17 01:16:35,372 - INFO - Test runtime: 4.01 seconds
+2026-05-17 01:16:35,372 - INFO - Test output for astropy__astropy-7671 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7671/test_output.txt
+2026-05-17 01:16:35,440 - INFO - Git diff after:
+diff --git a/astropy/utils/introspection.py b/astropy/utils/introspection.py
+index 3e784f9fc..14c113a59 100644
+--- a/astropy/utils/introspection.py
++++ b/astropy/utils/introspection.py
+@@ -6,6 +6,7 @@
+ import inspect
+ import types
+ import importlib
++import re
+ from distutils.version import LooseVersion
+ 
+ 
+@@ -15,6 +16,14 @@ __all__ = ['resolve_name', 'minversion', 'find_current_module',
+ 
+ __doctest_skip__ = ['find_current_module']
+ 
++# Regex to strip PEP 440 pre-release and post-release qualifiers from
++# version strings before LooseVersion comparison. This works around a bug
++# in LooseVersion (Python bug #30272) where comparing mixed int/str version
++# components raises TypeError. The regex matches optional dot prefix,
++# qualifier keywords (dev, rc, alpha, beta, post, a, b), optional trailing
++# digits, and end-of-string anchor.
++_version_regex = re.compile(r'(\.?(dev|rc|alpha|beta|post|a|b)\d*)$', re.IGNORECASE)
++
+ 
+ def resolve_name(name, *additional_parts):
+     """Resolve a name like ``module.object`` to an object and return it.
+@@ -139,6 +148,9 @@ def minversion(module, version, inclusive=True, version_path='__version__'):
+     else:
+         have_version = resolve_name(module.__name__, version_path)
+ 
++    have_version = _version_regex.sub('', have_version)
++    version = _version_regex.sub('', version)
++
+     if inclusive:
+         return LooseVersion(have_version) >= LooseVersion(version)
+     else:
+2026-05-17 01:16:35,440 - INFO - Grading answer for astropy__astropy-7671...
+2026-05-17 01:16:35,441 - INFO - report: {'astropy__astropy-7671': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/utils/tests/test_introspection.py::test_minversion'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/utils/tests/test_introspection.py::test_pkg_finder', 'astropy/utils/tests/test_introspection.py::test_find_current_mod', 'astropy/utils/tests/test_introspection.py::test_find_mod_objs'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-7671: resolved: True
+2026-05-17 01:16:35,441 - INFO - Attempting to stop container sweb.eval.astropy__astropy-7671.jarvis_v10_full500...
+2026-05-17 01:16:50,765 - INFO - Attempting to remove container sweb.eval.astropy__astropy-7671.jarvis_v10_full500...
+2026-05-17 01:16:50,832 - INFO - Container sweb.eval.astropy__astropy-7671.jarvis_v10_full500 removed.

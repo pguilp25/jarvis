@@ -100,11 +100,13 @@ BEST_PAIRS = {
 # ─── Fallback Maps ───────────────────────────────────────────────────────────
 
 NVIDIA_FALLBACKS = {
+    # DeepSeek endpoints unresponsive 2026-05-18 — route both to glm-5.1.
     "nvidia/deepseek-v4-pro":   "nvidia/glm-5.1",
-    "nvidia/deepseek-v4-flash": "nvidia/deepseek-v4-pro",
+    "nvidia/deepseek-v4-flash": "nvidia/glm-5.1",
     "nvidia/glm-5":             "nvidia/glm-5.1",
     "nvidia/glm-5.1":           "nvidia/kimi-k2.6",
-    "nvidia/kimi-k2.6":         "nvidia/deepseek-v4-pro",
+    # Skip deepseek-v4-pro when kimi fails — was wasting 30s per call.
+    "nvidia/kimi-k2.6":         "nvidia/glm-5.1",
     "nvidia/nemotron-super":    "nvidia/kimi-k2.6",
 }
 

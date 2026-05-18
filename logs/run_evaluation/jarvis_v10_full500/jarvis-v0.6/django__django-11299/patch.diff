@@ -1,0 +1,49 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index b99f03cd88..649aa0fd5f 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1338,7 +1338,8 @@ class Query(BaseExpression):
+             if isinstance(child, Node):
+                 child_clause, needed_inner = self._add_q(
+                     child, used_aliases, branch_negated,
+-                    current_negated, allow_joins, split_subq)
++                    current_negated, allow_joins, split_subq,
++                    simple_col=simple_col)
+                 joinpromoter.add_votes(needed_inner)
+             else:
+                 child_clause, needed_inner = self.build_filter(
+diff --git a/tests/queries/test_query.py b/tests/queries/test_query.py
+index bef79c992e..46ed3570ce 100644
+--- a/tests/queries/test_query.py
++++ b/tests/queries/test_query.py
+@@ -7,7 +7,7 @@ from django.db.models.fields.related_lookups import RelatedIsNull
+ from django.db.models.functions import Lower
+ from django.db.models.lookups import Exact, GreaterThan, IsNull, LessThan
+ from django.db.models.sql.query import Query
+-from django.db.models.sql.where import OR
++from django.db.models.sql.where import AND, OR
+ from django.test import SimpleTestCase
+ from django.test.utils import register_lookup
+ 
+@@ -91,3 +91,21 @@ class TestQuery(SimpleTestCase):
+         self.assertIsInstance(b_isnull, RelatedIsNull)
+         self.assertIsInstance(b_isnull.lhs, SimpleCol)
+         self.assertEqual(b_isnull.lhs.target, ObjectC._meta.get_field('objectb'))
++
++    def test_combined_q_object(self):
++        query = Query(Item)
++        where = query.build_where(
++            Q(modified__isnull=False, created__isnull=False) |
++            Q(modified__isnull=True)
++        )
++        self.assertEqual(where.connector, OR)
++        and_node = where.children[0]
++        self.assertEqual(and_node.connector, AND)
++        lookup_1 = and_node.children[0]
++        self.assertIsInstance(lookup_1, IsNull)
++        self.assertIsInstance(lookup_1.lhs, SimpleCol)
++        self.assertEqual(lookup_1.lhs.target, Item._meta.get_field('modified'))
++        lookup_2 = and_node.children[1]
++        self.assertIsInstance(lookup_2, IsNull)
++        self.assertIsInstance(lookup_2.lhs, SimpleCol)
++        self.assertEqual(lookup_2.lhs.target, Item._meta.get_field('created'))

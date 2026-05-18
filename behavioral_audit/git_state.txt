@@ -1,0 +1,5 @@
+e9f873e Fix: NVIDIA retired z-ai/glm5 on 2026-05-18 — update to z-ai/glm-5.1
+da98825 Behavioral audit: add SCENARIO TRACE gates for FIX tasks
+f58b46c Aerospace audit batch 24 (FINAL): 305 integration-pipeline fuzz tests
+db37181 Aerospace audit batch 23: 1176 fuzz tests — Sandbox + misc utility functions
+edbf4af Aerospace audit batch 22: 707 fuzz tests — insert-anchor + deletion-guard

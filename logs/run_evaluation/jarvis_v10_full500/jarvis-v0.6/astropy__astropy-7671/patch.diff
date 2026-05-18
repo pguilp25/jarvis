@@ -1,0 +1,37 @@
+diff --git a/astropy/utils/introspection.py b/astropy/utils/introspection.py
+index 3e784f9fc3..14c113a591 100644
+--- a/astropy/utils/introspection.py
++++ b/astropy/utils/introspection.py
+@@ -6,6 +6,7 @@
+ import inspect
+ import types
+ import importlib
++import re
+ from distutils.version import LooseVersion
+ 
+ 
+@@ -15,6 +16,14 @@ __all__ = ['resolve_name', 'minversion', 'find_current_module',
+ 
+ __doctest_skip__ = ['find_current_module']
+ 
++# Regex to strip PEP 440 pre-release and post-release qualifiers from
++# version strings before LooseVersion comparison. This works around a bug
++# in LooseVersion (Python bug #30272) where comparing mixed int/str version
++# components raises TypeError. The regex matches optional dot prefix,
++# qualifier keywords (dev, rc, alpha, beta, post, a, b), optional trailing
++# digits, and end-of-string anchor.
++_version_regex = re.compile(r'(\.?(dev|rc|alpha|beta|post|a|b)\d*)$', re.IGNORECASE)
++
+ 
+ def resolve_name(name, *additional_parts):
+     """Resolve a name like ``module.object`` to an object and return it.
+@@ -139,6 +148,9 @@ def minversion(module, version, inclusive=True, version_path='__version__'):
+     else:
+         have_version = resolve_name(module.__name__, version_path)
+ 
++    have_version = _version_regex.sub('', have_version)
++    version = _version_regex.sub('', version)
++
+     if inclusive:
+         return LooseVersion(have_version) >= LooseVersion(version)
+     else:

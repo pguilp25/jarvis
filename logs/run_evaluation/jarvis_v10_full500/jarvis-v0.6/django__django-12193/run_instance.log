@@ -1,0 +1,43 @@
+2026-05-17 10:06:16,165 - INFO - Creating container for django__django-12193...
+2026-05-17 10:06:16,376 - INFO - Container for django__django-12193 created: 5e8e76f200ca16491862732716aa0e173f1c9d5489954e30cd4d706d56f9032a
+2026-05-17 10:06:17,017 - INFO - Container for django__django-12193 started: 5e8e76f200ca16491862732716aa0e173f1c9d5489954e30cd4d706d56f9032a
+2026-05-17 10:06:17,019 - INFO - Intermediate patch for django__django-12193 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12193/patch.diff, now applying to container...
+2026-05-17 10:06:17,207 - INFO - >>>>> Applied Patch:
+Checking patch django/forms/widgets.py...
+Applied patch django/forms/widgets.py cleanly.
+
+2026-05-17 10:06:17,853 - INFO - Git diff before:
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 6fe220bea7..ddd052be8d 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -524,6 +524,8 @@ class CheckboxInput(Input):
+         if self.check_test(value):
+             if attrs is None:
+                 attrs = {}
++            else:
++                attrs = attrs.copy()
+             attrs['checked'] = True
+         return super().get_context(name, value, attrs)
+2026-05-17 10:06:17,853 - INFO - Eval script for django__django-12193 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12193/eval.sh; copying to container...
+2026-05-17 10:06:23,484 - INFO - Test runtime: 5.58 seconds
+2026-05-17 10:06:23,484 - INFO - Test output for django__django-12193 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12193/test_output.txt
+2026-05-17 10:06:23,541 - INFO - Git diff after:
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 6fe220bea7..ddd052be8d 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -524,6 +524,8 @@ class CheckboxInput(Input):
+         if self.check_test(value):
+             if attrs is None:
+                 attrs = {}
++            else:
++                attrs = attrs.copy()
+             attrs['checked'] = True
+         return super().get_context(name, value, attrs)
+2026-05-17 10:06:23,541 - INFO - Grading answer for django__django-12193...
+2026-05-17 10:06:23,544 - INFO - report: {'django__django-12193': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_get_context_does_not_mutate_attrs (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_render_check_exception (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_check_test (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_empty (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_false (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_int (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_none (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_true (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_render_value (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_value_from_datadict (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_value_from_datadict_string_int (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)', 'test_value_omitted_from_data (forms_tests.widget_tests.test_checkboxinput.CheckboxInputTest)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-12193: resolved: True
+2026-05-17 10:06:23,544 - INFO - Attempting to stop container sweb.eval.django__django-12193.jarvis_v10_full500...
+2026-05-17 10:06:38,935 - INFO - Attempting to remove container sweb.eval.django__django-12193.jarvis_v10_full500...
+2026-05-17 10:06:38,993 - INFO - Container sweb.eval.django__django-12193.jarvis_v10_full500 removed.

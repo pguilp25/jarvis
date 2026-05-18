@@ -1,0 +1,71 @@
+2026-05-17 01:04:30,838 - INFO - Creating container for astropy__astropy-7166...
+2026-05-17 01:04:31,092 - INFO - Container for astropy__astropy-7166 created: 754449d3fe46bd989d3baf95e6847d28366502cb001a03bb50ee153f16c42e63
+2026-05-17 01:04:31,871 - INFO - Container for astropy__astropy-7166 started: 754449d3fe46bd989d3baf95e6847d28366502cb001a03bb50ee153f16c42e63
+2026-05-17 01:04:31,872 - INFO - Intermediate patch for astropy__astropy-7166 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7166/patch.diff, now applying to container...
+2026-05-17 01:04:32,016 - INFO - >>>>> Applied Patch:
+Checking patch astropy/utils/misc.py...
+Applied patch astropy/utils/misc.py cleanly.
+
+2026-05-17 01:04:32,332 - INFO - Git diff before:
+diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py
+index de3fb01d1..c4602489b 100644
+--- a/astropy/utils/misc.py
++++ b/astropy/utils/misc.py
+@@ -496,9 +496,9 @@ def did_you_mean(s, candidates, n=3, cutoff=0.8, fix=None):
+ 
+ class InheritDocstrings(type):
+     """
+-    This metaclass makes methods of a class automatically have their
+-    docstrings filled in from the methods they override in the base
+-    class.
++    This metaclass makes methods and properties of a class automatically
++    have their docstrings filled in from the methods they override in
++    the base class.
+ 
+     If the class uses multiple inheritance, the docstring will be
+     chosen from the first class in the bases list, in the same way as
+@@ -528,7 +528,7 @@ class InheritDocstrings(type):
+                 not key.startswith('_'))
+ 
+         for key, val in dct.items():
+-            if (inspect.isfunction(val) and
++            if ((inspect.isfunction(val) or isinstance(val, property)) and
+                 is_public_member(key) and
+                 val.__doc__ is None):
+                 for base in cls.__mro__[1:]:
+2026-05-17 01:04:32,332 - INFO - Eval script for astropy__astropy-7166 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7166/eval.sh; copying to container...
+2026-05-17 01:04:35,935 - INFO - Test runtime: 3.55 seconds
+2026-05-17 01:04:35,935 - INFO - Test output for astropy__astropy-7166 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/astropy__astropy-7166/test_output.txt
+2026-05-17 01:04:35,979 - INFO - Git diff after:
+diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py
+index de3fb01d1..c4602489b 100644
+--- a/astropy/utils/misc.py
++++ b/astropy/utils/misc.py
+@@ -496,9 +496,9 @@ def did_you_mean(s, candidates, n=3, cutoff=0.8, fix=None):
+ 
+ class InheritDocstrings(type):
+     """
+-    This metaclass makes methods of a class automatically have their
+-    docstrings filled in from the methods they override in the base
+-    class.
++    This metaclass makes methods and properties of a class automatically
++    have their docstrings filled in from the methods they override in
++    the base class.
+ 
+     If the class uses multiple inheritance, the docstring will be
+     chosen from the first class in the bases list, in the same way as
+@@ -528,7 +528,7 @@ class InheritDocstrings(type):
+                 not key.startswith('_'))
+ 
+         for key, val in dct.items():
+-            if (inspect.isfunction(val) and
++            if ((inspect.isfunction(val) or isinstance(val, property)) and
+                 is_public_member(key) and
+                 val.__doc__ is None):
+                 for base in cls.__mro__[1:]:
+2026-05-17 01:04:35,979 - INFO - Grading answer for astropy__astropy-7166...
+2026-05-17 01:04:35,981 - INFO - report: {'astropy__astropy-7166': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/utils/tests/test_misc.py::test_inherit_docstrings'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/utils/tests/test_misc.py::test_isiterable', 'astropy/utils/tests/test_misc.py::test_signal_number_to_name_no_failure', 'astropy/utils/tests/test_misc.py::test_skip_hidden', 'astropy/utils/tests/test_misc.py::test_JsonCustomEncoder', 'astropy/utils/tests/test_misc.py::test_check_broadcast', 'astropy/utils/tests/test_misc.py::test_dtype_bytes_or_chars'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-7166: resolved: True
+2026-05-17 01:04:35,981 - INFO - Attempting to stop container sweb.eval.astropy__astropy-7166.jarvis_v10_full500...
+2026-05-17 01:04:51,240 - INFO - Attempting to remove container sweb.eval.astropy__astropy-7166.jarvis_v10_full500...
+2026-05-17 01:04:51,290 - INFO - Container sweb.eval.astropy__astropy-7166.jarvis_v10_full500 removed.

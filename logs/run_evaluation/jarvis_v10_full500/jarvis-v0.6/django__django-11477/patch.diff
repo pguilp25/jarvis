@@ -1,0 +1,30 @@
+diff --git a/django/urls/resolvers.py b/django/urls/resolvers.py
+index af0508f94e..2a890a7ef6 100644
+--- a/django/urls/resolvers.py
++++ b/django/urls/resolvers.py
+@@ -605,6 +605,10 @@ class URLResolver:
+         if args and kwargs:
+             raise ValueError("Don't mix *args and **kwargs in call to reverse()!")
+ 
++        raw_args, raw_kwargs = args, kwargs
++        kwargs = {k: v for k, v in kwargs.items() if v is not None}
++        args = tuple(x for x in args if x is not None)
++
+         if not self._populated:
+             self._populate()
+ 
+@@ -651,10 +655,10 @@ class URLResolver:
+ 
+         patterns = [pattern for (_, pattern, _, _) in possibilities]
+         if patterns:
+-            if args:
+-                arg_msg = "arguments '%s'" % (args,)
+-            elif kwargs:
+-                arg_msg = "keyword arguments '%s'" % (kwargs,)
++            if raw_args:
++                arg_msg = "arguments '%s'" % (raw_args,)
++            elif raw_kwargs:
++                arg_msg = "keyword arguments '%s'" % (raw_kwargs,)
+             else:
+                 arg_msg = "no arguments"
+             msg = (

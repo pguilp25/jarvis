@@ -1,0 +1,31 @@
+diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py
+index ded609cbe9..fd9418b040 100644
+--- a/astropy/units/quantity.py
++++ b/astropy/units/quantity.py
+@@ -215,7 +215,7 @@ class Quantity(np.ndarray, metaclass=InheritDocstrings):
+     dtype : ~numpy.dtype, optional
+         The dtype of the resulting Numpy array or scalar that will
+         hold the value.  If not provided, it is determined from the input,
+-        except that any input that cannot represent float (integer and bool)
++        except that any non-inexact input (integer and bool)
+         is converted to float.
+ 
+     copy : bool, optional
+@@ -296,7 +296,7 @@ class Quantity(np.ndarray, metaclass=InheritDocstrings):
+                 if not copy:
+                     return value
+ 
+-                if not (np.can_cast(np.float32, value.dtype) or
++                if not (np.issubdtype(value.dtype, np.inexact) or
+                         value.dtype.fields):
+                     dtype = float
+ 
+@@ -377,7 +377,7 @@ class Quantity(np.ndarray, metaclass=InheritDocstrings):
+                             "Numpy numeric type.")
+ 
+         # by default, cast any integer, boolean, etc., to float
+-        if dtype is None and (not (np.can_cast(np.float32, value.dtype)
++        if dtype is None and (not (np.issubdtype(value.dtype, np.inexact)
+                                    or value.dtype.fields)
+                               or value.dtype.kind == 'O'):
+             value = value.astype(float)

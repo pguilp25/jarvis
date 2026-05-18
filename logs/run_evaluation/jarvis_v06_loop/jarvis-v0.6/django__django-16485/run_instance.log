@@ -1,0 +1,45 @@
+2026-05-15 21:08:12,942 - INFO - Creating container for django__django-16485...
+2026-05-15 21:08:13,076 - INFO - Container for django__django-16485 created: 8481ec006a1dd2a2e65aae8875692aca383b29794d9d87e4a1544ed82c5401e1
+2026-05-15 21:08:13,451 - INFO - Container for django__django-16485 started: 8481ec006a1dd2a2e65aae8875692aca383b29794d9d87e4a1544ed82c5401e1
+2026-05-15 21:08:13,451 - INFO - Intermediate patch for django__django-16485 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/django__django-16485/patch.diff, now applying to container...
+2026-05-15 21:08:13,604 - INFO - >>>>> Applied Patch:
+Checking patch django/template/defaultfilters.py...
+Applied patch django/template/defaultfilters.py cleanly.
+
+2026-05-15 21:08:14,343 - INFO - Git diff before:
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 23c3a08c67..7ace6675d5 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -183,7 +183,7 @@ def floatformat(text, arg=-1):
+     tupl = d.as_tuple()
+     units = len(tupl[1])
+     units += -tupl[2] if m else tupl[2]
+-    prec = abs(p) + units + 1
++    prec = max(abs(p) + units + 1, 1)
+ 
+     # Avoid conversion to scientific notation by accessing `sign`, `digits`,
+     # and `exponent` from Decimal.as_tuple() directly.
+2026-05-15 21:08:14,343 - INFO - Eval script for django__django-16485 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/django__django-16485/eval.sh; copying to container...
+2026-05-15 21:08:19,407 - INFO - Test runtime: 5.00 seconds
+2026-05-15 21:08:19,407 - INFO - Test output for django__django-16485 written to logs/run_evaluation/jarvis_v06_loop/jarvis-v0.6/django__django-16485/test_output.txt
+2026-05-15 21:08:19,480 - INFO - Git diff after:
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 23c3a08c67..7ace6675d5 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -183,7 +183,7 @@ def floatformat(text, arg=-1):
+     tupl = d.as_tuple()
+     units = len(tupl[1])
+     units += -tupl[2] if m else tupl[2]
+-    prec = abs(p) + units + 1
++    prec = max(abs(p) + units + 1, 1)
+ 
+     # Avoid conversion to scientific notation by accessing `sign`, `digits`,
+     # and `exponent` from Decimal.as_tuple() directly.
+2026-05-15 21:08:19,481 - INFO - Grading answer for django__django-16485...
+2026-05-15 21:08:19,482 - INFO - report: {'django__django-16485': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_zero_values (template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values)'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_floatformat01 (template_tests.filter_tests.test_floatformat.FloatformatTests.test_floatformat01)', 'test_floatformat02 (template_tests.filter_tests.test_floatformat.FloatformatTests.test_floatformat02)', 'test_float_dunder_method (template_tests.filter_tests.test_floatformat.FunctionTests.test_float_dunder_method)', 'test_force_grouping (template_tests.filter_tests.test_floatformat.FunctionTests.test_force_grouping)', 'test_infinity (template_tests.filter_tests.test_floatformat.FunctionTests.test_infinity)', 'test_inputs (template_tests.filter_tests.test_floatformat.FunctionTests.test_inputs)', '#15789', 'test_negative_zero_values (template_tests.filter_tests.test_floatformat.FunctionTests.test_negative_zero_values)', 'test_unlocalize (template_tests.filter_tests.test_floatformat.FunctionTests.test_unlocalize)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-16485: resolved: True
+2026-05-15 21:08:19,482 - INFO - Attempting to stop container sweb.eval.django__django-16485.jarvis_v06_loop...
+2026-05-15 21:08:34,951 - INFO - Attempting to remove container sweb.eval.django__django-16485.jarvis_v06_loop...
+2026-05-15 21:08:35,138 - INFO - Container sweb.eval.django__django-16485.jarvis_v06_loop removed.

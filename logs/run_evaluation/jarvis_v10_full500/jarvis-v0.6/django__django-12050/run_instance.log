@@ -1,0 +1,45 @@
+2026-05-17 09:25:29,244 - INFO - Creating container for django__django-12050...
+2026-05-17 09:25:29,367 - INFO - Container for django__django-12050 created: 0b51dad4d023121cbd30ea8a5777bb6beb35b72a90a28f084e5e2912d00bc4ed
+2026-05-17 09:25:29,903 - INFO - Container for django__django-12050 started: 0b51dad4d023121cbd30ea8a5777bb6beb35b72a90a28f084e5e2912d00bc4ed
+2026-05-17 09:25:29,904 - INFO - Intermediate patch for django__django-12050 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12050/patch.diff, now applying to container...
+2026-05-17 09:25:30,063 - INFO - >>>>> Applied Patch:
+Checking patch django/db/models/sql/query.py...
+Applied patch django/db/models/sql/query.py cleanly.
+
+2026-05-17 09:25:30,598 - INFO - Git diff before:
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index ea51912e8b..9f7b0bd95e 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1073,7 +1073,7 @@ class Query(BaseExpression):
+                         ))
+                 else:
+                     resolved_values.append(sub_value)
+-            value = tuple(resolved_values)
++            value = resolved_values if isinstance(value, list) else tuple(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+2026-05-17 09:25:30,598 - INFO - Eval script for django__django-12050 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12050/eval.sh; copying to container...
+2026-05-17 09:25:35,678 - INFO - Test runtime: 5.02 seconds
+2026-05-17 09:25:35,679 - INFO - Test output for django__django-12050 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-12050/test_output.txt
+2026-05-17 09:25:35,741 - INFO - Git diff after:
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index ea51912e8b..9f7b0bd95e 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1073,7 +1073,7 @@ class Query(BaseExpression):
+                         ))
+                 else:
+                     resolved_values.append(sub_value)
+-            value = tuple(resolved_values)
++            value = resolved_values if isinstance(value, list) else tuple(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+2026-05-17 09:25:35,742 - INFO - Grading answer for django__django-12050...
+2026-05-17 09:25:35,756 - INFO - report: {'django__django-12050': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_iterable_lookup_value (queries.test_query.TestQuery)'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_clone_select_related (queries.test_query.TestQuery)', 'test_complex_query (queries.test_query.TestQuery)', 'test_foreign_key (queries.test_query.TestQuery)', 'test_foreign_key_exclusive (queries.test_query.TestQuery)', 'test_foreign_key_f (queries.test_query.TestQuery)', 'test_multiple_fields (queries.test_query.TestQuery)', 'test_negated_nullable (queries.test_query.TestQuery)', 'test_simple_query (queries.test_query.TestQuery)', 'test_simplecol_query (queries.test_query.TestQuery)', 'test_transform (queries.test_query.TestQuery)'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-12050: resolved: True
+2026-05-17 09:25:35,756 - INFO - Attempting to stop container sweb.eval.django__django-12050.jarvis_v10_full500...
+2026-05-17 09:25:51,025 - INFO - Attempting to remove container sweb.eval.django__django-12050.jarvis_v10_full500...
+2026-05-17 09:25:51,105 - INFO - Container sweb.eval.django__django-12050.jarvis_v10_full500 removed.

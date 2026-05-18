@@ -1,0 +1,24 @@
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index 189fb4fa44..420a136dbb 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -6,6 +6,7 @@ large and/or so that they can be used by other modules without getting into
+ circular import difficulties.
+ """
+ import copy
++import enum
+ import functools
+ import inspect
+ from collections import namedtuple
+@@ -119,6 +120,11 @@ class DeferredAttribute:
+     def __init__(self, field):
+         self.field = field
+ 
++    def __set__(self, instance, value):
++        if isinstance(value, enum.Enum):
++            value = value.value
++        instance.__dict__[self.field.attname] = value
++
+     def __get__(self, instance, cls=None):
+         """
+         Retrieve and caches the value from the datastore on the first lookup.

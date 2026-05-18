@@ -1,0 +1,79 @@
+2026-05-17 04:38:34,017 - INFO - Creating container for django__django-11239...
+2026-05-17 04:38:34,314 - INFO - Container for django__django-11239 created: 414f36dfe979d2eaa37ec2533e60eebed050c27fa1d58c8b45d851fe63a1ec0f
+2026-05-17 04:38:34,752 - INFO - Container for django__django-11239 started: 414f36dfe979d2eaa37ec2533e60eebed050c27fa1d58c8b45d851fe63a1ec0f
+2026-05-17 04:38:34,753 - INFO - Intermediate patch for django__django-11239 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11239/patch.diff, now applying to container...
+2026-05-17 04:38:34,884 - INFO - >>>>> Applied Patch:
+Checking patch django/db/backends/postgresql/client.py...
+Applied patch django/db/backends/postgresql/client.py cleanly.
+
+2026-05-17 04:38:36,072 - INFO - Git diff before:
+diff --git a/django/db/backends/postgresql/client.py b/django/db/backends/postgresql/client.py
+index cf4df76882..1278eb2668 100644
+--- a/django/db/backends/postgresql/client.py
++++ b/django/db/backends/postgresql/client.py
+@@ -17,6 +17,10 @@ class DatabaseClient(BaseDatabaseClient):
+         dbname = conn_params.get('database', '')
+         user = conn_params.get('user', '')
+         passwd = conn_params.get('password', '')
++        sslmode = conn_params.get('sslmode', '')
++        sslcert = conn_params.get('sslcert', '')
++        sslkey = conn_params.get('sslkey', '')
++        sslrootcert = conn_params.get('sslrootcert', '')
+ 
+         if user:
+             args += ['-U', user]
+@@ -30,6 +34,14 @@ class DatabaseClient(BaseDatabaseClient):
+         subprocess_env = os.environ.copy()
+         if passwd:
+             subprocess_env['PGPASSWORD'] = str(passwd)
++        if sslmode:
++            subprocess_env['PGSSLMODE'] = str(sslmode)
++        if sslcert:
++            subprocess_env['PGSSLCERT'] = str(sslcert)
++        if sslkey:
++            subprocess_env['PGSSLKEY'] = str(sslkey)
++        if sslrootcert:
++            subprocess_env['PGSSLROOTCERT'] = str(sslrootcert)
+         try:
+             # Allow SIGINT to pass to psql to abort queries.
+             signal.signal(signal.SIGINT, signal.SIG_IGN)
+2026-05-17 04:38:36,072 - INFO - Eval script for django__django-11239 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11239/eval.sh; copying to container...
+2026-05-17 04:38:41,437 - INFO - Test runtime: 5.30 seconds
+2026-05-17 04:38:41,438 - INFO - Test output for django__django-11239 written to logs/run_evaluation/jarvis_v10_full500/jarvis-v0.6/django__django-11239/test_output.txt
+2026-05-17 04:38:41,572 - INFO - Git diff after:
+diff --git a/django/db/backends/postgresql/client.py b/django/db/backends/postgresql/client.py
+index cf4df76882..1278eb2668 100644
+--- a/django/db/backends/postgresql/client.py
++++ b/django/db/backends/postgresql/client.py
+@@ -17,6 +17,10 @@ class DatabaseClient(BaseDatabaseClient):
+         dbname = conn_params.get('database', '')
+         user = conn_params.get('user', '')
+         passwd = conn_params.get('password', '')
++        sslmode = conn_params.get('sslmode', '')
++        sslcert = conn_params.get('sslcert', '')
++        sslkey = conn_params.get('sslkey', '')
++        sslrootcert = conn_params.get('sslrootcert', '')
+ 
+         if user:
+             args += ['-U', user]
+@@ -30,6 +34,14 @@ class DatabaseClient(BaseDatabaseClient):
+         subprocess_env = os.environ.copy()
+         if passwd:
+             subprocess_env['PGPASSWORD'] = str(passwd)
++        if sslmode:
++            subprocess_env['PGSSLMODE'] = str(sslmode)
++        if sslcert:
++            subprocess_env['PGSSLCERT'] = str(sslcert)
++        if sslkey:
++            subprocess_env['PGSSLKEY'] = str(sslkey)
++        if sslrootcert:
++            subprocess_env['PGSSLROOTCERT'] = str(sslrootcert)
+         try:
+             # Allow SIGINT to pass to psql to abort queries.
+             signal.signal(signal.SIGINT, signal.SIG_IGN)
+2026-05-17 04:38:41,572 - INFO - Grading answer for django__django-11239...
+2026-05-17 04:38:41,584 - INFO - report: {'django__django-11239': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['test_ssl_certificate (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)'], 'failure': []}, 'PASS_TO_PASS': {'success': ['test_accent (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)', 'test_basic (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)', 'test_column (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)', 'test_nopass (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)', 'SIGINT is ignored in Python and passed to psql to abort quries.'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for django__django-11239: resolved: True
+2026-05-17 04:38:41,585 - INFO - Attempting to stop container sweb.eval.django__django-11239.jarvis_v10_full500...
+2026-05-17 04:38:57,535 - INFO - Attempting to remove container sweb.eval.django__django-11239.jarvis_v10_full500...
+2026-05-17 04:38:57,664 - INFO - Container sweb.eval.django__django-11239.jarvis_v10_full500 removed.

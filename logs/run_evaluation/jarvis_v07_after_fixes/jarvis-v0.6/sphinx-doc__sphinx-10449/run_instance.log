@@ -1,0 +1,45 @@
+2026-05-16 13:09:09,845 - INFO - Creating container for sphinx-doc__sphinx-10449...
+2026-05-16 13:09:09,994 - INFO - Container for sphinx-doc__sphinx-10449 created: 798187e9df287ff79854d23e8eb5bc1adf1a9c835961eb41d84b1b1840a9b3f2
+2026-05-16 13:09:10,307 - INFO - Container for sphinx-doc__sphinx-10449 started: 798187e9df287ff79854d23e8eb5bc1adf1a9c835961eb41d84b1b1840a9b3f2
+2026-05-16 13:09:10,307 - INFO - Intermediate patch for sphinx-doc__sphinx-10449 written to logs/run_evaluation/jarvis_v07_after_fixes/jarvis-v0.6/sphinx-doc__sphinx-10449/patch.diff, now applying to container...
+2026-05-16 13:09:10,445 - INFO - >>>>> Applied Patch:
+Checking patch sphinx/ext/autodoc/typehints.py...
+Applied patch sphinx/ext/autodoc/typehints.py cleanly.
+
+2026-05-16 13:09:10,668 - INFO - Git diff before:
+diff --git a/sphinx/ext/autodoc/typehints.py b/sphinx/ext/autodoc/typehints.py
+index 06768168e..d99b0ee30 100644
+--- a/sphinx/ext/autodoc/typehints.py
++++ b/sphinx/ext/autodoc/typehints.py
+@@ -28,7 +28,7 @@ def record_typehints(app: Sphinx, objtype: str, name: str, obj: Any,
+             for param in sig.parameters.values():
+                 if param.annotation is not param.empty:
+                     annotation[param.name] = typing.stringify(param.annotation, mode)
+-            if sig.return_annotation is not sig.empty:
++            if sig.return_annotation is not sig.empty and objtype not in ('class', 'exception'):
+                 annotation['return'] = typing.stringify(sig.return_annotation, mode)
+     except (TypeError, ValueError):
+         pass
+2026-05-16 13:09:10,668 - INFO - Eval script for sphinx-doc__sphinx-10449 written to logs/run_evaluation/jarvis_v07_after_fixes/jarvis-v0.6/sphinx-doc__sphinx-10449/eval.sh; copying to container...
+2026-05-16 13:09:15,248 - INFO - Test runtime: 4.53 seconds
+2026-05-16 13:09:15,248 - INFO - Test output for sphinx-doc__sphinx-10449 written to logs/run_evaluation/jarvis_v07_after_fixes/jarvis-v0.6/sphinx-doc__sphinx-10449/test_output.txt
+2026-05-16 13:09:15,331 - INFO - Git diff after:
+diff --git a/sphinx/ext/autodoc/typehints.py b/sphinx/ext/autodoc/typehints.py
+index 06768168e..d99b0ee30 100644
+--- a/sphinx/ext/autodoc/typehints.py
++++ b/sphinx/ext/autodoc/typehints.py
+@@ -28,7 +28,7 @@ def record_typehints(app: Sphinx, objtype: str, name: str, obj: Any,
+             for param in sig.parameters.values():
+                 if param.annotation is not param.empty:
+                     annotation[param.name] = typing.stringify(param.annotation, mode)
+-            if sig.return_annotation is not sig.empty:
++            if sig.return_annotation is not sig.empty and objtype not in ('class', 'exception'):
+                 annotation['return'] = typing.stringify(sig.return_annotation, mode)
+     except (TypeError, ValueError):
+         pass
+2026-05-16 13:09:15,331 - INFO - Grading answer for sphinx-doc__sphinx-10449...
+2026-05-16 13:09:15,339 - INFO - report: {'sphinx-doc__sphinx-10449': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_with_documented_init'], 'failure': []}, 'PASS_TO_PASS': {'success': ['tests/test_ext_autodoc_configs.py::test_autoclass_content_class', 'tests/test_ext_autodoc_configs.py::test_autoclass_content_init', 'tests/test_ext_autodoc_configs.py::test_autodoc_class_signature_mixed', 'tests/test_ext_autodoc_configs.py::test_autodoc_class_signature_separated_init', 'tests/test_ext_autodoc_configs.py::test_autodoc_class_signature_separated_new', 'tests/test_ext_autodoc_configs.py::test_autoclass_content_both', 'tests/test_ext_autodoc_configs.py::test_autodoc_inherit_docstrings', 'tests/test_ext_autodoc_configs.py::test_autodoc_docstring_signature', 'tests/test_ext_autodoc_configs.py::test_autoclass_content_and_docstring_signature_class', 'tests/test_ext_autodoc_configs.py::test_autoclass_content_and_docstring_signature_init', 'tests/test_ext_autodoc_configs.py::test_autoclass_content_and_docstring_signature_both', 'tests/test_ext_autodoc_configs.py::test_mocked_module_imports', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_signature', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_none', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_none_for_overload', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_no_undoc', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_no_undoc_doc_rtype', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_with_documented_init_no_undoc', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_with_documented_init_no_undoc_doc_rtype', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_for_invalid_node', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_both', 'tests/test_ext_autodoc_configs.py::test_autodoc_type_aliases', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_description_and_type_aliases', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_format_fully_qualified', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_format_fully_qualified_for_class_alias', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_format_fully_qualified_for_generic_alias', 'tests/test_ext_autodoc_configs.py::test_autodoc_typehints_format_fully_qualified_for_newtype_alias', 'tests/test_ext_autodoc_configs.py::test_autodoc_default_options', 'tests/test_ext_autodoc_configs.py::test_autodoc_default_options_with_values'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sphinx-doc__sphinx-10449: resolved: True
+2026-05-16 13:09:15,340 - INFO - Attempting to stop container sweb.eval.sphinx-doc__sphinx-10449.jarvis_v07_after_fixes...
+2026-05-16 13:09:30,678 - INFO - Attempting to remove container sweb.eval.sphinx-doc__sphinx-10449.jarvis_v07_after_fixes...
+2026-05-16 13:09:30,724 - INFO - Container sweb.eval.sphinx-doc__sphinx-10449.jarvis_v07_after_fixes removed.
