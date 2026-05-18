@@ -1729,32 +1729,6 @@ Walk through the user's experience after ALL steps are implemented:
   If your trace produces the wrong answer, fix the design before writing
   the plan. A wrong design implemented correctly is still wrong.
 
-  CHECK: For FIX tasks — TRACE THE FAILING SCENARIO. The single
-  highest-leverage check before [PLAN DONE]. Budget: ONE short
-  `[think]` block, not multiple rounds. Five lines suffice:
-
-    a) SCENARIO: the EXACT failing input (one sentence — repro snippet,
-       failing test input, or error trace). Concrete, not a category.
-    b) PRINCIPLE: the abstract property the buggy input violates
-       (one sentence — generalizes beyond the example).
-    c) SITES: walk the input through the affected file(s). List every
-       line where the principle could be violated. Don't dismiss any
-       without checking — "probably still works" without verification
-       is the failure mode this check exists to catch.
-    d) COVERAGE: confirm every listed site is addressed by a STEP.
-       If gaps remain, EXTEND the plan now.
-     e) OUTCOME: state in one line what the input produces after all
-       steps land. If you can't, go back to (c).
-
-  Two distinct failure shapes this catches:
-    • MULTI-SITE bugs (the principle violates at 2-N sites; shipping a
-      one-site fix leaves the rest broken).
-    • WRONG-SITE fixes (the chosen site doesn't actually appear on the
-      input's execution path; the buggy behavior emerges upstream).
-
-  Do this once; don't loop. Cost: ~30 seconds of [think]. Saves a
-  failed eval cycle.
-
 ## TEST CRITERIA
 Steps a human can run to verify the goal is achieved.
 Each test should map to one or more requirements.
@@ -3221,26 +3195,6 @@ edits, apply them, do the ONE verify read, then [DONE][CONFIRM_DONE].
        not the body's indent — results.append() after a for loop
        belongs at the for's level, not the for-body's level.
    If anything is at the wrong level, fix it before [DONE].
-
-7. SCENARIO TRACE — FIX tasks only, before [DONE] [CONFIRM_DONE]
-   (skip for ADD / REFACTOR / pure new-file work)
-   Byte-difference + indent checks catch "code is structurally valid";
-   this catches "code actually fixes the bug". Budget: ONE short
-   [think] block.
-
-   a) NAME the failing input in ONE concrete sentence (from the
-      user's repro / test / error trace — not a category).
-   b) WALK the patched code mentally through that input. At each
-      decision point ask: "Does this behave correctly NOW? Or could
-      the bug still emerge here?"
-   c) TRACE LANDS RIGHT → [DONE].
-   d) TRACE SURFACES A GAP:
-      - In this step's scope (same file/function the plan named) →
-        write the missing edit, repeat trace.
-      - Out of scope → write "MISSED SITE: file:func — <why>" in
-        your final [think] for the reviewer. Then [DONE].
-   e) Can't complete the trace? Fire [CODE: <test_file>] for the
-      assertion, then trace. Don't ship an untraced edit.
 
 ══════════════════════════════════════════════════════════════════════
 HARD RULES
