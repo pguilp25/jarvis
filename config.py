@@ -62,8 +62,9 @@ NVIDIA_MODEL_IDS = {
     "nvidia/deepseek-v4-pro":   "deepseek-ai/deepseek-v4-pro",
     "nvidia/deepseek-v4-flash": "deepseek-ai/deepseek-v4-flash",
     "nvidia/kimi-k2.6":         "moonshotai/kimi-k2.6",
-    "nvidia/glm-5":             "z-ai/glm5",
-    "nvidia/glm-5.1":           "z-ai/glm5",
+    # NVIDIA retired z-ai/glm5 on 2026-05-18T00:00Z. New ID is z-ai/glm-5.1.
+    "nvidia/glm-5":             "z-ai/glm-5.1",
+    "nvidia/glm-5.1":           "z-ai/glm-5.1",
     "nvidia/nemotron-super":    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/ultralong-8b":      "nvidia/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct",
 }
