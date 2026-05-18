@@ -37,9 +37,10 @@ DEEPINFRA_MODELS = {
 OPENROUTER_MODELS = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
     "minimax-m2.5":      "minimax/minimax-m2.5:free",
-    "glm-5":             "z-ai/glm-4.5-air:free",   # backup if NIM glm-5.1 fails
-    "glm-5.1":           "z-ai/glm-4.5-air:free",   # backup if NIM glm-5.1 fails
-    # No deepseek-v4-pro — no :free OR variant exists and paid is off-limits.
+    # User reported (2026-05-18 dashboard inspection): glm-4.5-air:free on
+    # OR is the source of free-tier 429 storms. glm-5.1 stays on NIM where
+    # it works reliably; do NOT route glm-* to OR.
+    # No deepseek-v4-pro — no :free OR variant and paid is off-limits.
     # No kimi-k2.6     — replaced by minimax-m2.5 in the planner pool.
 }
 
