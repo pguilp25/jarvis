@@ -17,6 +17,7 @@ from core.stream_guard import DegenerationDetector
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 LIGHTNING_API_URL = "https://lightning.ai/api/v1/chat/completions"
 DEEPINFRA_API_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
 # DeepInfra serves Pro FP4-quantized at only 66k context (vs 200k+ on NVIDIA
@@ -26,19 +27,44 @@ DEEPINFRA_MODELS = {
     "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
 }
 
+# OpenRouter slugs — added 2026-05-18 as primary fallback when NVIDIA NIM
+# hits account-level rate limits (the kind that don't recover in minutes).
+# Tested 2026-05-18: deepseek/glm/kimi all return 200 on a "hi" probe.
+OPENROUTER_MODELS = {
+    "deepseek-v4-pro":   "deepseek/deepseek-v4-pro",
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+    "glm-5":             "z-ai/glm-5.1",
+    "glm-5.1":           "z-ai/glm-5.1",
+    "kimi-k2.6":         "moonshotai/kimi-k2.6",
+}
 
 def _route(model_id: str) -> tuple[str, str, str]:
     """Pick endpoint, auth key, and provider-specific model slug.
 
     Priority per model:
-      1. DeepInfra — only for models in DEEPINFRA_MODELS (currently Flash,
+      1. OpenRouter (if JARVIS_PREFER_OPENROUTER=1 AND key is set AND model
+         is in OPENROUTER_MODELS) — covers the case where the user has
+         exhausted free-tier NIM quota or NIM endpoints are unhealthy.
+      2. DeepInfra — only for models in DEEPINFRA_MODELS (currently Flash,
          for its full 1M context). Skipped for Pro because DeepInfra
          FP4-quantizes Pro down to 66k.
-      2. Lightning AI — if LIGHTNING_API_KEY is set, much faster than
+      3. Lightning AI — if LIGHTNING_API_KEY is set, much faster than
          NVIDIA's free DGX Cloud which returns sporadic 504s under load.
-      3. NVIDIA — integrate.api.nvidia.com (free, occasionally flaky).
+      4. NVIDIA — integrate.api.nvidia.com (free, occasionally flaky).
+
+    Note: when NIM is the chosen route but the call fails, the retry layer
+    in core/retry.py honors the per-model fallback chain in
+    config.NVIDIA_FALLBACKS. To route a SPECIFIC failure to OpenRouter,
+    set JARVIS_PREFER_OPENROUTER=1 at runtime.
     """
     base = model_id.split("/", 1)[-1]
+
+    # Read env per-call (not at module load) so JARVIS_PREFER_OPENROUTER
+    # toggles take effect for processes that set it AFTER import.
+    prefer_or = os.environ.get("JARVIS_PREFER_OPENROUTER", "0") == "1"
+    orkey = os.environ.get("OPENROUTER_API_KEY", "")
+    if prefer_or and orkey and base in OPENROUTER_MODELS:
+        return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
 
     dkey = os.environ.get("DEEPINFRA_API_KEY", "")
     if dkey and base in DEEPINFRA_MODELS:
@@ -50,7 +76,14 @@ def _route(model_id: str) -> tuple[str, str, str]:
 
     nkey = os.environ.get("NVIDIA_API_KEY", "")
     if not nkey:
-        raise RuntimeError("None of DEEPINFRA_API_KEY / LIGHTNING_API_KEY / NVIDIA_API_KEY is set")
+        # As a last-resort, if OpenRouter is configured, use it even
+        # without the explicit JARVIS_PREFER_OPENROUTER flag.
+        if orkey and base in OPENROUTER_MODELS:
+            return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
+        raise RuntimeError(
+            "None of OPENROUTER_API_KEY / DEEPINFRA_API_KEY / "
+            "LIGHTNING_API_KEY / NVIDIA_API_KEY is set"
+        )
     return NVIDIA_API_URL, nkey, NVIDIA_MODEL_IDS.get(model_id, base)
 
 
