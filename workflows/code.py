@@ -63,27 +63,30 @@ from tools.sandbox import Sandbox
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 
+# Planner pool 2026-05-18: NIM deepseek-v4-{pro,flash} unresponsive,
+# kimi rate-limited. Replaced with OpenRouter :free models via the
+# OPENROUTER_FORCED routing in clients/nvidia.py.
+#   - nvidia/glm-5.1            → NIM (z-ai/glm-5.1)
+#   - nvidia/deepseek-v4-flash  → OR :free  (deepseek/deepseek-v4-flash:free)
+#   - nvidia/minimax-m2.5       → OR :free  (minimax/minimax-m2.5:free)
 UNDERSTAND_MODELS = [
-    "nvidia/deepseek-v4-pro",
     "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
+    "nvidia/minimax-m2.5",
 ]
 
 IMPLEMENT_MODEL = "nvidia/glm-5.1"
 
-# Active NVIDIA NIM models (4 distinct after the May 2026 swap that
-# replaced minimax-m2.7 → glm-5.1 and qwen-3.5 → deepseek-v4-flash).
 NVIDIA_5 = [
-    "nvidia/deepseek-v4-pro",
     "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
-    "nvidia/kimi-k2.6",
+    "nvidia/minimax-m2.5",
 ]
 
 NVIDIA_3 = [
-    "nvidia/deepseek-v4-pro",
     "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
+    "nvidia/minimax-m2.5",
 ]
 
 
@@ -7814,10 +7817,9 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     research_cache: dict[str, str] = {}
 
     PLAN_MODELS = [
-        "nvidia/deepseek-v4-pro",
-        "nvidia/deepseek-v4-flash",
-        "nvidia/glm-5.1",
-        "nvidia/kimi-k2.6",
+        "nvidia/deepseek-v4-flash",   # → OR :free  (NIM dead 2026-05-18)
+        "nvidia/glm-5.1",             # → NIM
+        "nvidia/minimax-m2.5",        # → OR :free  (replaces kimi-k2.6)
     ]
 
     cot = PLAN_COT_NEW if is_new_project else PLAN_COT_EXISTING

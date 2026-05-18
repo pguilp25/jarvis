@@ -25,6 +25,10 @@ MODELS = {
     "nvidia/deepseek-v4-pro":   {"window": 1_000_000, "tpm": None, "provider": "nvidia"},
     "nvidia/deepseek-v4-flash": {"window": 128_000, "tpm": None, "provider": "nvidia"},
     "nvidia/kimi-k2.6":         {"window": 256_000, "tpm": None, "provider": "nvidia"},
+    # minimax-m2.5 — actually routed to OpenRouter (:free) via
+    # OPENROUTER_FORCED. The "nvidia/" prefix is kept for callsite
+    # consistency with the rest of the planner pool.
+    "nvidia/minimax-m2.5":      {"window": 200_000, "tpm": None, "provider": "nvidia"},
     "nvidia/glm-5":             {"window": 200_000, "tpm": None, "provider": "nvidia"},
     "nvidia/glm-5.1":           {"window": 200_000, "tpm": None, "provider": "nvidia"},
     # nemotron-super kept as a fallback target only — active workflows now
@@ -65,6 +69,9 @@ NVIDIA_MODEL_IDS = {
     # NVIDIA retired z-ai/glm5 on 2026-05-18T00:00Z. New ID is z-ai/glm-5.1.
     "nvidia/glm-5":             "z-ai/glm-5.1",
     "nvidia/glm-5.1":           "z-ai/glm-5.1",
+    # minimax-m2.5: not hosted on NIM at all — OPENROUTER_FORCED routes it to
+    # OR :free. NIM_MODEL_IDS entry kept for callsite consistency.
+    "nvidia/minimax-m2.5":      "minimax/minimax-m2.5",
     "nvidia/nemotron-super":    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/ultralong-8b":      "nvidia/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct",
 }
@@ -100,12 +107,16 @@ BEST_PAIRS = {
 # ─── Fallback Maps ───────────────────────────────────────────────────────────
 
 NVIDIA_FALLBACKS = {
+    # 2026-05-18: NIM deepseek-v4-{pro,flash} unresponsive; kimi
+    # rate-limited. deepseek-v4-flash and minimax-m2.5 forced to OR :free
+    # by client routing. Fallback chain reflects that.
     "nvidia/deepseek-v4-pro":   "nvidia/glm-5.1",
-    "nvidia/deepseek-v4-flash": "nvidia/deepseek-v4-pro",
+    "nvidia/deepseek-v4-flash": "nvidia/minimax-m2.5",
     "nvidia/glm-5":             "nvidia/glm-5.1",
-    "nvidia/glm-5.1":           "nvidia/kimi-k2.6",
-    "nvidia/kimi-k2.6":         "nvidia/deepseek-v4-pro",
-    "nvidia/nemotron-super":    "nvidia/kimi-k2.6",
+    "nvidia/glm-5.1":           "nvidia/minimax-m2.5",
+    "nvidia/kimi-k2.6":         "nvidia/minimax-m2.5",
+    "nvidia/minimax-m2.5":      "nvidia/glm-5.1",
+    "nvidia/nemotron-super":    "nvidia/minimax-m2.5",
 }
 
 GROQ_FALLBACKS = {

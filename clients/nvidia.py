@@ -27,42 +27,55 @@ DEEPINFRA_MODELS = {
     "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
 }
 
-# OpenRouter slugs — added 2026-05-18 as primary fallback when NVIDIA NIM
-# hits account-level rate limits (the kind that don't recover in minutes).
-# Tested 2026-05-18: deepseek/glm/kimi all return 200 on a "hi" probe.
+# OpenRouter slugs — every entry MUST be a :free model (user-confirmed
+# constraint 2026-05-18: no paid OR usage). When NIM hosts the same
+# model, the routing prefers NIM unless the model is also in the
+# OPENROUTER_FORCED set (below), in which case OR is the primary route.
+#
+# Free-tier OR upstream rate-limits hit ~1 call/sec per model; the retry
+# layer in core/retry.py absorbs short 429 bursts.
 OPENROUTER_MODELS = {
-    "deepseek-v4-pro":   "deepseek/deepseek-v4-pro",
-    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "glm-5":             "z-ai/glm-5.1",
-    "glm-5.1":           "z-ai/glm-5.1",
-    "kimi-k2.6":         "moonshotai/kimi-k2.6",
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
+    "minimax-m2.5":      "minimax/minimax-m2.5:free",
+    "glm-5":             "z-ai/glm-4.5-air:free",   # backup if NIM glm-5.1 fails
+    "glm-5.1":           "z-ai/glm-4.5-air:free",   # backup if NIM glm-5.1 fails
+    # No deepseek-v4-pro — no :free OR variant exists and paid is off-limits.
+    # No kimi-k2.6     — replaced by minimax-m2.5 in the planner pool.
 }
+
+# Models that ALWAYS route via OpenRouter regardless of NVIDIA_API_KEY
+# presence — NIM endpoints for these are unresponsive 2026-05-18.
+OPENROUTER_FORCED = {
+    "deepseek-v4-flash",
+    "minimax-m2.5",
+}
+
 
 def _route(model_id: str) -> tuple[str, str, str]:
     """Pick endpoint, auth key, and provider-specific model slug.
 
     Priority per model:
-      1. OpenRouter (if JARVIS_PREFER_OPENROUTER=1 AND key is set AND model
-         is in OPENROUTER_MODELS) — covers the case where the user has
-         exhausted free-tier NIM quota or NIM endpoints are unhealthy.
-      2. DeepInfra — only for models in DEEPINFRA_MODELS (currently Flash,
-         for its full 1M context). Skipped for Pro because DeepInfra
-         FP4-quantizes Pro down to 66k.
-      3. Lightning AI — if LIGHTNING_API_KEY is set, much faster than
-         NVIDIA's free DGX Cloud which returns sporadic 504s under load.
-      4. NVIDIA — integrate.api.nvidia.com (free, occasionally flaky).
+      1. OPENROUTER_FORCED — these models go to OR :free regardless of
+         JARVIS_PREFER_OPENROUTER. Used when NIM is hosting a broken
+         endpoint (e.g. deepseek-v4-flash returning 300s ReadTimeout).
+      2. OpenRouter if JARVIS_PREFER_OPENROUTER=1 AND key is set AND
+         model is in OPENROUTER_MODELS — global fallback.
+      3. DeepInfra — only for models in DEEPINFRA_MODELS.
+      4. Lightning AI — if LIGHTNING_API_KEY is set.
+      5. NVIDIA NIM — integrate.api.nvidia.com (free, occasionally flaky).
 
-    Note: when NIM is the chosen route but the call fails, the retry layer
-    in core/retry.py honors the per-model fallback chain in
-    config.NVIDIA_FALLBACKS. To route a SPECIFIC failure to OpenRouter,
-    set JARVIS_PREFER_OPENROUTER=1 at runtime.
+    For routes that fail at call time, retry layer in core/retry.py
+    falls through to the per-model chain in config.NVIDIA_FALLBACKS.
     """
     base = model_id.split("/", 1)[-1]
-
-    # Read env per-call (not at module load) so JARVIS_PREFER_OPENROUTER
-    # toggles take effect for processes that set it AFTER import.
-    prefer_or = os.environ.get("JARVIS_PREFER_OPENROUTER", "0") == "1"
     orkey = os.environ.get("OPENROUTER_API_KEY", "")
+
+    # 1. Forced OR routes
+    if base in OPENROUTER_FORCED and orkey and base in OPENROUTER_MODELS:
+        return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
+
+    # 2. Global OR-preferred mode
+    prefer_or = os.environ.get("JARVIS_PREFER_OPENROUTER", "0") == "1"
     if prefer_or and orkey and base in OPENROUTER_MODELS:
         return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
 
@@ -76,8 +89,7 @@ def _route(model_id: str) -> tuple[str, str, str]:
 
     nkey = os.environ.get("NVIDIA_API_KEY", "")
     if not nkey:
-        # As a last-resort, if OpenRouter is configured, use it even
-        # without the explicit JARVIS_PREFER_OPENROUTER flag.
+        # Last-resort: try OR even without prefer flag.
         if orkey and base in OPENROUTER_MODELS:
             return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
         raise RuntimeError(
