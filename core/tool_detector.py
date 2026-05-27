@@ -49,10 +49,25 @@ from typing import Iterable
 # ─── Tag types we know about ────────────────────────────────────────────────
 # The ORDER here is the order we extract in; downstream stable iteration
 # depends on it (the per-round tag-count cap is applied per-list pro-rata).
+# NOTE: RUN is deliberately NOT a detector tag. [RUN: <cmd>] is free-form shell
+# that routinely contains `]` (list/dict literals, indexing `a[0]`, slices, regex
+# classes), which this detector's path-shaped-arg model + first-`]`-wins
+# extraction cannot represent. Like [VERIFY:], it is extracted by
+# core.review_verify.extract_run_cmds (bracket-balanced) and never passes here.
 KNOWN_TAG_TYPES = (
     "CODE", "VIEW", "KEEP", "REFS", "SEARCH", "WEBSEARCH",
     "DETAIL", "PURPOSE", "SEMANTIC", "LSP", "KNOWLEDGE", "DISCARD",
+    "DEPENDENCY",
 )
+
+# Common WRONG tool names a model reaches for out of habit from other
+# harnesses. We surface these as "unknown-tag-type" with a corrective hint
+# (e.g. READ→CODE, GREP→SEARCH) instead of letting the call vanish silently.
+# Restricted to this set so arbitrary `[Word: ...]` prose is NOT flagged.
+COMMON_WRONG_TOOLS = {
+    "READ", "OPEN", "CAT", "GET", "GREP", "FIND", "RG",
+    "LS", "LIST", "GLOB", "WRITE", "EDIT", "REPLACE", "GO", "BASH",
+}
 
 # Per-tag regex. Each pattern uses DOTALL so multi-line args
 # (`[CODE:\n  foo.py\n]`) match — the prior single-line regex was a silent
@@ -76,7 +91,10 @@ _TOOL_USE_CLOSE = re.compile(r'\[/tool\s*use\]', re.IGNORECASE)
 _MASK_PATTERNS: dict[str, re.Pattern] = {
     "code-fence":   re.compile(r'```.*?```', re.DOTALL),
     "backtick":     re.compile(r'`[^`\n]+`'),
-    "think-block":  re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE),
+    "think-block":  re.compile(
+        r'(?:<think>.*?</think>|\[think\].*?\[/think\])',
+        re.DOTALL | re.IGNORECASE,
+    ),
     # Edit-blocks (full FILE: ... END FILE, or EDIT: ... [/REPLACE]/[/INSERT])
     "edit-file":    re.compile(
         r'===\s*FILE:.*?===\s*END\s+FILE\s*===',
@@ -86,6 +104,15 @@ _MASK_PATTERNS: dict[str, re.Pattern] = {
         r'===\s*(?:EDIT|FILE):.*?'
         r'(?:\[/REPLACE\]|\[/INSERT\]|===\s*END\s+FILE\s*===)',
         re.DOTALL | re.IGNORECASE,
+    ),
+    # Format-B `=== EDIT: … === END EDIT ===` envelope: it holds `[edit:N]…[/edit]`
+    # blocks whose kept / `+` lines are FILE CONTENT, so a `[tool use]`/`[CODE:]`/
+    # `[RUN:]` quoted there must NOT fire. `=== END EDIT ===` is line-anchored
+    # (re.M, `^[ \t]*`) so a mid-line occurrence inside the content can't truncate
+    # the mask early. Additive — only masks tags that live inside an edit body.
+    "edit-envelope": re.compile(
+        r'===\s*EDIT:.*?^[ \t]*===\s*END\s+EDIT\s*===',
+        re.DOTALL | re.IGNORECASE | re.MULTILINE,
     ),
     # PLAN blocks — same mask reasoning as edit blocks. The body of the
     # plan is prose; anything inside that looks like a tool tag (e.g.,
@@ -180,6 +207,12 @@ def _validate_arg(tag_type: str, clean_arg: str) -> "str | None":
         # [DISCARD: #label] — arg must be a label
         if not re.match(r'^#?\w+$', clean_arg):
             return f"arg {clean_arg!r} not a #label"
+        return None
+    if tag_type == "DEPENDENCY":
+        # [DEPENDENCY: #a3f] — arg must be a 3-8 char hex tag, with or
+        # without leading `#`. Tags come from the inline VIEW annotation.
+        if not re.match(r'^#?[0-9a-fA-F]{3,8}$', clean_arg):
+            return f"arg {clean_arg!r} not a hex tag (expected #xxx form)"
         return None
     return f"unknown tag type {tag_type!r}"
 
@@ -356,7 +389,8 @@ class TagDetector:
             while k < n and self.text[k].isalpha():
                 k += 1
             name = self.text[j:k].upper()
-            if not name or name not in known_types_upper:
+            if not name or (name not in known_types_upper
+                            and name not in COMMON_WRONG_TOOLS):
                 i = br + 1
                 continue
             # require ':'
@@ -394,6 +428,11 @@ class TagDetector:
         mask = self._mask_reason_at(t.start)
         if mask is not None:
             return f"masked-by-{mask}"
+        # 2b. Unknown tool name (e.g. a habit name like READ/GREP). Reject
+        # regardless of placement so it surfaces with a corrective hint
+        # rather than firing or vanishing.
+        if t.tag_type not in KNOWN_TAG_TYPES:
+            return "unknown-tag-type"
         # 3. Tool-use enforcement
         if any_tool_use:
             if not self._in_tool_use(t.start):

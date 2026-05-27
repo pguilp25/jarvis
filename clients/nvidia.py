@@ -9,19 +9,178 @@ import os
 import asyncio
 import aiohttp
 from typing import Optional
-from config import NVIDIA_MODEL_IDS, NVIDIA_SLEEP_BETWEEN
+from config import NVIDIA_MODEL_IDS, NVIDIA_SLEEP_BETWEEN, STREAM_TTFT_TIMEOUT
 from core.cli import thinking, warn
 from core.rate_limiter import nvidia_limiter
 from core.stream_guard import DegenerationDetector
 
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+LIGHTNING_API_URL = "https://lightning.ai/api/v1/chat/completions"
+DEEPINFRA_API_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
+# DeepInfra serves Pro FP4-quantized at only 66k context (vs 200k+ on NVIDIA
+# and 1M native), so we keep Pro on NVIDIA/Lightning. Flash on DeepInfra
+# keeps the full 1M context, which is what we want for huge code repos.
+DEEPINFRA_MODELS = {
+    "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
+}
+
+# OpenRouter slugs — every entry MUST be a :free model (user-confirmed
+# constraint 2026-05-18: no paid OR usage). When NIM hosts the same
+# model, the routing prefers NIM unless the model is also in the
+# OPENROUTER_FORCED set (below), in which case OR is the primary route.
+#
+# Free-tier OR upstream rate-limits hit ~1 call/sec per model; the retry
+# layer in core/retry.py absorbs short 429 bursts.
+OPENROUTER_MODELS = {
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
+    "minimax-m2.5":      "minimax/minimax-m2.5:free",
+    # User reported (2026-05-18 dashboard inspection): glm-4.5-air:free on
+    # OR is the source of free-tier 429 storms. glm-5.1 stays on NIM where
+    # it works reliably; do NOT route glm-* to OR.
+    # No deepseek-v4-pro — no :free OR variant and paid is off-limits.
+    # No kimi-k2.6     — replaced by minimax-m2.5 in the planner pool.
+}
+
+# Models that ALWAYS route via OpenRouter regardless of NVIDIA_API_KEY
+# presence — NIM endpoints for these are unresponsive 2026-05-18.
+OPENROUTER_FORCED = {
+    "deepseek-v4-flash",
+    "minimax-m2.5",
+}
+
+# ── OpenRouter key pool ──────────────────────────────────────────────
+# The user runs TWO OpenRouter accounts. Free (:free) models are quota-
+# capped PER ACCOUNT: once a key's daily :free allotment is spent the
+# upstream provider returns HTTP 402 "Provider returned error" (observed
+# 1,178× in the v14 overnight run). retry.py then fell straight to a
+# weaker model, silently degrading planning/coding. Rotating round-robin
+# across both keys (a) doubles the effective free budget and (b) — paired
+# with the 3× same-model retry in core/retry.py — lets a 402'd call land
+# on the OTHER account and stay on the SAME model instead of degrading.
+# Keys come from OPENROUTER_API_KEYS (comma/space separated); falls back
+# to the single OPENROUTER_API_KEY. No paid usage — both keys hit :free.
+_OR_KEY_IDX = 0
+
+
+def _openrouter_keys() -> list[str]:
+    raw = (os.environ.get("OPENROUTER_API_KEYS", "").strip()
+           or os.environ.get("OPENROUTER_API_KEY", "").strip())
+    seen: set[str] = set()
+    keys: list[str] = []
+    for k in raw.replace(",", " ").split():
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
+
+
+def _next_openrouter_key() -> str:
+    """Round-robin the OpenRouter key pool. Each call advances the index
+    so consecutive retries of the same model land on different accounts.
+    asyncio is single-threaded and there is no await between the read and
+    the increment, so the bump is race-free across concurrent tasks."""
+    global _OR_KEY_IDX
+    keys = _openrouter_keys()
+    if not keys:
+        return ""
+    k = keys[_OR_KEY_IDX % len(keys)]
+    _OR_KEY_IDX += 1
+    return k
+
+
+def _route(model_id: str) -> tuple[str, str, str]:
+    """Pick endpoint, auth key, and provider-specific model slug.
+
+    Priority per model:
+      1. OPENROUTER_FORCED — these models go to OR :free regardless of
+         JARVIS_PREFER_OPENROUTER. Used when NIM is hosting a broken
+         endpoint (e.g. deepseek-v4-flash returning 300s ReadTimeout).
+      2. OpenRouter if JARVIS_PREFER_OPENROUTER=1 AND key is set AND
+         model is in OPENROUTER_MODELS — global fallback.
+      3. DeepInfra — only for models in DEEPINFRA_MODELS.
+      4. Lightning AI — if LIGHTNING_API_KEY is set.
+      5. NVIDIA NIM — integrate.api.nvidia.com (free, occasionally flaky).
+
+    For routes that fail at call time, retry layer in core/retry.py
+    falls through to the per-model chain in config.NVIDIA_FALLBACKS.
+    """
+    base = model_id.split("/", 1)[-1]
+    orkey = _next_openrouter_key()
+
+    # 1. Forced OR routes
+    if base in OPENROUTER_FORCED and orkey and base in OPENROUTER_MODELS:
+        return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
+
+    # 2. Global OR-preferred mode
+    prefer_or = os.environ.get("JARVIS_PREFER_OPENROUTER", "0") == "1"
+    if prefer_or and orkey and base in OPENROUTER_MODELS:
+        return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
+
+    dkey = os.environ.get("DEEPINFRA_API_KEY", "")
+    if dkey and base in DEEPINFRA_MODELS:
+        return DEEPINFRA_API_URL, dkey, DEEPINFRA_MODELS[base]
+
+    lkey = os.environ.get("LIGHTNING_API_KEY", "")
+    if lkey:
+        return LIGHTNING_API_URL, lkey, f"lightning-ai/{base}"
+
+    nkey = os.environ.get("NVIDIA_API_KEY", "")
+    if not nkey:
+        # Last-resort: try OR even without prefer flag.
+        if orkey and base in OPENROUTER_MODELS:
+            return OPENROUTER_API_URL, orkey, OPENROUTER_MODELS[base]
+        raise RuntimeError(
+            "None of OPENROUTER_API_KEY / DEEPINFRA_API_KEY / "
+            "LIGHTNING_API_KEY / NVIDIA_API_KEY is set"
+        )
+    return NVIDIA_API_URL, nkey, NVIDIA_MODEL_IDS.get(model_id, base)
 
 
 def _get_key() -> str:
+    # Kept for callers (clients/imagen.py) that still need the NVIDIA key directly.
     key = os.environ.get("NVIDIA_API_KEY", "")
     if not key:
         raise RuntimeError("NVIDIA_API_KEY not set")
     return key
+
+
+def _max_thinking_payload(model_id: str) -> dict:
+    """Per-model parameters that force the strongest available reasoning mode.
+
+    Defaults vary by provider/family:
+      • DeepSeek V4 Pro/Flash → `reasoning_effort: "high"` by default; "xhigh"
+        is the documented map for the "max" budget. We also set the explicit
+        `thinking: {type: enabled}` so hosts that key off it (rather than
+        reasoning_effort) still surface reasoning_content.
+      • Kimi K2.6 → thinking is ON by default; we still send the explicit
+        enable so a host that flipped the default doesn't silently disable it.
+      • GLM-5.1 → thinking is ON by default; same belt-and-suspenders
+        approach. We send the canonical `thinking` plus the vLLM-style
+        `chat_template_kwargs` so it works against either parser.
+
+    All values are OpenAI-compatible JSON fields. A host that does not
+    recognize a field generally ignores it; if a provider returns HTTP 400
+    on one of these, narrow this map for that model.
+    """
+    base = model_id.split("/", 1)[-1].lower()
+    if base.startswith("deepseek-v4"):
+        return {
+            "reasoning_effort": "xhigh",
+            "thinking": {"type": "enabled"},
+        }
+    if base.startswith("kimi-"):
+        return {
+            "thinking": {"type": "enabled"},
+        }
+    if base.startswith("glm-"):
+        return {
+            "thinking": {"type": "enabled"},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+    return {}
 
 
 async def call_nvidia(
@@ -39,7 +198,7 @@ async def call_nvidia(
     await nvidia_limiter.acquire()
     thinking(model_id)
 
-    api_model = NVIDIA_MODEL_IDS.get(model_id, model_id.split("/", 1)[-1])
+    url, key, api_model = _route(model_id)
 
     messages = []
     if system:
@@ -52,18 +211,19 @@ async def call_nvidia(
         "temperature": temperature,
         # Output-token floor — see call_nvidia_stream for rationale.
         "max_tokens": max(int(max_tokens), 4096),
+        **_max_thinking_payload(model_id),
     }
 
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
     headers = {
-        "Authorization": f"Bearer {_get_key()}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(NVIDIA_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
@@ -93,7 +253,7 @@ async def call_nvidia_stream(
     thinking(model_id)
     thought_logger.write_header(model_id, log_label)
 
-    api_model = NVIDIA_MODEL_IDS.get(model_id, model_id.split("/", 1)[-1])
+    url, key, api_model = _route(model_id)
 
     messages = []
     if system:
@@ -133,10 +293,11 @@ async def call_nvidia_stream(
         # message we can surface and handle.
         "max_tokens": max(int(max_tokens), 4096),
         "stream": True,
+        **_max_thinking_payload(model_id),
     }
 
     headers = {
-        "Authorization": f"Bearer {_get_key()}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
 
@@ -152,7 +313,7 @@ async def call_nvidia_stream(
     degen_guard = DegenerationDetector()
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            NVIDIA_API_URL, json=payload, headers=headers,
+            url, json=payload, headers=headers,
             timeout=aiohttp.ClientTimeout(total=3600),
         ) as resp:
             if resp.status != 200:
@@ -162,15 +323,13 @@ async def call_nvidia_stream(
             buf = b""
             done = False
             in_thinking_block = False
-            # Per-chunk idle timeout. NVIDIA NIM is genuinely slow — the
-            # first token can take up to ~10 minutes on a complex prompt,
-            # reasoning or not. The aiohttp `total` timeout is 1 hour so
-            # it can't catch a dead connection; we need a between-chunk
-            # cap that's still longer than NIM's worst legitimate wait.
-            # 10 min: tighter than the 1-hour total, slack enough that a
-            # slow first token (thinking or pre-token queue) doesn't trip
-            # it. Earlier 90s/300s caps killed legitimate slow starts.
-            STREAM_IDLE_TIMEOUT = 600.0
+            # Time-to-first-token / between-chunk idle cap — the uniform
+            # STREAM_TTFT_TIMEOUT (10 min, config.py). NIM is the canonical
+            # "hangs ~5 min then 504" provider; this watchdog turns that hang
+            # into a clean stall error that core/retry.py fails over on (to the
+            # NEXT model, not a re-queue of NIM). The aiohttp `total` is 1 hour
+            # so it can't catch a dead connection; this between-chunk cap does.
+            STREAM_IDLE_TIMEOUT = STREAM_TTFT_TIMEOUT
             while True:
                 try:
                     raw = await asyncio.wait_for(

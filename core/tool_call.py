@@ -76,6 +76,14 @@ STOP_TAG = re.compile(r'\[STOP\]\s*\[CONFIRM_STOP\]', re.IGNORECASE)
 # DONE signals the model is completely finished — apply edits and exit.
 # Same two-tag-combination robustness as STOP.
 DONE_TAG = re.compile(r'\[DONE\]\s*\[CONFIRM_DONE\]', re.IGNORECASE)
+# FORCE DONE — used by the coder when the step requirement is ALREADY MET
+# in the file and no edits are needed. Plain [DONE] without any edits
+# triggers a retry (the coder might just have forgotten to emit edits);
+# [FORCE DONE] is the explicit "I am intentionally producing no edits"
+# escape hatch. Same two-tag protocol.
+FORCE_DONE_TAG = re.compile(
+    r'\[FORCE\s+DONE\]\s*\[CONFIRM_FORCE_DONE\]', re.IGNORECASE,
+)
 # CONTINUE signals "I'm not done writing my output but I have no tool
 # calls — give me another round so I can finish." Used when a long plan,
 # review, or analysis would overflow a single response. The runtime
@@ -89,6 +97,9 @@ CONTINUE_TAG = re.compile(r'\[CONTINUE\]\s*\[CONFIRM_CONTINUE\]', re.IGNORECASE)
 _BARE_STOP = re.compile(r'(?<!\[)\[STOP\](?!\s*\[CONFIRM_STOP\])', re.IGNORECASE)
 _BARE_DONE = re.compile(r'(?<!\[)\[DONE\](?!\s*\[CONFIRM_DONE\])', re.IGNORECASE)
 _BARE_CONTINUE = re.compile(r'(?<!\[)\[CONTINUE\](?!\s*\[CONFIRM_CONTINUE\])', re.IGNORECASE)
+_BARE_FORCE_DONE = re.compile(
+    r'(?<!\[)\[FORCE\s+DONE\](?!\s*\[CONFIRM_FORCE_DONE\])', re.IGNORECASE,
+)
 _BARE_PLAN_DONE = re.compile(
     r'(?<!\[)\[PLAN\s+DONE\](?!\s*\[CONFIRM_PLAN_DONE\])', re.IGNORECASE,
 )
@@ -130,6 +141,30 @@ _PLAN_INSERT_AFTER = re.compile(
 PLAN_DONE_TAG = re.compile(
     r'\[PLAN\s+DONE\]\s*\[CONFIRM_PLAN_DONE\]', re.IGNORECASE,
 )
+
+# Both forms count as inline reasoning:
+#   <think>...</think>     — what the streaming clients wrap reasoning_content in
+#   [think]...[/think]     — a bracketed equivalent the model can emit directly
+# A model that lacks a reasoning channel (or whose channel is being lost across
+# rounds) can use [think]...[/think] and get the same handling: visible in the
+# stream, stripped from final plan body, never dispatched as a tool.
+_THINK_BLOCK = re.compile(
+    r'(?:<think>.*?</think>|\[think\].*?\[/think\])',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> and [think]...[/think] blocks so reasoning
+    never lands in the plan body.
+
+    The streaming clients wrap reasoning_content in <think>...</think> as it
+    arrives, and models without a reasoning channel can emit [think]...[/think]
+    directly. Either form gets stripped here so the plan body the coder
+    consumes stays clean — reasoning belongs in the reasoning channel, not
+    interleaved with REQUIREMENTS / STEPS.
+    """
+    return _THINK_BLOCK.sub('', text)
 
 
 def _apply_plan_edits(current_plan: str, edit_body: str) -> tuple[str, list[str]]:
@@ -216,6 +251,11 @@ def _norm_key(tag_type: str, clean_arg: str) -> str:
     s = clean_arg.strip().replace("\\", "/")
     while s.startswith("./"):
         s = s[2:]
+    # Re-strip after `./` removal — the path after the prefix may have
+    # had leading whitespace (e.g. `./ foo.py` from a model that double-
+    # spaced after the dot-slash). Without this, `./ foo.py` keyed
+    # differently from `foo.py`, breaking the equivalence class.
+    s = s.strip()
     # Collapse runs of internal whitespace to a single space so
     # `[KEEP: foo.py  10-20]` and `[KEEP: foo.py 10-20]` key the same.
     s = re.sub(r'\s+', ' ', s)
@@ -367,7 +407,11 @@ YOUR WORK SO FAR (continuous — you signaled [CONTINUE] for more space)
 
 _FENCED_CODE_BLOCK = re.compile(r'```.*?```', re.DOTALL)
 _INLINE_BACKTICK = re.compile(r'`[^`\n]+`')
-_THINK_BLOCK = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
+# Matches both reasoning forms — see _strip_think comment above for rationale.
+_THINK_BLOCK = re.compile(
+    r'(?:<think>.*?</think>|\[think\].*?\[/think\])',
+    re.DOTALL | re.IGNORECASE,
+)
 # Deliberate tool-use blocks: [tool use]...[/tool use]
 # When ANY such block is present in the response, ONLY tags inside these
 # blocks are executed — everything outside is treated as explanatory text.
@@ -401,7 +445,9 @@ _REPLACE_BLOCK = re.compile(r'\[REPLACE[^\]]*\](.*?)\[/REPLACE\]', re.DOTALL | r
 # [INSERT AFTER LINE N]...[/INSERT] — inserted code
 _INSERT_BLOCK = re.compile(r'\[INSERT[^\]]*\](.*?)\[/INSERT\]', re.DOTALL | re.IGNORECASE)
 # === EDIT/FILE: ... <terminator>. Terminator is one of:
-#   [/REPLACE]        — primary, closes a SEARCH/REPLACE edit block
+#   [/edit]           — primary (v11), closes an `[edit]…[/edit]` block
+#   === END EDIT ===  — v11 envelope close for `=== EDIT:`
+#   [/REPLACE]        — closes a SEARCH/REPLACE edit block (legacy/fallback)
 #   [/INSERT]         — closes an INSERT AFTER block
 #   === END FILE ===  — closes a `=== FILE:` new-file body
 # The cross-section fallback `(?===\s*(?:EDIT|FILE):)` was REMOVED because
@@ -409,8 +455,16 @@ _INSERT_BLOCK = re.compile(r'\[INSERT[^\]]*\](.*?)\[/INSERT\]', re.DOTALL | re.I
 # body terminated the span early.
 _EDIT_BLOCK_SPAN = re.compile(
     r'===\s*(?:EDIT|FILE):.*?'
-    r'(?:\[/REPLACE\]|\[/INSERT\]|===\s*END\s+FILE\s*===)',
+    r'(?:\[/edit\]|===\s*END\s+EDIT\s*===|\[/REPLACE\]|\[/INSERT\]|===\s*END\s+FILE\s*===)',
     re.DOTALL | re.IGNORECASE,
+)
+# Whole format-B `=== EDIT: … === END EDIT ===` envelope, masked so a signal /
+# tool tag quoted as FILE CONTENT inside an `[edit]` body can't fire. The END
+# EDIT is line-anchored (re.M) so a mid-line `[/edit]` / `=== END EDIT ===` in
+# the content can't truncate the mask early (the bug _EDIT_BLOCK_SPAN alone has).
+_EDIT_ENVELOPE_SPAN = re.compile(
+    r'===\s*EDIT:.*?^[ \t]*===\s*END\s+EDIT\s*===',
+    re.DOTALL | re.IGNORECASE | re.MULTILINE,
 )
 # Detectors for unterminated FILE / EDIT blocks — used to warn the model
 # when the strict terminator regexes above masked the rest of the response.
@@ -418,9 +472,169 @@ _FILE_HEADER = re.compile(r'===\s*FILE:\s*(\S+)', re.IGNORECASE)
 _EDIT_HEADER = re.compile(r'===\s*EDIT:\s*(\S+)', re.IGNORECASE)
 _FILE_TERMINATOR = re.compile(r'===\s*END\s+FILE\s*===', re.IGNORECASE)
 _EDIT_TERMINATOR = re.compile(
-    r'\[/REPLACE\]|\[/INSERT\]|===\s*END\s+FILE\s*===', re.IGNORECASE,
+    r'\[/edit\]|===\s*END\s+EDIT\s*===|\[/REPLACE\]|\[/INSERT\]|===\s*END\s+FILE\s*===',
+    re.IGNORECASE,
 )
 _BACKSLASH_BRACKET = re.compile(r'\\\[')
+
+# Plan-body spans — used by signal masking so that a planner writing a
+# `=== PLAN === ... === END PLAN ===` body that documents the JARVIS
+# signal protocol cannot accidentally fire its own [PLAN DONE] from
+# inside that body. The plan body is data (the artifact handed to the
+# coder); signals belong OUTSIDE it. Matched non-greedily and applied
+# in `_mask_quoted_tags_core` alongside the EDIT/FILE block masks.
+_PLAN_BLOCK_SPAN = re.compile(
+    r'===\s*PLAN\s*===.*?===\s*END\s+PLAN\s*===',
+    re.DOTALL | re.IGNORECASE,
+)
+_PLAN_EDIT_BLOCK_SPAN = re.compile(
+    r'===\s*PLAN_EDIT\s*===.*?===\s*END\s+PLAN_EDIT\s*===',
+    re.DOTALL | re.IGNORECASE,
+)
+_PLAN_OPEN = re.compile(r'===\s*PLAN\s*===', re.IGNORECASE)
+_PLAN_CLOSE = re.compile(r'===\s*END\s+PLAN\s*===', re.IGNORECASE)
+_PLAN_EDIT_OPEN = re.compile(r'===\s*PLAN_EDIT\s*===', re.IGNORECASE)
+_PLAN_EDIT_CLOSE = re.compile(r'===\s*END\s+PLAN_EDIT\s*===', re.IGNORECASE)
+
+# PLAN_DONE context validation. A PLAN_DONE pair fires only when it
+# appears in one of these structurally valid positions:
+#
+#   1. After `=== END PLAN ===`     (signal terminates a closed plan body)
+#   2. After a canonical terminal   (e.g. ## VERIFICATION) — the model wrote
+#      section header                  the conventional "I'm done" section
+#   3. After a closed [think] /     (model reasoned about an early commit
+#      <think> block                  and is explicitly justifying it)
+#
+# Everything else is treated as a stray signal: PLAN_DONE written mid-
+# investigation, written inside prose that's documenting the protocol,
+# or emitted by accident. The runtime injects a one-shot correction
+# explaining the rule and gives the model another round.
+#
+# The terminal-section list covers the canonical names used by:
+#   - PLAN_COT_EXISTING       → ## VERIFICATION
+#   - PLAN_COT_NEW            → ## CONFIDENCE GATE / ## TEST CRITERIA
+#   - MERGE_PROMPT_TEMPLATE   → ## PRE-MORTEM RESOLUTION
+#   - informal / merger tail  → ## FINAL NOTES, ## SUMMARY
+# Add a new name here when a workflow introduces a new terminal section.
+_PLAN_TERMINAL_SECTION = re.compile(
+    r'^[ \t]*##[ \t]*'
+    r'(?:VERIFICATION'
+    r'|CONFIDENCE[ \t]+GATE'
+    r'|PRE[-\s]?MORTEM[ \t]+RESOLUTION'
+    r'|TEST[ \t]+CRITERIA'
+    r'|FINAL[ \t]+NOTES'
+    r'|SUMMARY)'
+    r'\b',
+    re.MULTILINE | re.IGNORECASE,
+)
+_PLAN_END_BLOCK = re.compile(r'===\s*END\s+PLAN\s*===', re.IGNORECASE)
+_THINK_CLOSE_TAG = re.compile(r'</think>|\[/think\]', re.IGNORECASE)
+# Generous look-back windows — the model may write a couple of paragraphs
+# between the canonical marker and the actual signal (e.g. "the plan is
+# complete; the user will observe X; ready to commit" + [PLAN DONE]).
+_PLAN_DONE_LONG_LOOKBACK = 2000   # for END PLAN / terminal section
+_PLAN_DONE_SHORT_LOOKBACK = 800   # for [/think] (kept tighter because
+                                  # the model should think THEN commit
+                                  # immediately, not write more prose)
+
+
+# Backtrack-in-response directive. Models can write
+#
+#   [continue from: -N]
+#
+# on its own line to erase the N lines IMMEDIATELY PRECEDING the
+# directive (plus the directive's own line) before downstream processing
+# sees the response. Use case: the model wrote a wrong edit or a wrong
+# plan step, then in [think] realized the mistake; instead of explaining
+# the wrong content in its visible output it backtracks and rewrites.
+#
+# Directives inside masked contexts (code fences, backticks, [think] /
+# <think> blocks) are treated as documentation and NOT applied — quoting
+# the syntax in a prompt or example doesn't fire it. Anywhere else, the
+# directive fires.
+#
+# N is a positive integer. N=0 or N>500 is treated as invalid and the
+# directive is stripped (but no content erased). Multiple directives in
+# one response are applied in document order; each operates on the state
+# produced by the previous one.
+_CONTINUE_FROM_RE = re.compile(
+    r'\[continue\s+from:\s*-(\d+)\s*\]',
+    re.IGNORECASE,
+)
+
+
+def _apply_continue_from(text: str) -> str:
+    """Apply [continue from: -N] backtrack directives to `text`.
+
+    Each application:
+      1. Locates the first directive in the masked view of the text
+         (so directives inside fences / backticks / think blocks are
+         skipped — they're documentation, not commands).
+      2. Walks back N newlines in the ORIGINAL text from the directive
+         position, finding the start of the N-th line above the
+         directive's own line. Position 0 if N exceeds available
+         lines (erases everything before the directive).
+      3. Removes the range [cut_at, directive_end_plus_trailing_newline)
+         from the original text. The directive's line vanishes; the
+         lines above it are gone.
+      4. Loops to handle the next directive.
+
+    Returns the rewritten text. Idempotent on text with no directives.
+    """
+    while True:
+        masked = _mask_for_signals(text)
+        m = _CONTINUE_FROM_RE.search(masked)
+        if not m:
+            return text
+        try:
+            n = int(m.group(1))
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 500:
+            # Malformed or absurd backtrack — strip the directive,
+            # keep surrounding text. The 500-line ceiling is a sanity
+            # guard against pathological models.
+            text = text[:m.start()] + text[m.end():]
+            continue
+
+        before = text[:m.start()]
+        newline_positions = [i for i, ch in enumerate(before) if ch == '\n']
+        # To erase N content lines plus the directive's own line prefix,
+        # we cut starting right after the (n+1)-th-from-end newline.
+        # Example: text = "A\nB\nC\n[continue from: -2]\nD"
+        #          before = "A\nB\nC\n"      newlines at [1, 3, 5]
+        #          n=2 -> needed=3 -> newline_positions[-3]=1 -> cut_at=2
+        #          (start of "B")
+        # If we don't have enough newlines, cut from 0 (erase all prefix).
+        if len(newline_positions) >= n + 1:
+            cut_at = newline_positions[-(n + 1)] + 1
+        else:
+            cut_at = 0
+
+        end = m.end()
+        # Consume the directive's trailing newline so we don't leave a
+        # blank gap where it used to live.
+        if end < len(text) and text[end] == '\n':
+            end += 1
+        text = text[:cut_at] + text[end:]
+
+
+def _plan_done_context_kind(text: str, signal_start: int) -> "str | None":
+    """Return a short name for the valid context preceding a PLAN_DONE
+    match, or None if no valid context is present.
+
+    Context names are also used as diagnostics in the runtime logs so a
+    debugger can see WHY a particular [PLAN DONE] was honored.
+    """
+    long_window = text[max(0, signal_start - _PLAN_DONE_LONG_LOOKBACK):signal_start]
+    if _PLAN_END_BLOCK.search(long_window):
+        return "end-plan-block"
+    if _PLAN_TERMINAL_SECTION.search(long_window):
+        return "terminal-section"
+    short_window = text[max(0, signal_start - _PLAN_DONE_SHORT_LOOKBACK):signal_start]
+    if _THINK_CLOSE_TAG.search(short_window):
+        return "post-think"
+    return None
 
 
 def _detect_unterminated_blocks(text: str) -> list[tuple[str, str]]:
@@ -474,19 +688,102 @@ def _mask_quoted_tags_core(text: str, enforce_tool_use_blocks: bool) -> str:
     for m in _THINK_BLOCK.finditer(text):
         _blank(m.start(), m.end())
 
+    # 0b. UNCLOSED <think>...EOT — during streaming the closing tag
+    # hasn't arrived yet. Without this, a model that mentions
+    # [STOP][CONFIRM_STOP] inside its still-open thinking (e.g. while
+    # discussing the protocol) triggers stop_check, the stream aborts
+    # mid-thought, and the model never returns to write its real
+    # response. Observed before this fix: qwen-3.5 / minimax-m2.7
+    # rounds that ended on a [CONFIRM_STOP] inside an unterminated
+    # <think> block, with no visible content after. Mask from the
+    # FIRST unclosed <think> to end of text.
+    _think_opens = [m.start() for m in re.finditer(r'<think>', text, re.IGNORECASE)]
+    _think_closes = [m.start() for m in re.finditer(r'</think>', text, re.IGNORECASE)]
+    if len(_think_opens) > len(_think_closes):
+        # The (len(closes))th open (0-indexed) is the first one unclosed.
+        _blank(_think_opens[len(_think_closes)], len(text))
+
     # 1. Fenced code blocks (```...```)
     for m in _FENCED_CODE_BLOCK.finditer(text):
         _blank(m.start(), m.end())
+
+    # 1b. UNCLOSED fenced code (```...EOT) — same streaming risk.
+    # If the model opens ``` and mentions a signal inside before the
+    # closing ``` arrives, the signal would fire prematurely. Count
+    # the ``` markers; if odd, the last one is unclosed.
+    _fence_positions = [m.start() for m in re.finditer(r'```', text)]
+    if len(_fence_positions) % 2 == 1:
+        _blank(_fence_positions[-1], len(text))
 
     # 2. Inline backtick spans (`...`)
     for m in _INLINE_BACKTICK.finditer(text):
         _blank(m.start(), m.end())
 
+    # 2b. UNCLOSED inline backticks (`...EOL or `...EOT) — during
+    # streaming the closing ` may not have arrived yet. Observed in
+    # 20260513_173120 glm-5.1: model was streaming
+    #   "Two-tag protocol: `[STOP][CONFIRM_STOP]`, `[DONE][CONFIRM_DONE]…"
+    # and the stop_check ran when [CONFIRM_DONE] arrived — at that
+    # moment the second ` was still unclosed (it would have arrived in
+    # a later delta). The regex above didn't match the unclosed span,
+    # so [DONE][CONFIRM_DONE] wasn't masked → DONE_TAG fired → stream
+    # aborted → the closing ` never arrived. Mirror the unclosed-think
+    # / unclosed-fence fixes: walk the text, find any ` that isn't
+    # paired (next ` on the same line), mask from there to end-of-line
+    # (or end-of-text if no newline).
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '`' and masked[i] == '`':  # not already masked
+            # Skip if this is part of a triple-fence already handled.
+            if i + 2 < n and text[i + 1] == '`' and text[i + 2] == '`':
+                i += 3
+                continue
+            # Find the next single ` on the same line.
+            j = i + 1
+            while j < n and text[j] != '`' and text[j] != '\n':
+                j += 1
+            if j < n and text[j] == '`':
+                # Found closing — regex above already handled it. Move past.
+                i = j + 1
+            else:
+                # Unclosed. Mask from i to end-of-line (or end-of-text).
+                _blank(i, j)
+                i = j
+        else:
+            i += 1
+
     # 3. Code-writing blocks — mask all forms where the model writes actual code.
-    for pattern in (_EDIT_FILE_SPAN, _SEARCH_BLOCK, _REPLACE_BLOCK,
-                    _INSERT_BLOCK, _EDIT_BLOCK_SPAN):
+    for pattern in (_EDIT_ENVELOPE_SPAN, _EDIT_FILE_SPAN, _SEARCH_BLOCK,
+                    _REPLACE_BLOCK, _INSERT_BLOCK, _EDIT_BLOCK_SPAN):
         for m in pattern.finditer(text):
             _blank(m.start(), m.end())
+
+    # 3b. Plan / plan-edit body spans — these are the planner's artifact.
+    # Signals (PLAN_DONE, STOP, DONE, CONTINUE) written INSIDE a
+    # `=== PLAN === ... === END PLAN ===` body are data, not commands —
+    # the model is documenting the protocol or quoting an example. The
+    # real signal lives AFTER `=== END PLAN ===`. Masking the body span
+    # prevents the documented-signal-fires-itself failure mode.
+    for pattern in (_PLAN_BLOCK_SPAN, _PLAN_EDIT_BLOCK_SPAN):
+        for m in pattern.finditer(text):
+            _blank(m.start(), m.end())
+
+    # 3c. UNCLOSED plan / plan-edit blocks — during streaming the closing
+    # `=== END PLAN ===` may not have arrived yet. Without this, the
+    # model could write a signal pair inside the still-open plan body
+    # and stop_check would fire mid-stream, aborting the plan before it
+    # completes. Same shape as the unclosed-think / unclosed-fence
+    # guards above. We use the LAST unclosed opener as the mask start.
+    for open_re, close_re in (
+        (_PLAN_OPEN, _PLAN_CLOSE),
+        (_PLAN_EDIT_OPEN, _PLAN_EDIT_CLOSE),
+    ):
+        opens = [m.start() for m in open_re.finditer(text)]
+        closes = [m.start() for m in close_re.finditer(text)]
+        if len(opens) > len(closes):
+            # The (len(closes))th open (0-indexed) is the first unclosed.
+            _blank(opens[len(closes)], len(text))
 
     # 4. Explicit escape: `\[TAG: ...]` → mask just the leading `[`
     for m in _BACKSLASH_BRACKET.finditer(text):
@@ -708,19 +1005,85 @@ async def _run_web_searches(queries: list[str]) -> str:
 
 # ─── Detail Lookup ───────────────────────────────────────────────────────────
 
-def _run_detail_lookups(section_names: list[str], detailed_map: str) -> str:
-    """Look up sections from the detailed code map."""
+def _run_detail_lookups(section_names: list[str], detailed_map: str,
+                        project_root: str | None = None) -> str:
+    """Look up sections from the detailed code map.
+
+    When `detailed_map` is present (full JARVIS pipeline, Phase-1 ran),
+    serve sections from it. Otherwise (CLI / exploration mode / no
+    detailed_map built), fall back to the exploration-mode DETAIL: a
+    deep dive on a single named symbol via AST + ripgrep.
+    """
     from tools.code_index import get_detail_section
+    from core.exploration_tools import extract_detail
 
     output_parts = []
     for name in section_names:
         status(f"    Detail lookup: {name}")
-        section = get_detail_section(detailed_map, name)
-        output_parts.append(f"\n=== Detail: '{name}' ===\n{section}")
+        if detailed_map:
+            section = get_detail_section(detailed_map, name)
+            if section.startswith("(no section found"):
+                # Unavailable subject — list what IS in the map so the model
+                # can pick a real one instead of re-guessing the same name.
+                try:
+                    from tools.code_index import list_sections
+                    avail = list_sections(detailed_map)
+                except Exception:
+                    avail = []
+                avail_str = (", ".join(avail[:20]) + ("" if len(avail) <= 20 else f" (+{len(avail)-20} more)")) if avail else "(none)"
+                output_parts.append(
+                    f"\n⚠ DETAIL: no subject '{name}' in the code map. "
+                    f"Available subjects: {avail_str}. "
+                    f"Use one of those exactly, or [SEARCH: {name}] / [REFS: {name}] to locate it."
+                )
+            else:
+                output_parts.append(f"\n=== Detail: '{name}' ===\n{section}")
+        elif project_root:
+            output_parts.append("\n" + extract_detail(name, project_root))
+        else:
+            output_parts.append(
+                f"\n=== Detail: '{name}' — no detailed_map or project_root ===\n"
+            )
     return "\n".join(output_parts)
 
 
 # ─── Code File Reader ───────────────────────────────────────────────────────
+
+def _diff_source_tag(sandbox_path: str, project_path: str, source: str | None) -> str:
+    """Produce a header annotation ONLY when it's load-bearing.
+
+    Reading mode (subagent feedback): "from sandbox" on every CODE/VIEW
+    result is noise when the sandbox content equals disk. Suppress it
+    in that case. Surface "from sandbox (edited)" only when the two
+    actually differ, so a developer mid-edit still gets the signal.
+    """
+    import os as _os
+    if source == "project":
+        # Disk path was used directly (no sandbox copy yet). Quiet —
+        # that's the normal first-read state.
+        return ""
+    if not source:
+        return ""
+    # source == "sandbox": compare with disk.
+    try:
+        if not _os.path.isfile(sandbox_path):
+            return ""
+        if not _os.path.isfile(project_path):
+            return "from sandbox (created)"
+        sb_size = _os.path.getsize(sandbox_path)
+        pj_size = _os.path.getsize(project_path)
+        if sb_size != pj_size:
+            return "from sandbox (edited)"
+        # Cheap byte compare for small/medium files. Skip for very large.
+        if sb_size > 2_000_000:
+            return ""
+        with open(sandbox_path, "rb") as a, open(project_path, "rb") as b:
+            if a.read() != b.read():
+                return "from sandbox (edited)"
+    except Exception:
+        pass
+    return ""
+
 
 def _parse_code_arg(raw: str) -> tuple[str, list[tuple[int, int]] | None]:
     """Parse a [CODE: ...] argument into (filepath, optional_line_ranges).
@@ -879,9 +1242,34 @@ def _build_file_skeleton(
     return "\n".join(f"  L{ln:<6} {lbl}" for ln, lbl in unique)
 
 
-def _run_code_reads(
+def _is_binary_path(path: str) -> "tuple[bool, str]":
+    """Return (is_binary, reason) for path.
+
+    v8.15: shared binary guard used by CODE / VIEW / KEEP. Checks both
+    the IGNORE_EXTENSIONS suffix list AND a first-4KB NUL-byte sniff
+    (catches files that lie about their extension, or have no extension).
+    """
+    import os
+    from tools.codebase import IGNORE_EXTENSIONS as _IGN_EXT
+    if not os.path.isfile(path):
+        return False, ""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _IGN_EXT:
+        return True, f"BINARY FILE ({ext}) — skipped"
+    try:
+        with open(path, "rb") as _fb:
+            head = _fb.read(4096)
+        if b"\x00" in head:
+            return True, "BINARY FILE (null bytes in first 4KB) — skipped"
+    except Exception:
+        pass
+    return False, ""
+
+
+async def _run_code_reads(
     filepaths: list[str], project_root: str,
     viewed_versions: "dict[str, str] | None" = None,
+    display_mode: str = "prefix",
 ) -> str:
     """Read source code files from the sandbox.
 
@@ -901,19 +1289,17 @@ def _run_code_reads(
     mid-stream edits in the same response).
     """
     import os
-    from tools.codebase import read_file, norm_path, add_line_numbers
+    from tools.codebase import read_file, norm_path, add_line_numbers, file_uses_tabs
 
-    KEEP_HINT_THRESHOLD = 400   # lines — recommend KEEP above this
-    KEEP_FORCE_THRESHOLD = 1500 # lines — REQUIRE KEEP above this; full-file
+    KEEP_HINT_THRESHOLD = 1500  # lines — informational note above this
+    KEEP_FORCE_THRESHOLD = 8000 # lines — REQUIRE KEEP above this; full-file
                                 # [CODE:] returns a skeleton view instead.
-                                # Why: workflows/code.py (5773 lines, ~60k tokens)
-                                # is sometimes already in the prompt as
-                                # {file_content}, and reading it back via [CODE:]
-                                # doubled the context to ~120k of file content +
-                                # 3000-line prompt + history → blew past the model
-                                # context limit (z-ai/glm5 ~200k) with HTTP 400
-                                # "requested 0 output tokens" errors. Returning a
-                                # skeleton keeps [CODE:] safe for any file size.
+                                # Why: workflows/code.py (~12k lines, ~120k tokens)
+                                # would overflow a 200k context when stacked with
+                                # the prompt + history. The 8000-line threshold
+                                # keeps small/medium files un-truncated for the
+                                # exploration workflow (subagent feedback) while
+                                # still protecting the truly oversized files.
     sandbox_dir = os.path.join(project_root, ".jarvis_sandbox")
 
     output_parts = []
@@ -941,12 +1327,57 @@ def _run_code_reads(
         # not exist, and we surface every other condition as an explicit
         # status the model can act on.
         sandbox_path = os.path.join(sandbox_dir, fpath)
+        project_path = os.path.join(project_root, fpath)
+        # v8.7 fix: if the sandbox file is OLDER than the project file,
+        # the project was edited outside the sandbox (e.g. dev work with
+        # the user's editor, or branch switching). The stale sandbox view
+        # then under-reports line counts, causing VIEW/REPLACE-LINES to
+        # fail against real line numbers. Re-copy from project.
+        # In production (SWE-bench), each instance gets a fresh sandbox,
+        # so this never fires there — but it makes dev/test runs match
+        # disk truth.
+        if os.path.isfile(sandbox_path) and os.path.isfile(project_path):
+            try:
+                if os.path.getmtime(project_path) > os.path.getmtime(sandbox_path):
+                    import shutil as _shutil
+                    _shutil.copy2(project_path, sandbox_path)
+            except Exception:
+                pass  # mtime check is best-effort
         if os.path.isfile(sandbox_path):
             sandbox_exists = True
+            # v8.15 binary guard via shared helper.
+            _is_bin, _reason = _is_binary_path(sandbox_path)
+            if _is_bin:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — {_reason}. ===\n"
+                )
+                continue
             try:
                 with open(sandbox_path, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 source = "sandbox"
+            except PermissionError as e:
+                # v8.15 fix (B20): branch the error so the model gets the
+                # correct diagnosis. Permission-denied is NOT encoding
+                # corruption; the "[REVERT FILE]" recovery is destructive
+                # for that case.
+                output_parts.append(
+                    f"\n=== Code: {fpath} — PERMISSION DENIED: {e} ===\n"
+                    f"The sandbox copy at {sandbox_path} cannot be read "
+                    f"due to file permissions / ownership.\n"
+                    f"This is NOT an encoding corruption — do NOT use "
+                    f"[REVERT FILE]. Check file mode + ownership of the "
+                    f"sandbox path, or escalate to the user.\n"
+                )
+                continue
+            except UnicodeDecodeError as e:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — ENCODING ERROR: {e} ===\n"
+                    f"The sandbox copy cannot be decoded as UTF-8. The "
+                    f"file may be a non-UTF text encoding or a binary "
+                    f"that slipped past the binary guard.\n"
+                )
+                continue
             except Exception as e:
                 # Read failure on the sandbox file is unusual and worth
                 # surfacing — don't mask it by serving the original.
@@ -959,12 +1390,44 @@ def _run_code_reads(
                 )
                 continue
         else:
-            # Sandbox doesn't have the file at all. Fall back to project root
-            # — this is legitimate (sandbox lazy-loads files on first reference,
-            # so a file the workflow hasn't touched yet only lives at project_root).
-            full_path = os.path.join(project_root, fpath)
-            content = read_file(full_path)
-            source = "project"
+            # Sandbox doesn't have the file. Lazy-load it from project_root
+            # INTO the sandbox so subsequent rounds always read from the same
+            # path — previously we fell back to project_root inline, which
+            # meant R1 read from project, R2 from sandbox (if a later step
+            # copied it), and a transient path-resolution failure between
+            # those reads showed up as "FILE NOT FOUND" for a file that
+            # exists. Pulling into sandbox once keeps every subsequent read
+            # consistent.
+            project_path = os.path.join(project_root, fpath)
+            if os.path.isfile(project_path):
+                # v8.15 fix: subagent r15 (B9) found lazy-load branch
+                # bypassed binary guards. Check BEFORE copying — saves
+                # disk + matches the sibling branch's behavior.
+                _is_bin, _reason = _is_binary_path(project_path)
+                if _is_bin:
+                    output_parts.append(
+                        f"\n=== Code: {fpath} — {_reason}. ===\n"
+                    )
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(sandbox_path), exist_ok=True)
+                    import shutil as _shutil
+                    _shutil.copy2(project_path, sandbox_path)
+                    sandbox_exists = True
+                    with open(sandbox_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    source = "sandbox"
+                except Exception:
+                    # Copy failed (permissions, disk, etc.) — read project
+                    # directly so the round still produces useful content.
+                    content = read_file(project_path)
+                    source = "project"
+            else:
+                # File doesn't exist in either place — emit a focused FILE NOT
+                # FOUND with a list of similarly-named files so the model can
+                # fix the path instead of looping on a typo.
+                content = None
+                source = None
 
         # Empty-sandbox-file guard: a sandbox file that is exactly empty
         # almost always indicates a destructive edit (the model wrote a
@@ -973,25 +1436,37 @@ def _run_code_reads(
         # falling back to the project file — the model needs to know the
         # damage so it can REVERT.
         if sandbox_exists and content is not None and content == "":
-            output_parts.append(
-                f"\n=== Code: {fpath} — SANDBOX FILE IS EMPTY (0 bytes) ===\n"
-                f"⛔ The sandbox copy of {fpath} is now empty. This is almost\n"
-                f"   certainly the result of a destructive edit (e.g. a `=== FILE:`\n"
-                f"   rewrite that produced no body, or a SEARCH/REPLACE that\n"
-                f"   matched the entire file and replaced it with nothing).\n"
-                f"\n"
-                f"RECOVERY OPTIONS:\n"
-                f"  1. [REVERT FILE: {fpath}]   — pop the pre-edit snapshot off\n"
-                f"     the undo stack and restore the file. Do this BEFORE your\n"
-                f"     next [STOP][CONFIRM_STOP]. After revert, plan the correct\n"
-                f"     edit from the restored state.\n"
-                f"  2. If the emptying was intentional (rare), continue and write\n"
-                f"     fresh content with a new === FILE: {fpath} === block.\n"
-                f"\n"
-                f"The runtime is NOT silently falling back to the project file.\n"
-                f"The sandbox is canonical — what you see here is what the next\n"
-                f"step's coder will see.\n"
-            )
+            # Only cry "destructive edit" if the file HAD content before (a
+            # non-empty project version). A brand-new empty file (no prior
+            # content, nothing to revert to) gets a neutral message — otherwise
+            # the model panics and tries to [REVERT FILE:] a file it just made.
+            _proj = os.path.join(project_root, fpath)
+            _had_content = os.path.isfile(_proj) and os.path.getsize(_proj) > 0
+            if _had_content:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — SANDBOX FILE IS EMPTY (0 bytes) ===\n"
+                    f"⛔ The sandbox copy of {fpath} is now empty, but the original\n"
+                    f"   had content. This is almost certainly a destructive edit (a\n"
+                    f"   `=== FILE:` rewrite that produced no body, or a SEARCH/REPLACE\n"
+                    f"   that matched the whole file and replaced it with nothing).\n"
+                    f"\n"
+                    f"RECOVERY OPTIONS:\n"
+                    f"  1. [REVERT FILE: {fpath}]   — restore the pre-edit snapshot.\n"
+                    f"     Do this BEFORE your next [STOP][CONFIRM_STOP], then plan\n"
+                    f"     the correct edit from the restored state.\n"
+                    f"  2. If the emptying was intentional (rare), write fresh\n"
+                    f"     content with a new === FILE: {fpath} === block.\n"
+                    f"\n"
+                    f"The sandbox is canonical — what you see is what the next\n"
+                    f"step's coder will see.\n"
+                )
+            else:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — EMPTY (0 bytes, no prior content) ===\n"
+                    f"This file exists but has no content yet — it wasn't emptied,\n"
+                    f"so there's nothing to revert. Write its content with a\n"
+                    f"`=== FILE: {fpath} === … === END FILE ===` block.\n"
+                )
             continue
 
         # Binary / unreadable files return a [... — skipped] string — treat as missing.
@@ -1031,13 +1506,19 @@ def _run_code_reads(
                 viewed_versions[fpath] = content
 
             all_lines = content.split('\n')
+            # v8.7 fix: subagent found CODE reported 248 lines for a
+            # 247-line file (off-by-one). split('\n') on content ending
+            # with '\n' produces an extra empty trailing element. Match
+            # `wc -l` semantics: count actual logical lines.
             total_lines = len(all_lines)
+            if all_lines and all_lines[-1] == '' and content.endswith('\n'):
+                total_lines -= 1
+                all_lines = all_lines[:-1]
 
             if line_ranges:
                 # Return only the requested line ranges with correct numbering.
-                # Format matches add_line_numbers: `iN|{code} {lineno}` (single
-                # space). Stays consistent with KEEP output so the model sees
-                # ONE format end-to-end.
+                # Format matches add_line_numbers — `LINENO|INDENT|content`
+                # (prefix) or `LINENO|<spaces><content>` (whitespace).
                 selected_parts = []
                 for start, end in line_ranges:
                     start = max(1, start)
@@ -1048,14 +1529,23 @@ def _run_code_reads(
                         expanded = line.expandtabs(4)
                         stripped = expanded.lstrip(' ')
                         n_indent = len(expanded) - len(stripped)
-                        renumbered.append(f"i{n_indent}|{stripped} {start + i}")
+                        if display_mode == "whitespace":
+                            renumbered.append(f"{start + i}:{' ' * n_indent}{stripped}")
+                        else:
+                            # v10: line# uses ':' so view lines paste verbatim.
+                            renumbered.append(f"{start + i}:{n_indent}|{stripped}")
                     selected_parts.append('\n'.join(renumbered))
 
                 range_str = ", ".join(f"{a}-{b}" for a, b in line_ranges)
                 combined = '\n'.join(selected_parts)
-                source_tag = source or "sandbox"
+                source_tag = _diff_source_tag(
+                    sandbox_path=os.path.join(sandbox_dir, fpath),
+                    project_path=os.path.join(project_root, fpath),
+                    source=source,
+                )
+                header_suffix = f" — {source_tag}" if source_tag else ""
                 output_parts.append(
-                    f"\n=== Code: {fpath} (lines {range_str} of {total_lines} — from {source_tag}) ===\n{combined}"
+                    f"\n=== Code: {fpath} (lines {range_str} of {total_lines}{header_suffix}) ===\n{combined}"
                 )
             else:
                 if total_lines > KEEP_FORCE_THRESHOLD:
@@ -1069,19 +1559,18 @@ def _run_code_reads(
                         f"Loading the entire file would overflow the model's "
                         f"context window. Below is the file's SKELETON — "
                         f"top-level definitions with their line numbers.\n\n"
-                        f"To READ ACTUAL CONTENT around any line in the skeleton,\n"
-                        f"use one of:\n"
+                        f"To READ ACTUAL CONTENT around a line in the skeleton,\n"
+                        f"use VIEW with a line number (this is the right tool here):\n"
                         f"  [tool use] [VIEW: {fpath} LINE_NUMBER] [/tool use]\n"
-                        f"    → returns ~200 lines centered on LINE_NUMBER, auto-\n"
-                        f"      extended to the enclosing def/class. Use this for\n"
-                        f"      EXPLORATION when you don't yet know the exact lines.\n"
+                        f"    → ~80 lines centered on LINE_NUMBER (±40). Use this\n"
+                        f"      to explore when you don't yet know the exact range.\n"
                         f"  [tool use] [VIEW: {fpath} START-END] [/tool use]\n"
-                        f"    → returns the explicit range (max 600 lines). Use\n"
-                        f"      when you know the precise window you want.\n"
-                        f"  [tool use] [KEEP: {fpath} START-END] [/tool use]\n"
-                        f"    → same shape as VIEW range, but intended for\n"
-                        f"      SURGICAL EDITS (line numbers preserve so [REPLACE\n"
-                        f"      LINES N-M] anchors correctly).\n"
+                        f"    → an explicit range (max 600 lines) once you know it.\n"
+                        f"Do NOT use [KEEP:] to read this file — KEEP is only for\n"
+                        f"NARROWING a file you ALREADY read with [CODE:]; on a file\n"
+                        f"this size, VIEW by line number above is the correct tool.\n"
+                        f"(KEEP still works for pinning a range right before a\n"
+                        f"[REPLACE LINES N-M] edit, but VIEW first to find the lines.)\n"
                         f"Each call must be followed by [STOP][CONFIRM_STOP].\n"
                         f"\n{skeleton}\n"
                     )
@@ -1091,29 +1580,124 @@ def _run_code_reads(
                     if viewed_versions is not None:
                         viewed_versions.pop(fpath, None)
                 else:
-                    numbered = add_line_numbers(content)
+                    numbered = add_line_numbers(content, display_mode=display_mode)
                     large_note = ""
                     if total_lines > KEEP_HINT_THRESHOLD:
                         large_note = (
-                            f"⚠ Big file ({total_lines} lines) — "
-                            f"[KEEP: {fpath} X-Y, A-B] recommended to select only "
-                            f"the lines you need.\n"
+                            f"(Large file — {total_lines} lines. For surgical "
+                            f"edits, [KEEP: {fpath} X-Y, A-B] pins specific "
+                            f"ranges.)\n"
                         )
-                    # Annotate the source so the model knows whether it's
-                    # looking at the sandbox (post-edit state) or the
-                    # project root (untouched original). When the sandbox
-                    # hasn't seen this file yet, "project" is normal —
-                    # but if a file is being EDITED and shows "project",
-                    # that's a sign edits aren't being applied.
-                    source_tag = source or "sandbox"
+                    if file_uses_tabs(content):
+                        large_note = (
+                            "(⚠ File uses TAB indentation. The renderer shows "
+                            "tabs as 4 spaces for display; write REPLACE bodies "
+                            "matching the file's real tab indentation, not "
+                            "spaces, to avoid mixing.)\n"
+                        ) + large_note
+                    # Annotate the source ONLY when sandbox content actually
+                    # differs from disk — the "from sandbox" tag was edit-
+                    # workflow chrome that confused reading-mode users.
+                    # Reading the sandbox when it equals disk is just "reading
+                    # the file"; no need to mention the cache layer.
+                    source_tag = _diff_source_tag(
+                        sandbox_path=os.path.join(sandbox_dir, fpath),
+                        project_path=os.path.join(project_root, fpath),
+                        source=source,
+                    )
+                    header_suffix = f" — {source_tag}" if source_tag else ""
                     output_parts.append(
-                        f"\n=== Code: {fpath} ({total_lines} lines — from {source_tag}) ===\n"
+                        f"\n=== Code: {fpath} ({total_lines} lines{header_suffix}) ===\n"
                         f"{large_note}"
                         f"{numbered}"
                     )
         else:
-            output_parts.append(f"\n=== Code: {fpath} — FILE NOT FOUND ===")
-    return "\n".join(output_parts)
+            # A directory where a file path was expected — say so plainly
+            # instead of the misleading "FILE NOT FOUND" (the dir clearly
+            # exists; the model just needs to name a file inside it).
+            _dir_hit = next((d for d in (os.path.join(sandbox_dir, fpath),
+                                         os.path.join(project_root, fpath))
+                             if os.path.isdir(d)), None)
+            if _dir_hit:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — IS A DIRECTORY, NOT A FILE ===\n"
+                    f"Name a specific file, e.g. [CODE: {fpath.rstrip('/')}/<file>.py].\n"
+                    f"See [PROJECT FILES] in the prompt for what's inside {fpath}."
+                )
+                continue
+            # File doesn't exist anywhere — show available files near that
+            # name so the model has a concrete next move instead of looping
+            # on the same wrong path. We search the SANDBOX (the canonical
+            # post-edit state) and, when sandbox has nothing yet, the
+            # project root.
+            suggestions: list[str] = []
+            try:
+                basename = os.path.basename(fpath).lower()
+                stem = basename.split('.')[0] if '.' in basename else basename
+                search_root = sandbox_dir if os.path.isdir(sandbox_dir) else project_root
+                # Walk once, cap to keep latency bounded on huge repos.
+                seen = 0
+                for dp, dirs, files in os.walk(search_root):
+                    # Skip common heavy dirs that never contain source.
+                    dirs[:] = [d for d in dirs if d not in (
+                        ".git", "__pycache__", "node_modules",
+                        ".venv", "venv", "dist", "build", ".jarvis_sandbox",
+                    )]
+                    for fn in files:
+                        seen += 1
+                        if seen > 5000:
+                            break
+                        if stem and stem in fn.lower():
+                            rel = os.path.relpath(os.path.join(dp, fn), search_root)
+                            suggestions.append(rel)
+                    if seen > 5000 or len(suggestions) >= 30:
+                        break
+                suggestions = sorted(set(suggestions))[:15]
+            except Exception:
+                suggestions = []
+
+            if suggestions:
+                sug_block = "\n".join(f"  • {s}" for s in suggestions)
+                output_parts.append(
+                    f"\n=== Code: {fpath} — FILE NOT FOUND ===\n"
+                    f"This path does not exist in the sandbox or the project root.\n"
+                    f"Files with a similar name (search root: "
+                    f"{'sandbox' if os.path.isdir(sandbox_dir) else 'project'}):\n"
+                    f"{sug_block}\n"
+                    f"Pick the actual path and re-issue [CODE: <path>] — do NOT\n"
+                    f"retry the same path; the file genuinely is not there."
+                )
+            else:
+                output_parts.append(
+                    f"\n=== Code: {fpath} — FILE NOT FOUND ===\n"
+                    f"This path does not exist in the sandbox or the project root,\n"
+                    f"and no file with a similar name was found. Check the path\n"
+                    f"against [PROJECT FILES] in the prompt — do NOT retry the\n"
+                    f"same path; the file genuinely is not there."
+                )
+
+    # ── Dependency-index annotation ───────────────────────────────────────
+    # For each successfully-read file, append `|appears N (#tag)` markers
+    # to def lines of symbols that have >=threshold refs project-wide.
+    # Uses LSP for precise counts where available; falls back to AST
+    # upper-bound if LSP is down. Surfaces blast-radius signal inline so
+    # the model can see "this function is called everywhere" without an
+    # extra round-trip. Safe to no-op on error.
+    try:
+        from core.dependency_index_cache import annotate_code_output_async
+        annotated_parts = []
+        for part in output_parts:
+            m = re.search(r'=== Code: (\S+?) ', part)
+            if m and re.search(r'^i\d+\|', part, re.MULTILINE):
+                fpath_in_part = m.group(1)
+                annotated_parts.append(
+                    await annotate_code_output_async(sandbox_dir, fpath_in_part, part)
+                )
+            else:
+                annotated_parts.append(part)
+        return "\n".join(annotated_parts)
+    except Exception:
+        return "\n".join(output_parts)
 
 
 # ─── KEEP Handler ────────────────────────────────────────────────────────────
@@ -1124,6 +1708,7 @@ async def _run_keep(
     research_cache: dict | None = None,
     viewed_versions: "dict[str, str] | None" = None,
     on_keep_seen: "Callable[[str, str], None] | None" = None,
+    display_mode: str = "prefix",
 ) -> str:
     """Process [KEEP: filepath X-Y, A-B] tags.
 
@@ -1144,6 +1729,23 @@ async def _run_keep(
     from workflows.code import _parse_keep_ranges, _filter_by_ranges, _auto_rag
 
     output_parts = []
+
+    def _persist_keep_failure(arg_raw: str, message: str) -> None:
+        """Persist a KEEP failure into the next prompt (mirror of
+        _persist_view_failure). Without this, KEEP error messages went to
+        round_output, which is never rendered — so the model re-issued the
+        same bad KEEP every round with no way to learn why."""
+        try:
+            stripped_arg, _lbl = _strip_label(arg_raw.strip())
+            key = _norm_key("KEEP", stripped_arg)
+            persistent_lookups[key] = message
+            if on_keep_seen is not None:
+                try:
+                    on_keep_seen(key, arg_raw)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     for arg in keep_args:
         arg = arg.strip()
@@ -1171,7 +1773,11 @@ async def _run_keep(
         else:
             range_match = re.search(r'(\d+)\s*-\s*(\d+)', arg_no_label)
             if not range_match:
-                output_parts.append(f"=== KEEP: invalid format '{arg}' — use [KEEP: filepath X-Y, A-B] ===")
+                _msg = (f"⚠ KEEP: '{arg}' has no line range. KEEP pins sub-ranges "
+                        f"of a file — use [KEEP: {arg_no_label.strip() or 'file.py'} 10-50] "
+                        f"or [KEEP: file.py 10-50, 80-120]. For the WHOLE file use [CODE: file.py].")
+                output_parts.append(_msg)
+                _persist_keep_failure(arg, _msg)
                 continue
             filepath = arg_no_label[:range_match.start()].strip()
             ranges_text = arg_no_label[range_match.start():]
@@ -1234,7 +1840,25 @@ async def _run_keep(
         # Read from sandbox first, then fall back to project root
         sandbox_dir = os.path.join(project_root, ".jarvis_sandbox")
         sandbox_path = os.path.join(sandbox_dir, filepath)
+        project_path = os.path.join(project_root, filepath)
+        # v8.15 fix: same mtime-refresh as _run_code_reads / _run_view.
+        # Subagent r10 found KEEP could also serve stale snapshots.
+        if os.path.isfile(sandbox_path) and os.path.isfile(project_path):
+            try:
+                if os.path.getmtime(project_path) > os.path.getmtime(sandbox_path):
+                    import shutil as _shutil
+                    _shutil.copy2(project_path, sandbox_path)
+            except Exception:
+                pass
         raw_content = None
+        # v8.15: binary guard for KEEP.
+        _bin_target = sandbox_path if os.path.isfile(sandbox_path) else project_path
+        _is_bin, _reason = _is_binary_path(_bin_target)
+        if _is_bin:
+            output_parts.append(
+                f"=== KEEP: '{filepath}' — {_reason}. ==="
+            )
+            continue
         if os.path.isfile(sandbox_path):
             try:
                 with open(sandbox_path, "r", encoding="utf-8", errors="replace") as f:
@@ -1258,7 +1882,10 @@ async def _run_keep(
         # path silently resolved to wrong content or hid genuine failures.
 
         if not raw_content or _looks_like_read_failure(raw_content):
-            output_parts.append(f"=== KEEP: file not found '{filepath}' ===")
+            _msg = (f"⚠ KEEP: file not found '{filepath}'. Check the path/spelling, "
+                    f"or [CODE: {filepath}] first to confirm it exists.")
+            output_parts.append(_msg)
+            _persist_keep_failure(arg, _msg)
             continue
 
         # Parse KEEP ranges FIRST — before recording the file as "seen".
@@ -1273,8 +1900,72 @@ async def _run_keep(
             ranges = _parse_keep_ranges(arg, filepath)
 
         if not ranges:
-            output_parts.append(f"=== KEEP: no valid ranges in '{arg}' ===")
+            _msg = (f"⚠ KEEP: no valid line ranges in '{arg}'. Use digit-dash-digit, "
+                    f"e.g. [KEEP: {filepath} 10-50] or [KEEP: {filepath} 10-50, 80-120].")
+            output_parts.append(_msg)
+            _persist_keep_failure(arg, _msg)
             continue
+
+        # v8.15 fix (B16): detect descending pairs in input string that
+        # _parse_keep_ranges silently drops. Surface them so a model
+        # passing `50-60, 30-20, 80-85` knows the middle was rejected.
+        import re as _re_b16
+        _all_pairs = _re_b16.findall(r'(\d+)\s*-\s*(\d+)', ranges_text or arg)
+        _descending = []
+        for a, b in _all_pairs:
+            ai, bi = int(a), int(b)
+            if ai > 0 and bi > 0 and bi < ai:
+                _descending.append((ai, bi))
+        if _descending:
+            output_parts.append(
+                "⚠ KEEP dropped descending range(s) "
+                + ", ".join(f"{a}-{b}" for a, b in _descending)
+                + " — start must be ≤ end. Other ranges processed."
+            )
+
+        # v8.12 fix: clamp ranges to file bounds and reject ranges that
+        # are entirely past EOF with a clear error. Subagent r8 found
+        # `KEEP file 300-400` on a 247-line file used to crash with a
+        # raw Python IndexError; the underlying scope-extender is now
+        # safe, but the higher-level UX is still better with a clean
+        # rejection than a silent "KEPT 101/247" with zero visible lines.
+        _kc_total_lines = raw_content.count('\n')
+        if not raw_content.endswith('\n'):
+            _kc_total_lines += 1
+        clamped_ranges = []
+        dropped_ranges = []
+        clamped_warnings = []
+        for s, e in ranges:
+            if s > _kc_total_lines:
+                dropped_ranges.append((s, e))
+                continue  # entirely past EOF — drop
+            if e > _kc_total_lines:
+                clamped_warnings.append((s, e, _kc_total_lines))
+                e = _kc_total_lines
+            clamped_ranges.append((s, e))
+        if not clamped_ranges:
+            _msg = (
+                f"⚠ KEEP: '{arg}' — every requested range is past end-of-file "
+                f"(file '{filepath}' has only {_kc_total_lines} lines). "
+                f"Re-request within 1-{_kc_total_lines}, e.g. "
+                f"[KEEP: {filepath} 1-{min(60, _kc_total_lines)}]."
+            )
+            output_parts.append(_msg)
+            _persist_keep_failure(arg, _msg)
+            continue
+        # v8.15 fix: subagent r13 noted PARTIAL past-EOF was silent. VIEW
+        # warns in this case; KEEP should too for symmetry.
+        keep_warnings: list[str] = []
+        for s, e in dropped_ranges:
+            keep_warnings.append(
+                f"⚠ Range {s}-{e} dropped — entirely past EOF "
+                f"(file has {_kc_total_lines} lines)."
+            )
+        for s, e, t in clamped_warnings:
+            keep_warnings.append(
+                f"⚠ Range {s}-{e} clamped to {s}-{t} (file has {t} lines)."
+            )
+        ranges = clamped_ranges
 
         # Record what the model is about to see — KEEP preserves real line
         # numbers, so any subsequent [REPLACE LINES X-Y] anchors to THIS
@@ -1284,19 +1975,35 @@ async def _run_keep(
             viewed_versions[filepath] = raw_content
 
         # Build filtered view
-        filtered = _filter_by_ranges(raw_content, ranges, filepath)
+        filtered = _filter_by_ranges(raw_content, ranges, filepath, display_mode=display_mode)
         kept_lines = sum(e - s + 1 for s, e in ranges)
-        total_lines = raw_content.count('\n') + 1
+        # v8.7 fix: same off-by-1 as add_line_numbers — files ending
+        # with '\n' should not be counted as N+1 lines.
+        total_lines = raw_content.count('\n')
+        if not raw_content.endswith('\n'):
+            total_lines += 1
 
         # Auto-RAG: find dependencies in kept code
         deps = await _auto_rag(filtered, filepath, project_root, research_cache)
 
         # Build the replacement result
-        replacement = (
+        _hdr = (
             f"\n=== Code: {filepath} (KEPT {kept_lines}/{total_lines} lines, "
             f"line numbers accurate for [REPLACE LINES]) ===\n"
-            f"{filtered}\n"
         )
+        # KEEP-not-in-context note: KEEP is meant to NARROW a file already
+        # read with [CODE:]. If this file was never in context, KEEP read it
+        # from disk — which works, but for a big file you haven't read,
+        # [VIEW: file N-M] is the direct tool. Surface this once.
+        if matched_key is None and total_lines > 1500:  # large-file hint threshold
+            _hdr += (
+                f"⚠ '{filepath}' was not in context (no prior [CODE:]). KEEP "
+                f"narrows an already-read file; for a large file you haven't "
+                f"read, [VIEW: {filepath} N-M] reads a range directly.\n"
+            )
+        if keep_warnings:
+            _hdr += "\n".join(keep_warnings) + "\n"
+        replacement = f"{_hdr}{filtered}\n"
         if deps:
             replacement += f"\n{deps}\n"
 
@@ -1363,7 +2070,10 @@ async def _run_keep(
 # for an explicit range. Bigger than KEEP because the model uses VIEW to
 # UNDERSTAND code (whole functions, neighboring helpers), whereas KEEP is
 # for surgical edits where you already know the precise range.
-_VIEW_DEFAULT_WINDOW = 200      # lines, ±100 around a single-line target
+_VIEW_DEFAULT_WINDOW = 80       # lines, ±40 around a single-line target.
+                                 # v8.9 fix: was 200; subagent found a
+                                 # 1-line request returning 169 lines was
+                                 # too broad for surgical drilling.
 _VIEW_MAX_RANGE = 600           # lines, hard cap for explicit ranges
 _VIEW_THINKING_RESERVE = 20_000 # tokens reserved for model output/thinking
 
@@ -1375,6 +2085,7 @@ async def _run_view(
     research_cache: dict | None = None,
     viewed_versions: "dict[str, str] | None" = None,
     on_view_seen: "Callable[[str, str], None] | None" = None,
+    display_mode: str = "prefix",
 ) -> str:
     """Read a slice of a large file by line number.
 
@@ -1398,7 +2109,7 @@ async def _run_view(
     """
     import os
     from tools.codebase import read_file, norm_path
-    from workflows.code import _extend_ranges_to_scope_anchor, _filter_by_ranges
+    from workflows.code import _filter_by_ranges
     from core.tokens import count_tokens
 
     # Look up model window from config; default to a moderate value so an
@@ -1453,9 +2164,11 @@ async def _run_view(
             # Fallback: split before the first digit
             digit_match = re.search(r'\d', arg_no_label)
             if not digit_match:
+                _vp = arg_no_label.strip() or "file.py"
                 _msg = (
-                    f"=== VIEW: invalid format '{arg}' — "
-                    f"use [VIEW: path lineN] or [VIEW: path N-M] ==="
+                    f"⚠ VIEW: '{arg}' has no line range. VIEW reads a slice — "
+                    f"use [VIEW: {_vp} 120] (±40 lines) or [VIEW: {_vp} 100-160]. "
+                    f"For the WHOLE file use [CODE: {_vp}]."
                 )
                 output_parts.append(_msg)
                 _persist_view_failure(arg, _msg)
@@ -1472,23 +2185,60 @@ async def _run_view(
         # Read the file. Prefer sandbox version when present so VIEW sees
         # the post-edit state the model is actually working with.
         sandbox_path = os.path.join(project_root, ".jarvis_sandbox", filepath)
+        project_path = os.path.join(project_root, filepath)
+        # v8.15 fix: subagent r10 caught VIEW returning a stale 331-line
+        # snapshot when the disk file was 415 lines. The mtime-refresh
+        # was only on _run_code_reads — VIEW and KEEP also need it.
+        if os.path.isfile(sandbox_path) and os.path.isfile(project_path):
+            try:
+                if os.path.getmtime(project_path) > os.path.getmtime(sandbox_path):
+                    import shutil as _shutil
+                    _shutil.copy2(project_path, sandbox_path)
+            except Exception:
+                pass
         raw_content = None
+        sandbox_read_succeeded = False
+        # v8.15: binary guard for VIEW. Use whichever copy will be read.
+        _bin_target = sandbox_path if os.path.isfile(sandbox_path) else project_path
+        _is_bin, _reason = _is_binary_path(_bin_target)
+        if _is_bin:
+            output_parts.append(
+                f"=== VIEW: '{filepath}' — {_reason}. ==="
+            )
+            continue
         if os.path.isfile(sandbox_path):
             try:
                 with open(sandbox_path, "r", encoding="utf-8", errors="replace") as f:
                     raw_content = f.read()
+                sandbox_read_succeeded = True
             except Exception:
                 raw_content = None
-        if not raw_content:
-            raw_content = read_file(os.path.join(project_root, filepath))
+        # v8.15 fix: 0-byte file (legitimate empty `__init__.py`) returned
+        # `""` which is falsy → `if not raw_content:` triggered, fell
+        # through to the FAIL prefix check, then "FILE NOT FOUND". CODE
+        # handled this with a SANDBOX-FILE-IS-EMPTY banner; VIEW/KEEP
+        # contradicted by saying not-found. Distinguish "file exists but
+        # is empty" from "file truly doesn't exist".
+        if not sandbox_read_succeeded and (raw_content is None or raw_content == ""):
+            raw_content = read_file(project_path)
 
         _READ_FAIL_PREFIXES = ("[BINARY", "[READ ERROR", "[FILE NOT FOUND", "[ERROR")
-        if not raw_content or any(
-            raw_content.startswith(p) for p in _READ_FAIL_PREFIXES
+        # Only treat as failure if read_file returned a fail prefix OR
+        # the file genuinely doesn't exist on either side.
+        if raw_content is None or any(
+            (raw_content or "").startswith(p) for p in _READ_FAIL_PREFIXES
         ):
             _msg = f"=== VIEW: file not found '{filepath}' ==="
             output_parts.append(_msg)
             _persist_view_failure(arg, _msg)
+            continue
+        # v8.15: empty-file case — give an honest message instead of
+        # masquerading as not-found.
+        if raw_content == "":
+            output_parts.append(
+                f"=== VIEW: '{filepath}' is EMPTY (0 bytes / 0 lines). "
+                f"No content to display. ==="
+            )
             continue
 
         # ── Small-file gate REMOVED ────────────────────────────────────
@@ -1514,9 +2264,54 @@ async def _run_view(
         file_tokens = count_tokens(raw_content)
 
         # ── Parse the line/range spec ──────────────────────────────────
-        total_lines = raw_content.count('\n') + 1
+        # v8.7 fix: same off-by-1 as add_line_numbers / _run_keep.
+        total_lines = raw_content.count('\n')
+        if not raw_content.endswith('\n'):
+            total_lines += 1
         range_match = re.match(r'^\s*(\d+)\s*-\s*(\d+)\s*$', spec)
         single_match = re.match(r'^\s*(\d+)\s*$', spec)
+        # v8.4 fix: detect out-of-bounds requests BEFORE clamping so we
+        # can surface a warning in the header. Previously OOB requests
+        # silently degraded to the file's last function, with no signal
+        # that the model asked for the wrong area.
+        oob_warning = None
+        if range_match:
+            req_start = int(range_match.group(1))
+            req_end = int(range_match.group(2))
+            # v8.15 fix: subagent r11 noted backwards range (e.g. 100-50)
+            # was silently flipped. Make the flip explicit so the model
+            # doesn't think it's getting what it asked for.
+            if req_start > req_end:
+                oob_warning = (
+                    f"⚠ Backwards range L{req_start}-{req_end} — "
+                    f"interpreted as L{req_end}-{req_start} (start "
+                    f"must be ≤ end)."
+                )
+            elif req_start > total_lines or req_end > total_lines:
+                oob_warning = (
+                    f"⚠ Requested L{req_start}-{req_end} is past EOF "
+                    f"(file has {total_lines} lines). Returning available range."
+                )
+        elif single_match:
+            req_line = int(single_match.group(1))
+            # v8.15 fix: subagent r13 noted VIEW with line 0 was silently
+            # accepted (returned lines 1-40). Be consistent with negative
+            # rejection — line numbers are 1-based.
+            if req_line == 0:
+                _msg = (
+                    f"=== VIEW: INVALID line spec '{spec}' for "
+                    f"'{filepath}' — line numbers are 1-based; use "
+                    f"line 1 or higher. ==="
+                )
+                output_parts.append(_msg)
+                _persist_view_failure(arg, _msg)
+                continue
+            if req_line > total_lines:
+                oob_warning = (
+                    f"⚠ Requested L{req_line} is past EOF "
+                    f"(file has {total_lines} lines). Returning end of file."
+                )
+
         if range_match:
             start = int(range_match.group(1))
             end = int(range_match.group(2))
@@ -1555,22 +2350,13 @@ async def _run_view(
         start = max(1, min(start, total_lines))
         end = max(start, min(end, total_lines))
 
-        # Extend to enclosing def/class so the model always sees a
-        # complete logical unit instead of a function head with no body.
-        # The +1/+1 is because _extend_ranges_to_scope_anchor takes
-        # ranges as a list of (start, end) tuples.
-        try:
-            lines = raw_content.split('\n')
-            extended = _extend_ranges_to_scope_anchor([(start, end)], lines)
-            if extended:
-                start, end = extended[0]
-                start = max(1, min(start, total_lines))
-                end = max(start, min(end, total_lines))
-        except Exception:
-            pass
+        # v9.1: no auto-extension to enclosing def/class. Past-EOF clamp
+        # above is accurate; def-anchor extension was surprising — the
+        # model asks for line N, gets lines 30-N+30, breaks the contract
+        # that line numbers in tool output are usable directly for
+        # SEARCH/REPLACE LINES. (User feedback: "i don't want warning,
+        # i want accuracy".)
 
-        # After scope extension, re-cap to MAX_RANGE so a function the
-        # extender opened at line 1000 doesn't blow up to 800 lines.
         if (end - start + 1) > _VIEW_MAX_RANGE:
             # Center the cap on the original target so the user's request
             # stays the focus. For a range input, center on its midpoint.
@@ -1579,7 +2365,7 @@ async def _run_view(
             start = max(1, mid - half)
             end = min(total_lines, mid + half)
 
-        filtered = _filter_by_ranges(raw_content, [(start, end)], filepath)
+        filtered = _filter_by_ranges(raw_content, [(start, end)], filepath, display_mode=display_mode)
 
         # Strip leading/trailing `(N lines hidden: A-B)` markers from a VIEW
         # output. _filter_by_ranges emits them for every gap including the
@@ -1607,9 +2393,15 @@ async def _run_view(
                 break
         filtered = '\n'.join(_filt_lines)
 
+        # v8.4 fix: prepend OOB warning when the requested line(s) exceeded
+        # the file's actual length. Without this, an out-of-bounds request
+        # silently returns the file's last function with no signal that
+        # the model asked for the wrong area.
+        header_warning = (oob_warning + "\n") if oob_warning else ""
         replacement = (
             f"\n=== VIEW: {filepath} (lines {start}-{end} of {total_lines}, "
             f"line numbers accurate for [REPLACE LINES]) ===\n"
+            f"{header_warning}"
             f"{filtered}\n"
         )
 
@@ -1655,10 +2447,47 @@ async def _run_view(
 
         output_parts.append(replacement)
 
-    return "\n".join(output_parts)
+    # Dependency-index annotation — LSP-precise (same async path as
+    # _run_code_reads). Uses sym refs from LSP where available; falls
+    # back to AST upper bound when LSP is down.
+    try:
+        from core.dependency_index_cache import annotate_code_output_async
+        sandbox_dir = os.path.join(project_root, ".jarvis_sandbox")
+        annotated_parts = []
+        for part in output_parts:
+            m = re.search(r'=== VIEW: (\S+?) \(lines ', part)
+            if m and re.search(r'^i\d+\|', part, re.MULTILINE):
+                fpath_in_part = m.group(1)
+                annotated_parts.append(
+                    await annotate_code_output_async(sandbox_dir, fpath_in_part, part)
+                )
+            else:
+                annotated_parts.append(part)
+        return "\n".join(annotated_parts)
+    except Exception:
+        return "\n".join(output_parts)
 
 
 # ─── Reference Search ───────────────────────────────────────────────────────
+
+async def _run_dependency_lookup(tags: list[str], project_root: str) -> str:
+    """Resolve [DEPENDENCY: #TAG] tool calls (LSP-precise when available).
+
+    Each tag was registered in the dependency index when the agent's first
+    VIEW/CODE call surfaced it inline as `|appears N (#tag)`. Drilling in
+    via this tool returns the definition location and the full list of
+    file:line references for that symbol — resolved through LSP so the
+    count matches what the model actually edits, not the AST upper bound.
+    """
+    import os
+    from core.dependency_index_cache import lookup_dependency_async
+    sandbox_dir = os.path.join(project_root, ".jarvis_sandbox")
+    parts = []
+    for tag in tags:
+        parts.append(f"\n=== DEPENDENCY: #{tag.lstrip('#')} ===")
+        parts.append(await lookup_dependency_async(sandbox_dir, tag))
+    return "\n".join(parts)
+
 
 async def _run_refs_searches(names: list[str], project_root: str) -> str:
     """Ripgrep word-boundary search for all references to a name."""
@@ -1680,26 +2509,68 @@ async def _run_lsp_searches(names: list[str], project_root: str) -> str:
         name = name.strip()
         status(f"    LSP search: {name}")
         try:
-            from tools.lsp import lsp_find_references
+            from tools.lsp import lsp_find_references, get_lsp_client
+            # v8.7 fix: distinguish "server unavailable" from "couldn't find
+            # the symbol's definition". Previously both returned None and
+            # said "no LSP server available", which was actively misleading
+            # when the symbol was simply mistyped or the bare-name lookup
+            # didn't match a top-level def.
+            client = await get_lsp_client(project_root)
+            if not client:
+                output_parts.append(
+                    f"=== LSP for '{name}': no LSP server installed "
+                    f"(install pylsp via `pip install python-lsp-server` or "
+                    f"pyright); use [REFS: {name}] instead ==="
+                )
+                continue
             result = await lsp_find_references(name, project_root)
             if result:
                 output_parts.append(result)
             else:
-                output_parts.append(f"=== LSP for '{name}': no LSP server available, use [REFS: {name}] instead ===")
+                output_parts.append(
+                    f"=== LSP for '{name}': server is available but couldn't "
+                    f"find a definition for that symbol (typo? not a "
+                    f"top-level def/class?). Try [REFS: {name}] to grep "
+                    f"all mentions, or pass the qualified name. ==="
+                )
         except Exception as e:
             output_parts.append(f"=== LSP for '{name}': failed ({str(e)[:80]}), use [REFS: {name}] instead ===")
     return "\n".join(output_parts)
 
 
 def _run_purpose_lookups(categories: list[str], purpose_map: str, project_root: str) -> str:
-    """Look up purpose categories and return actual code snippets with context."""
+    """Look up purpose categories and return code snippets with context.
+
+    When `purpose_map` is present (full JARVIS pipeline, Phase-1 ran),
+    serve snippets from it. Otherwise (CLI / exploration mode), each
+    `category` is treated as a filepath and the new PURPOSE tool
+    returns the module's docstring + public symbol docstrings.
+    """
     from tools.code_index import get_purpose_snippets
+    from core.exploration_tools import extract_purpose
 
     output_parts = []
     for cat in categories:
         status(f"    Purpose lookup: {cat}")
-        result = get_purpose_snippets(purpose_map, cat, project_root)
+        if purpose_map:
+            result = get_purpose_snippets(purpose_map, cat, project_root)
+        else:
+            result = extract_purpose(cat, project_root)
         output_parts.append(result)
+    return "\n".join(output_parts)
+
+
+def _run_semantic_lookups(queries: list[str], project_root: str,
+                          purpose_map: str | None = None) -> str:
+    """Concept search across the project. Always uses the keyword-rank
+    explorer (the embedding-based path lives in the planner closure
+    inside run_with_tools and isn't exposed here)."""
+    from core.exploration_tools import semantic_search
+
+    output_parts = []
+    for q in queries:
+        status(f"    Semantic lookup: {q}")
+        output_parts.append(semantic_search(q, project_root))
     return "\n".join(output_parts)
 
 
@@ -1721,6 +2592,7 @@ _ALL_TAGS = re.compile(
     r'\[(SEARCH|WEBSEARCH|DETAIL|CODE|REFS|PURPOSE|LSP|KNOWLEDGE|KEEP|DISCARD):\s*.+?\]'
     r'|\[STOP\]\s*\[CONFIRM_STOP\]'
     r'|\[DONE\]\s*\[CONFIRM_DONE\]'
+    r'|\[FORCE\s+DONE\]\s*\[CONFIRM_FORCE_DONE\]'
     r'|\[CONTINUE\]\s*\[CONFIRM_CONTINUE\]',
     re.IGNORECASE,
 )
@@ -1759,7 +2631,9 @@ def _autocomplete_tool_blocks(text: str) -> tuple[str, int]:
     # first boundary AFTER the open (next open / next signal / end-of-text).
     BoundaryRe = re.compile(
         r'\[tool use\]|\[/tool use\]|\[STOP\]\s*\[CONFIRM_STOP\]'
-        r'|\[DONE\]\s*\[CONFIRM_DONE\]|\[CONTINUE\]\s*\[CONFIRM_CONTINUE\]',
+        r'|\[DONE\]\s*\[CONFIRM_DONE\]'
+        r'|\[FORCE\s+DONE\]\s*\[CONFIRM_FORCE_DONE\]'
+        r'|\[CONTINUE\]\s*\[CONFIRM_CONTINUE\]',
         re.IGNORECASE,
     )
     insertions: list[int] = []
@@ -1813,9 +2687,9 @@ def _describe_tool_mode(result: str) -> str:
 def _tag_summary(
     code_tags, web_tags, detail_tags, file_tags, refs_tags,
     purpose_tags, semantic_tags, lsp_tags, knowledge_tags, keep_tags,
-    view_tags,
-    research_cache: dict | None,
-    persistent_lookups: dict,
+    view_tags, dependency_tags=(),
+    research_cache: dict | None = None,
+    persistent_lookups: dict | None = None,
 ) -> str:
     """Build a one-line summary of tags found this round with cache annotations."""
     parts = []
@@ -1843,6 +2717,7 @@ def _tag_summary(
     _note("KNOW",     knowledge_tags,"KNOWLEDGE")
     _note("KEEP",     keep_tags,     "KEEP")
     _note("VIEW",     view_tags,     "VIEW")
+    _note("DEPENDENCY", dependency_tags, "DEPENDENCY")
     return ", ".join(parts) if parts else "(none)"
 
 
@@ -1852,7 +2727,7 @@ async def call_with_tools(
     model: str,
     prompt: str,
     project_root: str | None = None,
-    max_tokens: int = 16384,
+    max_tokens: int = 16384,   # proven default; 32768 was too slow (planner+implement timeouts)
     max_rounds: int = 20,
     enable_code_search: bool = True,
     enable_web_search: bool = True,
@@ -1861,8 +2736,13 @@ async def call_with_tools(
     research_cache: dict | None = None,
     log_label: str = "",
     on_stop: "Callable[[str], str | None] | None" = None,
+    has_pending_edits: "Callable[[str], bool] | None" = None,
+    allow_run: bool = False,
+    run_cwd: "str | None" = None,
     viewed_versions: "dict[str, str] | None" = None,
     stop_on_tool_block: bool = False,
+    cache_file_reads: bool = False,
+    read_only_role: bool = False,
 ) -> dict:
     """
     Call a model with mid-thought tool use.
@@ -1874,6 +2754,13 @@ async def call_with_tools(
     Signals:
       [STOP]   → execute tool calls + on_stop callback, continue thinking
       [DONE]   → apply final edits, model is completely finished
+
+    has_pending_edits: optional non-mutating predicate, called with the
+             full response when [DONE] fires. Returns True if the turn carries
+             edit blocks that haven't been applied yet. When True, the verify
+             gate converts the [DONE] into an apply-and-show-diff round so the
+             model verifies the diff before finishing (it must NOT mutate any
+             dedup state — on_stop does the real apply).
 
     on_stop: optional callback called with full_response when [STOP] fires.
              Used by coders to apply pending edit blocks before tool lookups,
@@ -1907,12 +2794,19 @@ async def call_with_tools(
     research_cache: shared dict that accumulates all lookup results across
     multiple AI calls. Same tag won't re-run if cached.
 
-    Returns {"model": str, "answer": str, "done": bool, "research": {tag_key: result}}.
+    Returns {"model": str, "answer": str, "done": bool, "force_done": bool,
+    "research": {tag_key: result}}.
     "done" is True when the model explicitly wrote [DONE] — it is NOT present in
     "answer" (stripped before return), so callers must check this flag, not the text.
+    "force_done" is True when the model wrote [FORCE DONE][CONFIRM_FORCE_DONE] —
+    the coder's escape hatch for "step requirement already met, no edits needed".
+    When force_done is True, done is also True. The IMPLEMENT loop uses
+    force_done to distinguish "I am intentionally producing no edits" from
+    "I forgot to produce edits", which otherwise trigger a retry.
     """
     full_response = ""
     _done_signaled = False
+    _force_done_signaled = False
     current_prompt = prompt
 
     # [SEARCH:] and [REFS:] use ripgrep on project_root, but ripgrep respects
@@ -1955,6 +2849,13 @@ async def call_with_tools(
 
     # Per-round response text — used to build tagged round history in prompt.
     _round_texts: list[str] = []  # _round_texts[i] = text produced in round i+1
+    # Round numbers (1-indexed) where the stream aborted on scaffold
+    # hallucination — i.e., the model started fabricating a fake
+    # `────── ROUND N — your tool result ──────` block inside its own
+    # response. The next round's prompt prepends a ⚠ notice to that
+    # round's tool-result section so the model sees: "you were inventing
+    # — here are the real results."
+    _hallucinated_rounds: set[int] = set()
 
     # ── PLAN state ───────────────────────────────────────────────────────
     # The planner can use === PLAN === / === PLAN_EDIT === blocks to draft
@@ -2012,6 +2913,8 @@ async def call_with_tools(
         # entirely. The lighter mask still protects against backtick /
         # fenced-block discussion of the syntax.
         masked = _mask_for_signals(accumulated)
+        if FORCE_DONE_TAG.search(masked):
+            return True
         if DONE_TAG.search(masked):
             return True
         if STOP_TAG.search(masked):
@@ -2057,6 +2960,21 @@ async def call_with_tools(
             stop_check=_stop_check,
             log_label=f"{log_label} — R{round_num}" if log_label else f"R{round_num}",
         )
+
+        # Apply [continue from: -N] backtrack directives BEFORE any other
+        # processing — every downstream consumer (signal detection,
+        # masking, plan extraction, tool extraction, edit extraction)
+        # should see the rewritten response, never the discarded content.
+        # The live stream log still shows the original (handy for
+        # debugging), but artifacts only carry the clean version.
+        _result_pre_backtrack = result
+        result = _apply_continue_from(result)
+        if result != _result_pre_backtrack:
+            status(
+                f"  [{model.split('/')[-1]}] round {round_num}: "
+                f"[continue from: -N] backtrack applied "
+                f"({len(_result_pre_backtrack):,} → {len(result):,} chars)"
+            )
 
         # ── Empty-response guard ─────────────────────────────────────
         # Some models return an empty string under load (no reasoning, no
@@ -2163,10 +3081,21 @@ async def call_with_tools(
                 result = result[:cur_s] + result[cur_e:]
             return True
 
-        # ── DONE: finish the loop ─────────────────────────────────────
-        if _signal_in_bridge(DONE_TAG):
-            _consume_bridge_signal(DONE_TAG)
-            # Also remove any trailing STOP/CONTINUE in the bridge.
+        # Verify-gate keep-alive: set when a [DONE] arrives in the SAME turn
+        # as fresh edits. We then DON'T finish — we apply the edits, show the
+        # model the diff, and make it verify before re-issuing [DONE]. Reset
+        # each round so it only holds for the one turn it's needed.
+        _gate_keep_alive = False
+
+        # ── FORCE DONE: step requirement already met, no edits needed ─
+        # Must be checked BEFORE DONE_TAG because `[FORCE DONE]` shouldn't
+        # also be eaten by the DONE handler. Implies _done_signaled — the
+        # round terminates either way — but ALSO sets _force_done_signaled
+        # so the IMPLEMENT loop knows not to retry on "zero edits".
+        if _signal_in_bridge(FORCE_DONE_TAG):
+            _consume_bridge_signal(FORCE_DONE_TAG)
+            while _signal_in_bridge(DONE_TAG):
+                _consume_bridge_signal(DONE_TAG)
             while _signal_in_bridge(STOP_TAG):
                 _consume_bridge_signal(STOP_TAG)
             while _signal_in_bridge(CONTINUE_TAG):
@@ -2175,7 +3104,42 @@ async def call_with_tools(
             _round_texts.append(result)
             full_response += result
             _done_signaled = True
+            _force_done_signaled = True
             break
+
+        # ── DONE: finish the loop ─────────────────────────────────────
+        if _signal_in_bridge(DONE_TAG):
+            _consume_bridge_signal(DONE_TAG)
+            # Also remove any trailing STOP/CONTINUE in the bridge.
+            while _signal_in_bridge(STOP_TAG):
+                _consume_bridge_signal(STOP_TAG)
+            while _signal_in_bridge(CONTINUE_TAG):
+                _consume_bridge_signal(CONTINUE_TAG)
+            # ── VERIFY GATE ──────────────────────────────────────────
+            # A [DONE] written in the SAME turn as fresh edits never saw the
+            # result — exactly the premature-[DONE]→NO_PATCH failure. Convert
+            # it to an "end edit section": apply the edits, show the diff,
+            # and require a verify pass. [DONE] is honored only when the turn
+            # carries NO new edits (already verified, or a clean no-op). The
+            # check is non-mutating; on_stop (below) does the real apply +
+            # marks the blocks seen, so next round's [DONE] carries nothing
+            # new and is honored.
+            if (has_pending_edits is not None and on_stop is not None
+                    and has_pending_edits(full_response + result)):
+                _gate_keep_alive = True
+                status(
+                    f"  [{model.split('/')[-1]}] round {round_num}: "
+                    f"[DONE] held — applying edits, then showing the diff to "
+                    f"verify before finishing"
+                )
+                # fall through (NO break): on_stop applies + returns the diff,
+                # the continuation prompt frames the verify step.
+            else:
+                result = result.rstrip()
+                _round_texts.append(result)
+                full_response += result
+                _done_signaled = True
+                break
 
         # ── CONTINUE: keep writing without tools ──────────────────────
         if _signal_in_bridge(CONTINUE_TAG):
@@ -2217,60 +3181,6 @@ async def call_with_tools(
                 f"— model forgot [/tool use]"
             )
 
-        # ── Prompt-leak guard: trim hallucinated JARVIS scaffolding ────
-        # When a model starts emitting tokens that ONLY ever appear in
-        # our bridge prompt (e.g. "TOOL RESULTS (cumulative", "[← CODE:")
-        # it has lost track of what's input vs output and the rest of
-        # the response is unreliable. Cut at the first such marker — the
-        # text before it is still real model output that we can use.
-        # Observed in practice: kimi-k2.6 emitted the full TOOL RESULTS
-        # banner and 400+ duplicate code lines AFTER its real reply.
-        # Phrases that ONLY appear in the continuation prompt's
-        # scaffolding. We trim the response at the EARLIEST leak so
-        # hallucinated prompt-templates downstream get cut too.
-        _PROMPT_LEAK_MARKERS = (
-            # New unified [...] section labels:
-            "[YOUR TOOL INDEX]",
-            "[YOUR PAST THINKING]",
-            "[YOUR PLAN]",
-            "[YOUR TOOL RESULTS]",   # legacy still possible to leak
-            "[YOUR PRIOR TURNS]",    # legacy still possible to leak
-            "[WRITE YOUR NEXT TURN BELOW]",
-            "[PROJECT CONTEXT]",
-            "[INPUT PLANS]",
-            "[END INPUT PLANS]",
-            "[INPUT PLAN #",
-            "────── ROUND",
-            # Legacy banners:
-            "TOOL RESULTS (cumulative across all tool calls",
-            "══ CONTEXT MANIFEST — what you have actually read",
-            "TOOL CALLS THAT DID NOT FIRE",
-            "BUDGET OVERFLOW — these results were DROPPED",
-            "EDIT APPLICATION RESULTS — what the runtime did",
-            "UNTERMINATED EDIT BLOCK(S)",
-            "YOUR THINKING SO FAR — continuous reasoning",
-            "YOUR PREVIOUS TURNS — DONE, not unfinished",
-            "YOUR WORK SO FAR (continuous — keep writing from where",
-            "↓ Continue your thinking",
-            "↓ Continue writing from where you stopped",
-            "↓ NOW WRITE YOUR NEXT TURN",
-            "\n[← CODE:", "\n[← KEEP:", "\n[← VIEW:",
-            "\n[← REFS:", "\n[← SEARCH:",
-        )
-        _earliest_leak = -1
-        for _marker in _PROMPT_LEAK_MARKERS:
-            _pos = result.find(_marker)
-            if _pos >= 0 and (_earliest_leak < 0 or _pos < _earliest_leak):
-                _earliest_leak = _pos
-        if _earliest_leak >= 0:
-            n_dropped = len(result) - _earliest_leak
-            result = result[:_earliest_leak].rstrip()
-            warn(
-                f"  [{model.split('/')[-1]}] round {round_num}: "
-                f"prompt-leak detected — trimmed {n_dropped:,} chars of "
-                f"hallucinated scaffolding"
-            )
-
         # ── Near-verbatim response loop detector ─────────────────────────
         # Run AFTER all post-processing (signal strip, auto-close, leak
         # trim) so we compare apples-to-apples against the same form that
@@ -2305,6 +3215,27 @@ async def call_with_tools(
             # don't re-run identical tool calls (pure waste), break out.
             break
 
+        # ── Scaffold-hallucination trim ──────────────────────────────────
+        # If the model wrote `────── ROUND` inside its response, it was
+        # fabricating a fake tool-result section. The stream guard already
+        # aborted, but the partial text up to (and possibly including) the
+        # scaffold marker is still in `result`. Trim from the marker
+        # onward — the model's real reasoning + tool calls before that
+        # point are KEPT (so the tools fire normally based on placement);
+        # only the invented content is dropped. Flag the round so the
+        # next prompt prepends a targeted notice in this round's tool
+        # result section.
+        _hallu_idx = result.find("────── ROUND")
+        if _hallu_idx >= 0:
+            _hallucinated_rounds.add(round_num)
+            n_trimmed = len(result) - _hallu_idx
+            result = result[:_hallu_idx].rstrip()
+            warn(
+                f"  [{model.split('/')[-1]}] round {round_num}: "
+                f"scaffold-hallucination — trimmed {n_trimmed:,} chars of "
+                f"fabricated tool-result content"
+            )
+
         _round_texts.append(result)
 
         # ── Process PLAN / PLAN_EDIT blocks ───────────────────────────────
@@ -2331,12 +3262,21 @@ async def call_with_tools(
         _plan_ops_with_pos.sort(key=lambda t: t[0])
         for _pos, _kind, _body in _plan_ops_with_pos:
             if _kind == "write":
-                current_plan = _body.rstrip()
+                current_plan = _strip_think(_body).rstrip()
                 plan_version += 1
                 _line_count = current_plan.count('\n') + 1 if current_plan else 0
                 _plan_op_log.append(
                     f"v{plan_version}: PLAN written ({_line_count} lines)"
                 )
+                # Empty/structure-less plan guard (error-audit F1): a plan with
+                # no `### STEP N:` header gives the coder nothing to implement,
+                # and otherwise ships SILENTLY. Surface a loud per-round note.
+                if not re.search(r'(?m)^\s*###\s*STEP\s*\d+', current_plan):
+                    _plan_op_log.append(
+                        "⚠ PLAN has NO `### STEP N:` headers — the coder cannot "
+                        "implement it. Add at least one `### STEP 1: <name>` with a "
+                        "`FILES:` line and WHAT-TO-DO before [PLAN DONE]."
+                    )
                 _plan_changed = True
             else:  # edit
                 if not current_plan:
@@ -2345,7 +3285,7 @@ async def call_with_tools(
                         "Use === PLAN === first to create the plan."
                     )
                     continue
-                _new_plan, _edit_logs = _apply_plan_edits(current_plan, _body)
+                _new_plan, _edit_logs = _apply_plan_edits(current_plan, _strip_think(_body))
                 if _new_plan != current_plan:
                     current_plan = _new_plan
                     plan_version += 1
@@ -2361,24 +3301,91 @@ async def call_with_tools(
 
         # ── PLAN DONE: finalize and return the plan as the answer ─────────
         # Two-tag signal mirroring [STOP][CONFIRM_STOP] / [DONE][CONFIRM_DONE].
-        # When fires, the runtime returns `current_plan` as the planner's
-        # final answer and breaks out of the loop.
-        if PLAN_DONE_TAG.search(result):
+        # When fires, the runtime returns the planner's final answer and
+        # breaks out of the loop.
+        #   • Preferred path: model used === PLAN === to build `current_plan`
+        #     incrementally → use that as the answer.
+        #   • Backward-compat path: model wrote a plan in raw prose (## GOAL,
+        #     ## REQUIREMENTS, etc.) WITHOUT the === PLAN === wrapper, then
+        #     ended with [PLAN DONE][CONFIRM_PLAN_DONE]. Observed in qwen-3.5:
+        #     wrote a full plan + [PLAN DONE], but `current_plan` was empty
+        #     so the prior runtime just warned and continued — qwen's plan
+        #     was silently discarded and the next round began. Now we fall
+        #     back to using the model's current-round response as the answer.
+        # In both cases: strip the [PLAN DONE]/[CONFIRM_PLAN_DONE]/[STOP]/
+        # [CONFIRM_STOP] tags from the answer so they don't leak downstream.
+        # ── PLAN_DONE detection: masking + context validation ─────────────
+        # Two-layer filter so only a *genuine* terminal PLAN_DONE fires:
+        #
+        #   Layer A (mask): a pair written INSIDE a code fence, [think]
+        #     block, `=== PLAN === ... === END PLAN ===` body, edit body,
+        #     etc. is data, not a signal. _mask_for_signals blanks the
+        #     leading `[` of those instances so the regex can't match.
+        #
+        #   Layer B (context): of the candidates that survive masking,
+        #     only those that follow a recognized "I just finished a plan"
+        #     marker count. See _plan_done_context_kind for the list:
+        #       - `=== END PLAN ===` in the last 2000 chars
+        #       - `## VERIFICATION` / `## CONFIDENCE GATE` / etc. in 2000
+        #       - closed [/think] or </think> in the last 800 chars
+        #
+        # If at least one candidate is in a valid context, the LAST such
+        # one fires (terminal signals are by nature near EOF, and writing
+        # multiple PLAN_DONE pairs is itself a protocol error — we honor
+        # the final one so the model can't accidentally commit twice).
+        #
+        # If candidates exist but NONE are in a valid context, the model
+        # likely emitted PLAN_DONE mid-investigation or while writing
+        # prose that documented the protocol. We fall through to the
+        # "rejected PLAN_DONE" branch below, which surfaces a structured
+        # correction next round.
+        _signal_masked = _mask_for_signals(result)
+        _pd_matches = list(PLAN_DONE_TAG.finditer(_signal_masked))
+        _pd_valid: list[tuple[int, str]] = []
+        for _m in _pd_matches:
+            kind = _plan_done_context_kind(result, _m.start())
+            if kind is not None:
+                _pd_valid.append((_m.start(), kind))
+
+        if _pd_valid:
+            _signal_pos, _ctx_kind = _pd_valid[-1]
             if current_plan:
-                status(
-                    f"  [{model.split('/')[-1]}] round {round_num}: "
-                    f"[PLAN DONE] — finalizing plan (v{plan_version}, "
-                    f"{current_plan.count(chr(10)) + 1} lines)"
-                )
-                full_response = current_plan
-                _done_signaled = True
-                break
+                _answer = current_plan
+                _src = f"=== PLAN === (v{plan_version}, {current_plan.count(chr(10)) + 1} lines)"
             else:
+                # Backward-compat: use the raw response as the plan.
+                _answer = _strip_think(result)
+                for _tag in (PLAN_DONE_TAG, STOP_TAG, DONE_TAG, CONTINUE_TAG):
+                    _answer = _tag.sub('', _answer)
+                # Strip stray half-signals too (model may have written
+                # [PLAN DONE] alone if half-arrived during streaming).
+                _answer = re.sub(
+                    r'\[(?:PLAN\s+DONE|CONFIRM_PLAN_DONE|STOP|CONFIRM_STOP|'
+                    r'DONE|CONFIRM_DONE|FORCE\s+DONE|CONFIRM_FORCE_DONE|'
+                    r'CONTINUE|CONFIRM_CONTINUE)\]',
+                    '', _answer, flags=re.IGNORECASE,
+                ).strip()
+                _src = "raw-prose plan (no === PLAN === block used)"
                 warn(
                     f"  [{model.split('/')[-1]}] round {round_num}: "
-                    f"[PLAN DONE] fired but no plan content exists. "
-                    f"Use === PLAN === to write the plan first."
+                    f"[PLAN DONE] with empty === PLAN === — falling back "
+                    f"to raw-prose response ({len(_answer):,} chars)"
                 )
+            status(
+                f"  [{model.split('/')[-1]}] round {round_num}: "
+                f"[PLAN DONE] in context '{_ctx_kind}' — "
+                f"finalizing plan from {_src}"
+            )
+            full_response = _answer
+            _done_signaled = True
+            break
+
+        # PLAN_DONE pair written but NOT in a valid context — reject it
+        # and queue a structured correction for the next round. Mirrors
+        # the bare-signal correction path below; we set a flag here and
+        # the injection happens in the same block (so we never double-
+        # inject when both conditions are true on the same round).
+        _suspected_invalid_plan_done = bool(_pd_matches) and not _pd_valid
 
         # ── Capture which preamble sections were written in round 1 ──────
         # Once round 1 finishes, scan _round_texts[0] for the section
@@ -2400,11 +3407,14 @@ async def call_with_tools(
             # double-count [STOP] inside [STOP][CONFIRM_STOP] as bare.
             _mask_bare = STOP_TAG.sub('', _mask_bare)
             _mask_bare = DONE_TAG.sub('', _mask_bare)
+            _mask_bare = FORCE_DONE_TAG.sub('', _mask_bare)
             _mask_bare = CONTINUE_TAG.sub('', _mask_bare)
             if (_BARE_STOP.search(_mask_bare)
                     or _BARE_DONE.search(_mask_bare)
+                    or _BARE_FORCE_DONE.search(_mask_bare)
                     or _BARE_CONTINUE.search(_mask_bare)):
                 _suspected_bare_signal = True
+
 
         # ── Detect tool tags via the bulletproof TagDetector ──────────────
         # Single source of truth. TagDetector runs two independent extraction
@@ -2422,8 +3432,13 @@ async def call_with_tools(
         semantic_tags = _detector.valid_args("SEMANTIC")  if purpose_map else []
         lsp_tags      = _detector.valid_args("LSP")       if project_root else []
         knowledge_tags = _detector.valid_args("KNOWLEDGE")
+        # RUN is extracted OUTSIDE the detector (bracket-balanced) — its free-form
+        # shell command routinely contains `]` and needs no [tool use] wrapper.
+        from core.review_verify import extract_run_cmds
+        run_tags      = extract_run_cmds(result)          if allow_run else []
         keep_tags     = _detector.valid_args("KEEP")      if project_root else []
         view_tags     = _detector.valid_args("VIEW")      if project_root else []
+        dependency_tags = _detector.valid_args("DEPENDENCY") if project_root else []
         # DISCARD args are `#label` form — keep the legacy extractor (it
         # has bespoke regex that the new detector's validator would over-
         # tighten). DISCARD never collides with content/position issues.
@@ -2438,7 +3453,7 @@ async def call_with_tools(
         _all_tag_lists = [
             code_tags, web_tags, detail_tags, file_tags, refs_tags,
             purpose_tags, semantic_tags, lsp_tags, knowledge_tags,
-            keep_tags, view_tags,
+            keep_tags, view_tags, dependency_tags, run_tags,
         ]
         _total_tags = sum(len(lst) for lst in _all_tag_lists)
         if _total_tags > MAX_TAGS_PER_ROUND:
@@ -2457,7 +3472,8 @@ async def call_with_tools(
 
         has_tags = bool(code_tags or web_tags or detail_tags or file_tags
                         or refs_tags or purpose_tags or semantic_tags or lsp_tags
-                        or knowledge_tags or keep_tags or view_tags or discard_tags)
+                        or knowledge_tags or keep_tags or view_tags
+                        or dependency_tags or discard_tags)
 
         # ── Dropped-tag detection (visibility for the model) ─────────
         # The full _mask_quoted_tags enforces [tool use] blocks: any tag
@@ -2485,7 +3501,21 @@ async def call_with_tools(
         }
         dropped_tags: list[tuple[str, str]] = []
         _dropped_seen: set[str] = set()
+        # Malformed-arg / unknown-tool rejections: tags the model clearly
+        # MEANT as tool calls but that can't fire (empty arg, prose instead
+        # of a path, unknown tool name, …). Previously dropped silently — the
+        # model then hallucinated results. Collect them to surface explicitly.
+        bad_tags: list[tuple[str, str, str]] = []   # (tag_type, arg, reason)
+        _bad_seen: set[str] = set()
         for t in _detector.rejected_tags():
+            _reason = t.rejection_reason or ""
+            if _reason.startswith("malformed-arg") or _reason == "unknown-tag-type":
+                bkey = _norm_key(t.tag_type, t.clean_arg)
+                if bkey not in _bad_seen:
+                    _bad_seen.add(bkey)
+                    detail = _reason.split(":", 1)[1].strip() if ":" in _reason else _reason
+                    bad_tags.append((t.tag_type, t.clean_arg, detail))
+                continue
             if t.rejection_reason not in _SURFACE_REJECTIONS:
                 continue
             # Edit-syntax overloads of [SEARCH:] are not real tool calls;
@@ -2534,6 +3564,63 @@ async def call_with_tools(
                 "treated as plain text and the loop continues.]\n\n"
                 "Continue your response with the correct two-tag signal "
                 "if that's what you meant.\n"
+            )
+            current_prompt = (
+                current_prompt + "\n\nASSISTANT: " + full_response + correction
+            )
+            full_response = ""
+            continue
+
+        # ── PLAN_DONE rejected (invalid context) ─────────────────────
+        # Model emitted [PLAN DONE][CONFIRM_PLAN_DONE] but it didn't
+        # follow any recognized termination marker. The signal was
+        # *intentional* (both halves present, both unmasked), just
+        # placed wrong. Tell the model what we expected so it can
+        # correct itself in the next round. Skip the injection when
+        # real tool tags ARE present — the round is doing work and
+        # the lookups will themselves push the model toward the
+        # canonical terminal section.
+        if _suspected_invalid_plan_done and not has_tags:
+            warn(
+                f"  [{model.split('/')[-1]}] round {round_num}: "
+                f"[PLAN DONE][CONFIRM_PLAN_DONE] rejected — not in a "
+                f"recognized termination context. Injecting protocol "
+                f"reminder."
+            )
+            full_response += result
+            correction = (
+                "\n\n[SYSTEM NOTE: You emitted [PLAN DONE][CONFIRM_PLAN_DONE] "
+                "but the runtime REJECTED it — the signal was not in a "
+                "valid termination context, so the plan was NOT finalized "
+                "and the loop continues.\n\n"
+                "PLAN_DONE only fires when it appears in one of these "
+                "structural positions:\n"
+                "  1. AFTER `=== END PLAN ===` — your final `=== PLAN ===` "
+                "block was properly closed and the signal terminates it.\n"
+                "  2. AFTER a canonical terminal section header — one of "
+                "`## VERIFICATION`, `## CONFIDENCE GATE`, "
+                "`## PRE-MORTEM RESOLUTION`, `## TEST CRITERIA`, "
+                "`## FINAL NOTES`, or `## SUMMARY`. Write this section "
+                "as the last part of your plan; the runtime treats it as "
+                "the conventional 'I'm done' marker.\n"
+                "  3. AFTER a closed `[think]...[/think]` or "
+                "`<think>...</think>` block — reserved for the case where "
+                "you have genuine reason to commit early (e.g. the user's "
+                "task is a trivial fix that doesn't warrant a ## VERIFICATION "
+                "section). The [think] block must explain WHY ending early "
+                "is correct.\n\n"
+                "What to do next:\n"
+                "  • Normal case: write the canonical terminal section "
+                "(## VERIFICATION) describing how the user will observe the "
+                "change working, then re-issue [PLAN DONE][CONFIRM_PLAN_DONE] "
+                "on its own at the end of your response.\n"
+                "  • Early-commit case: open a [think]...[/think] block "
+                "explaining why the canonical section doesn't apply, then "
+                "re-issue [PLAN DONE][CONFIRM_PLAN_DONE] immediately after "
+                "the closing [/think].\n\n"
+                "Your plan and any progress so far are preserved in YOUR "
+                "PLAN / YOUR PAST THINKING above — no work was lost. "
+                "Continue from where you left off.]\n"
             )
             current_prompt = (
                 current_prompt + "\n\nASSISTANT: " + full_response + correction
@@ -2746,8 +3833,34 @@ async def call_with_tools(
 
         full_response += result
 
-        if not has_tags:
-            break  # No tool requests — done
+        # A [STOP] that ends an edit section (no tool tags, but fresh edits to
+        # apply) must keep the round alive so on_stop applies the edits and the
+        # diff/verify block is shown — otherwise the model never sees the diff
+        # the prompt promised it. Scoped to roles that pass has_pending_edits
+        # (coder/self-check/reviewer); other roles keep the old behavior.
+        _stop_with_pending = (
+            has_stop and has_pending_edits is not None
+            and has_pending_edits(full_response)
+        )
+        # EDIT-WITHOUT-SIGNAL (bug-hunt #1): the model wrote a complete edit
+        # block but emitted NO [STOP]/[DONE]/tool call. Previously the loop
+        # broke here and the edit either applied silently at loop-end (no diff
+        # shown) or vanished — and the model, seeing only "(no tool results)",
+        # looped for rounds, confused. Treat fresh-edits-without-a-signal as an
+        # implicit [STOP]: keep the round alive so on_stop applies them and the
+        # model SEES the verify diff. Dedup makes this safe — a re-written
+        # identical edit yields no NEW pending edits, so the loop breaks cleanly.
+        _pending_no_signal = (
+            not has_stop and not _done_signaled and not _gate_keep_alive
+            and has_pending_edits is not None
+            and has_pending_edits(full_response)
+        )
+        if (not has_tags and not _gate_keep_alive
+                and not _stop_with_pending and not _pending_no_signal):
+            break  # No tool requests and nothing to apply — done
+        # When _gate_keep_alive is set, a [DONE] carried fresh edits: keep the
+        # round alive (even with no tool tags) so on_stop applies them and the
+        # diff/verify block is shown before the model re-issues [DONE].
 
         # ── Apply pending edits BEFORE tool lookups ──────────────────
         # When a coder writes edit blocks then [STOP] + [CODE: file],
@@ -2761,6 +3874,18 @@ async def call_with_tools(
                 feedback = on_stop(full_response)
                 if feedback and isinstance(feedback, str) and feedback.strip():
                     _last_edit_feedback = feedback.strip()
+                    if _pending_no_signal:
+                        # bug-hunt #1: teach the model the signal it skipped,
+                        # while still showing it the diff (already applied).
+                        _last_edit_feedback = (
+                            "⚠ You wrote an edit block with NO [STOP][CONFIRM_STOP] "
+                            "signal. Edits are applied and the verify-diff is shown "
+                            "only when you end the turn with [STOP][CONFIRM_STOP] (or "
+                            "[DONE][CONFIRM_DONE] when finished). I applied them for "
+                            "you this time — verify the diff below — but ALWAYS emit "
+                            "the signal yourself; signals written inside [think] are "
+                            "INERT and do nothing.\n\n" + _last_edit_feedback
+                        )
                     # Parse the feedback to update per-file attempt history.
                     # Lines starting with "✓" = success on that file; "✗" = miss.
                     # We use this for stall detection below.
@@ -2806,20 +3931,25 @@ async def call_with_tools(
                     (_last_edit_feedback + "\n\n") if _last_edit_feedback else ""
                 ) + (
                     f"🛑 EDIT-FLAILING DETECTED on {fp}\n"
-                    f"  You've attempted edits on {fp} in {len(history)} rounds and "
-                    f"the last 3 all failed. Variations on the same SEARCH approach "
-                    f"won't work — STOP retrying it.\n"
-                    f"  CHOOSE ONE of these recovery paths:\n"
-                    f"    1. [CODE: {fp}] to re-read the file fresh, then write a\n"
-                    f"       FUNDAMENTALLY DIFFERENT SEARCH anchor (different lines,\n"
-                    f"       not just different whitespace).\n"
-                    f"    2. Use [REPLACE LINES N-M] with line numbers from the\n"
-                    f"       most recent [CODE:] read of {fp} — bypasses SEARCH\n"
-                    f"       entirely. Safe for unique line ranges.\n"
-                    f"    3. If a prior edit DID apply but landed wrong, use\n"
-                    f"       [REVERT FILE: {fp}] to undo, then plan from clean.\n"
-                    f"    4. If you've tried everything: write what you accomplished\n"
-                    f"       and [DONE][CONFIRM_DONE] — the next pass will retry."
+                    f"  Edits on {fp} failed the last 3 rounds. STOP repeating the "
+                    f"same anchors. CHOOSE ONE recovery path:\n"
+                    f"    1. [VIEW: {fp} A B] the target region, then copy the lines "
+                    f"you anchor on VERBATIM with their CURRENT numbers + INDENT "
+                    f"counts. Anchor on two DISTINCTIVE code lines — never a blank, "
+                    f"never a line that repeats in the file.\n"
+                    f"    2. Use [REPLACE LINES N-M] (inside === EDIT: {fp} ===) with "
+                    f"numbers from your latest read. Close with [/REPLACE] (NOT "
+                    f"[/REPLACE LINES]); body = ONLY the new lines in INDENT|code "
+                    f"form, no context lines:\n"
+                    f"         === EDIT: {fp} ===\n"
+                    f"         [REPLACE LINES N-M]\n"
+                    f"         8|new code here\n"
+                    f"         [/REPLACE]\n"
+                    f"         === END EDIT ===\n"
+                    f"         [STOP][CONFIRM_STOP]\n"
+                    f"    3. If a prior edit landed wrong, [REVERT FILE: {fp}] then "
+                    f"redo from clean.\n"
+                    f"    4. If truly stuck: [DONE][CONFIRM_DONE] with what you have."
                 )
                 # Reset the history so we don't fire again next round on
                 # the same trigger — the model gets one strong nudge per
@@ -2837,8 +3967,17 @@ async def call_with_tools(
         # it has seen content it never actually requested.
         def _cached_or_run(tag_type: str, tags: list[str]) -> tuple[list[str], str]:
             """Returns (new_tags_to_run, cached_output_for_already_run_tags).
-            CODE and KEEP always re-run — file content may have changed."""
-            if tag_type in ("CODE", "KEEP"):
+
+            CODE and KEEP normally re-run because the file may have been
+            edited mid-conversation (coder paths). When `cache_file_reads`
+            is True (planner / reviewer paths that don't write edits) we
+            also cache CODE/KEEP — re-asking for the same path returns the
+            stored content with a notice instead of burning a tool round.
+            This was the #1 source of planners exhausting their budget:
+            kimi-k2.6 re-issued [CODE: separable.py] in R1, R2, R7 because
+            the runtime kept obliging.
+            """
+            if tag_type in ("CODE", "KEEP") and not cache_file_reads:
                 return tags, ""
             cached_out = ""
             new_tags = []
@@ -2947,13 +4086,13 @@ async def call_with_tools(
             len(code_tags) + len(web_tags) + len(detail_tags) + len(file_tags)
             + len(refs_tags) + len(purpose_tags) + len(semantic_tags)
             + len(lsp_tags) + len(knowledge_tags) + len(keep_tags)
-            + len(view_tags)
+            + len(view_tags) + len(dependency_tags)
         )
         mode = _describe_tool_mode(result)
         tags_desc = _tag_summary(
             code_tags, web_tags, detail_tags, file_tags, refs_tags,
             purpose_tags, semantic_tags, lsp_tags, knowledge_tags, keep_tags,
-            view_tags,
+            view_tags, dependency_tags,
             research_cache, persistent_lookups,
         )
         status(f"  [{model.split('/')[-1]}] tool round {round_num}/{max_rounds}: "
@@ -2981,6 +4120,8 @@ async def call_with_tools(
         for t in knowledge_tags: round_keys.add(_norm_tag_key("KNOWLEDGE", t))
         for t in keep_tags:    round_keys.add(_norm_tag_key("KEEP", t))
         for t in view_tags:    round_keys.add(_norm_tag_key("VIEW", t))
+        for t in dependency_tags: round_keys.add(_norm_tag_key("DEPENDENCY", t))
+        for t in run_tags:     round_keys.add(_norm_tag_key("RUN", t))
 
         # A round is "stalled" if every key was already run by this model.
         # We do NOT check the shared research_cache — results from other parallel
@@ -3106,9 +4247,10 @@ async def call_with_tools(
                 # commit can leak `[CONFIRM_DONE]` / `[STOP]` text into the
                 # final answer, which downstream regex (e.g. _extract_code_blocks
                 # consumed_spans) doesn't expect.
-                for _pat in (DONE_TAG, STOP_TAG, CONTINUE_TAG):
+                for _pat in (FORCE_DONE_TAG, DONE_TAG, STOP_TAG, CONTINUE_TAG):
                     final_result = _pat.sub('', final_result)
                 for _half in (
+                    r'\[CONFIRM_FORCE_DONE\]', r'\[FORCE\s+DONE\]',
                     r'\[CONFIRM_DONE\]', r'\[DONE\]',
                     r'\[CONFIRM_STOP\]', r'\[STOP\]',
                     r'\[CONFIRM_CONTINUE\]', r'\[CONTINUE\]',
@@ -3125,11 +4267,21 @@ async def call_with_tools(
         # variable. The previous inline-`async def` form was correct only
         # because we awaited every result before the next iteration; making
         # it explicit removes the foot-gun.
+        # v12: roles read in PREFIX mode — `LINENO:INDENT|content` (INDENT = a
+        # leading-space COUNT). Reverted from whitespace: the coder kept
+        # mis-indenting NEW block bodies (e.g. an `else:` body at the keyword's
+        # level) when it had to type real spaces. With the explicit count the
+        # model writes `16|raise TypeError(other)` and the runtime expands `16|`
+        # into 16 spaces — it only has to get the NUMBER right, not type spaces.
+        _display_mode = "prefix"
         def _run_search(tag): return _run_code_searches([tag], _search_root)
         def _run_web(tag):    return _run_web_searches([tag])
-        def _run_detail(tag): return _run_detail_lookups([tag], detailed_map)
-        def _run_code(tag):
-            return _run_code_reads([tag], project_root, viewed_versions=viewed_versions)
+        def _run_detail(tag): return _run_detail_lookups([tag], detailed_map, project_root=project_root)
+        async def _run_code(tag):
+            return await _run_code_reads(
+                [tag], project_root, viewed_versions=viewed_versions,
+                display_mode=_display_mode,
+            )
         def _run_refs(tag):   return _run_refs_searches([tag], _search_root)
         def _run_purpose(tag): return _run_purpose_lookups([tag], purpose_map, project_root)
         async def _run_semantic(tag):
@@ -3140,7 +4292,13 @@ async def call_with_tools(
             return await semantic_retrieve(
                 tag, purpose_map, project_root, maps_dir, file_hash, top_n=10
             )
-        def _run_lsp(tag): return _run_lsp_searches([tag], project_root)
+        def _run_lsp(tag):
+            return (
+                f"=== LSP for '{tag}': folded into REFS / DEPENDENCY ===\n"
+                f"  • [REFS: {tag}] — DEFINED / IMPORTED / USED classification, ripgrep-fast\n"
+                f"  • [DEPENDENCY: #tag] — type-resolved callers (LSP-precise, follows aliases)\n"
+                f"Prefer DEPENDENCY when REFS misses sites due to import aliases or type indirection.\n"
+            )
         def _run_knowledge(tag): return _run_knowledge_lookups([tag])
 
         if code_tags and project_root:
@@ -3206,6 +4364,83 @@ async def call_with_tools(
                 r = await _locked_lookup("KNOWLEDGE", t, _run_knowledge)
                 round_output += r
 
+        if dependency_tags and project_root:
+            async def _run_dep(tag):
+                return await _run_dependency_lookup([tag], project_root)
+            new_tags, cached = _cached_or_run("DEPENDENCY", dependency_tags)
+            round_output += cached
+            for t in new_tags:
+                r = await _locked_lookup("DEPENDENCY", t, _run_dep)
+                round_output += r
+
+        # ── RUN handler — diagnostic command in the fail-proof sandbox ──
+        # Planner / reviewer only (allow_run). Runs in core.safe_exec: read-only
+        # filesystem (no edit/delete possible), no network, no privilege, HOME
+        # hidden, ephemeral /tmp, resource-limited. The model runs commands to
+        # OBSERVE (run the app, call a function, inspect behavior) — it cannot
+        # mutate anything.
+        if run_tags and allow_run:
+            def _run_command(tag):
+                from core.safe_exec import run_sandboxed
+                cmd = (tag or "").strip()
+                if not cmd:
+                    return ("=== RUN — NO COMMAND ===\n"
+                            "[RUN:] needs a command to run, e.g. "
+                            "[RUN: python -c \"import pkg.m as m; print(m.f(3))\"]. "
+                            "A blank command does nothing.\n")
+                base = run_cwd or project_root or os.getcwd()
+                res = run_sandboxed(cmd, cwd=base, project_root=base, timeout=60)
+                # 1. BLOCKED by policy (or sandbox unavailable / fail-safe deny)
+                if res["blocked"]:
+                    if res.get("sandbox") == "none":
+                        return (f"=== RUN — UNAVAILABLE: {cmd} ===\n{res['reason']}\n")
+                    return (f"=== RUN — ✗ BLOCKED: {cmd} ===\n{res['reason']}\n"
+                            f"Nothing ran. This is a read-only, no-network, "
+                            f"no-privilege diagnostic sandbox — run a command "
+                            f"that OBSERVES (prints/inspects/runs the code), "
+                            f"not one that edits, deletes, installs, or reaches "
+                            f"the network.\n")
+                code = res["exit_code"]
+                out = res["output"] or "(the command produced no output on stdout or stderr)"
+                # 2. TIMED OUT (hang / fork-bomb guard)
+                if res["timed_out"]:
+                    return (f"=== RUN — ⏱ TIMED OUT (>60s, killed): {cmd} ===\n"
+                            f"The command ran too long and was killed. Make it "
+                            f"terminate quickly (smaller input, add a limit, or "
+                            f"avoid waiting on something).\n{out}\n")
+                # 3. RAN OK (exit 0)
+                if code == 0:
+                    return (f"=== RUN — ✓ ok (exit 0): {cmd} ===  "
+                            f"[read-only/no-net sandbox]\n{out}\n")
+                # 4. RAN but FAILED (non-zero exit). Distinguish a genuine code
+                #    failure from a network attempt the sandbox blocked — the
+                #    latter shows up as a DNS/connection error and is EXPECTED,
+                #    not a bug, so don't send the model chasing its own code.
+                _net = any(s in out for s in (
+                    "name resolution", "Name or service not known",
+                    "Temporary failure in name resolution", "Connection refused",
+                    "Network is unreachable", "ECONNREFUSED", "ENETUNREACH",
+                    "getaddrinfo", "nodename nor servname", "No route to host",
+                ))
+                if _net:
+                    return (f"=== RUN — ✗ FAILED (exit {code}): {cmd} ===  "
+                            f"[read-only/no-net sandbox]\n"
+                            f"The error below is a NETWORK error — this sandbox has "
+                            f"NO network access by design, so it's expected, not a "
+                            f"bug in the code. Verify with a command that doesn't "
+                            f"need the network.\n{out}\n")
+                return (f"=== RUN — ✗ FAILED (exit {code}): {cmd} ===  "
+                        f"[read-only/no-net sandbox]\n"
+                        f"The command RAN but exited non-zero — read the output "
+                        f"below (traceback / error message) to see WHY. If it "
+                        f"mentions network/DNS/connection, that's the sandbox (no "
+                        f"network); otherwise it's the code's own failure.\n{out}\n")
+            new_tags, cached = _cached_or_run("RUN", run_tags)
+            round_output += cached
+            for t in new_tags:
+                r = await _locked_lookup("RUN", t, _run_command)
+                round_output += r
+
         # ── KEEP handler — replaces CODE entries in persistent_lookups ──
         if keep_tags and project_root:
             def _on_keep_seen(canonical_key: str, raw_arg: str) -> None:
@@ -3227,6 +4462,7 @@ async def call_with_tools(
                 persistent_lookups, research_cache,
                 viewed_versions=viewed_versions,
                 on_keep_seen=_on_keep_seen,
+                display_mode=_display_mode,
             )
             round_output += keep_result
 
@@ -3250,6 +4486,7 @@ async def call_with_tools(
                 research_cache=research_cache,
                 viewed_versions=viewed_versions,
                 on_view_seen=_on_view_seen,
+                display_mode=_display_mode,
             )
             round_output += view_result
 
@@ -3431,15 +4668,33 @@ async def call_with_tools(
             for _i, _text in enumerate(_round_texts):
                 _rn = _i + 1
                 _past_thinking_parts.append(
-                    f"────── ROUND {_rn} ──── what you thought ──────"
+                    f"────── ROUND {_rn} — your thinking ──────"
                 )
                 _past_thinking_parts.append(_text.rstrip())
                 _round_entries = _by_round.get(_rn, [])
                 if _round_entries:
                     _past_thinking_parts.append("")
                     _past_thinking_parts.append(
-                        f"────── ROUND {_rn} ──── what your tools returned ──────"
+                        f"────── ROUND {_rn} — your tool result ──────"
                     )
+                    # Targeted hallucination notice — if the round's
+                    # stream aborted because the model started faking a
+                    # tool result, tell the model right here, attached to
+                    # this round's results, that what they imagined is
+                    # NOT what's below. Avoids both the model trusting
+                    # its own fabrication AND repeating it next round.
+                    if _rn in _hallucinated_rounds:
+                        _past_thinking_parts.append(
+                            "⚠ In your previous response you started "
+                            "writing a fake `────── ROUND N — your tool "
+                            "result ──────` block and inventing content "
+                            "after it. The runtime aborted that stream. "
+                            "What you imagined is GONE. The REAL results "
+                            "from the tools you actually called are listed "
+                            "below — quote and reason from these, not "
+                            "from whatever you started to fabricate."
+                        )
+                        _past_thinking_parts.append("")
                     for _k, _info in _round_entries:
                         _tt = _info["tag_type"]
                         _arg = _info["arg"]
@@ -3453,11 +4708,26 @@ async def call_with_tools(
                             f"\n[{_tt}: {_arg}]{_flag}\n{_content}"
                         )
                 else:
-                    _past_thinking_parts.append(
-                        "\n(no tool results from this round — either no tools "
-                        "fired, or all results were dropped for budget; see "
-                        "[BUDGET OVERFLOW] above if shown)"
-                    )
+                    if _rn in _hallucinated_rounds:
+                        _past_thinking_parts.append("")
+                        _past_thinking_parts.append(
+                            f"────── ROUND {_rn} — your tool result ──────"
+                        )
+                        _past_thinking_parts.append(
+                            "⚠ Your stream aborted because you began "
+                            "fabricating a fake tool-result block. No "
+                            "real tools fired in this round (or all "
+                            "were dropped). Don't reason from your "
+                            "imagined results — make NEW tool calls if "
+                            "you still need the info."
+                        )
+                    else:
+                        _past_thinking_parts.append(
+                            "\n(no tool results from this round — either "
+                            "no tools fired, or all results were dropped "
+                            "for budget; see [BUDGET OVERFLOW] above if "
+                            "shown)"
+                        )
                 _past_thinking_parts.append("")  # blank line between rounds
 
         past_thinking = "\n".join(_past_thinking_parts).rstrip()
@@ -3497,29 +4767,75 @@ async def call_with_tools(
         else:
             plan_section = ""
 
-        # Build continuation prompt — include explicit round budget so the
-        # model feels time pressure to commit instead of looping. After the
-        # halfway mark we escalate: "wrap up". Past the threshold, we say
-        # "STOP investigating, COMMIT NOW".
+        # Build continuation prompt — escalating budget pressure that
+        # tells the model to commit a DRAFT plan, not just "wrap up
+        # investigation." Models read "commit" as "lock in your approach
+        # in prose" rather than "write === PLAN ===" — so the cue is
+        # explicit about the action. Past halfway: start the draft.
+        # Past 2/3: stop investigating, draft now (refine later via
+        # === PLAN_EDIT ===). Past budget: no more tools, period.
+        #
+        # Observed (20260513_131849 minimax-m2.7): the model wrote 6
+        # rounds of "## ORIENT (updated after RN results)" refining its
+        # approach in prose, never emitted === PLAN ===, then in R6
+        # degenerated into empty `[tool use]…[/tool use]` blocks. The
+        # weaker prior wording let "commit" mean anything.
         budget_msg = ""
         rounds_used = round_num
         rounds_left = max_rounds - rounds_used
+        # Role-aware budget nudge (bug-hunt #7): an edit-writing role (coder /
+        # self-check / reviewer — they pass has_pending_edits) must be told to
+        # FINISH ITS EDITS, never to "write a === PLAN ===" (that planner-only
+        # text was being shown to stuck coders, derailing them mid-edit).
+        _edit_role = has_pending_edits is not None
         if rounds_left <= 0:
-            budget_msg = (
-                "\n⛔ NO TOOL ROUNDS LEFT. This is your FINAL response. "
-                "Write your plan/edits NOW. Do NOT use any more tool tags."
-            )
+            if _edit_role:
+                budget_msg = (
+                    f"\n⛔ Round {rounds_used}/{max_rounds} — NO ROUNDS LEFT. FINAL "
+                    "response: make your remaining edit(s) now and end with "
+                    "[STOP][CONFIRM_STOP], or [DONE][CONFIRM_DONE] if the change is "
+                    "complete. No more tool calls or investigation."
+                )
+            else:
+                budget_msg = (
+                    f"\n⛔ Round {rounds_used}/{max_rounds} — NO ROUNDS LEFT. This is your "
+                    "FINAL response. Write your COMPLETE plan inside `=== PLAN === ... "
+                    "=== END PLAN ===` THEN `[PLAN DONE][CONFIRM_PLAN_DONE]`. Do NOT "
+                    "use any more tool tags."
+                )
         elif rounds_used >= max(3, max_rounds * 2 // 3):
-            budget_msg = (
-                f"\n⚠ Round {rounds_used}/{max_rounds}. {rounds_left} round(s) left. "
-                "Wrap up investigation and commit to your answer. Use tools ONLY if "
-                "absolutely required to fill a remaining gap."
-            )
+            if _edit_role:
+                budget_msg = (
+                    f"\n⛔ Round {rounds_used}/{max_rounds} — {rounds_left} round(s) left. "
+                    "STOP INVESTIGATING. Make your edit(s) THIS round and end with "
+                    "[STOP][CONFIRM_STOP] (or [DONE][CONFIRM_DONE] if already done). "
+                    "Tool calls only for one SPECIFIC remaining gap."
+                )
+            else:
+                budget_msg = (
+                    f"\n⛔ Round {rounds_used}/{max_rounds} — {rounds_left} round(s) left. "
+                    "STOP INVESTIGATING. Write your `=== PLAN === ... === END PLAN ===` "
+                    "block this round — even if not perfect, you can refine with "
+                    "`=== PLAN_EDIT ===` later. Tool calls only for one SPECIFIC "
+                    "remaining gap (and only if naming it as one question)."
+                )
         elif rounds_used >= max(2, max_rounds // 2):
-            budget_msg = (
-                f"\n• Round {rounds_used}/{max_rounds}. You have {rounds_left} round(s) left. "
-                "Prefer committing over more investigation when in doubt."
-            )
+            if _edit_role:
+                budget_msg = (
+                    f"\n⚠ Round {rounds_used}/{max_rounds} — past halfway, {rounds_left} "
+                    "round(s) left. Make your FIRST edit now (don't keep investigating): "
+                    "write the [edit] block and [STOP][CONFIRM_STOP] to see the diff, "
+                    "then refine. Landing an edit beats more reading."
+                )
+            else:
+                budget_msg = (
+                    f"\n⚠ Round {rounds_used}/{max_rounds} — past halfway, {rounds_left} "
+                    "round(s) left. START YOUR DRAFT PLAN NOW: open "
+                    "`=== PLAN === ... === END PLAN ===` and write what you have so far, "
+                    "even if incomplete. Refine in later rounds with `=== PLAN_EDIT ===` "
+                    "or with one more focused tool call. Refining a draft beats "
+                    "polishing your approach in prose."
+                )
 
         # ── Build context manifest ────────────────────────────────────
         def _manifest_line(k: str, v: dict) -> str:
@@ -3550,14 +4866,19 @@ async def call_with_tools(
         # If the model just re-issued a CODE/KEEP for an identical key this
         # round, surface that as a separate top-level warning — easy to miss
         # buried in the manifest list.
+        # bug-hunt #7: re-reading a file you just EDITED is legitimate
+        # verification, not a loop — the content genuinely changed. Exclude
+        # files that have had edit activity this session from the loop nag.
+        _edited_files = set(_edit_attempts_per_file.keys())
         repeat_offenders = [k for k in round_keys
                             if k.split(':', 1)[0] in ('CODE', 'KEEP', 'VIEW')
-                            and _reread_count.get(k, 0) >= 1]
+                            and _reread_count.get(k, 0) >= 1
+                            and not any(fp and fp in k for fp in _edited_files)]
         if repeat_offenders:
             manifest_lines.append(
                 "🛑 LOOP DETECTED: you just re-requested " +
                 ", ".join(f"[{k}]" for k in repeat_offenders) +
-                " — the result is IDENTICAL to your previous reads. "
+                " — and the file has NOT changed since your last read. "
                 "STOP re-investigating. Use what you already have and COMMIT."
             )
         manifest_lines.append(
@@ -3618,6 +4939,47 @@ async def call_with_tools(
         else:
             dropped_block = ""
 
+        # ── Malformed / unknown tool calls ───────────────────────────
+        # Tags the model meant as tool calls but that can't fire. Tell it
+        # exactly what was wrong and the corrected form, so it never has to
+        # guess (and never hallucinates a result for a call that didn't run).
+        if bad_tags:
+            _ALIAS = {  # common wrong tool names → the right one
+                "READ": "CODE", "OPEN": "CODE", "CAT": "CODE", "GET": "CODE",
+                "GREP": "SEARCH", "FIND": "SEARCH", "RG": "SEARCH",
+                "LS": "SEARCH", "LIST": "SEARCH", "GLOB": "SEARCH",
+                "WRITE": "=== FILE:", "EDIT": "=== EDIT:",
+            }
+            def _bad_hint(tt: str, arg: str) -> str:
+                ttu = tt.upper()
+                if ttu in _ALIAS:
+                    return f"no such tool. Did you mean [{_ALIAS[ttu]} {arg or 'path'}]?"
+                if ttu in ("CODE", "VIEW", "KEEP", "PURPOSE", "DETAIL"):
+                    if not arg.strip():
+                        return f"empty argument — give a path, e.g. [{ttu}: path/to/file.py]."
+                    return (f"that doesn't look like a path. Write just the path: "
+                            f"[{ttu}: path/to/file.py]"
+                            + (" N-M] for a range" if ttu in ("VIEW", "KEEP") else "]") + ".")
+                if ttu == "REFS":
+                    return "REFS takes ONE symbol (no spaces). Use [REFS: symbol_name], or [SEARCH: free text] for phrases."
+                if ttu == "DEPENDENCY":
+                    return "expects a #hex tag from a `|appears N (#tag)` annotation, e.g. [DEPENDENCY: #3df] — not a name. Use [REFS: name] to find usages."
+                if ttu in ("SEARCH", "SEMANTIC"):
+                    return f"empty/invalid query. Use [{ttu}: your query here]."
+                return "malformed — check the tool syntax in the TOOL TABLE above."
+            _bad_lines = [f"  ✗ [{tt}: {arg}] — {_bad_hint(tt, arg)}" for tt, arg, _ in bad_tags]
+            bad_block = (
+                "══════════════════════════════════════════════════════════════════════\n"
+                "MALFORMED TOOL CALLS — these did NOT run\n"
+                "══════════════════════════════════════════════════════════════════════\n"
+                + "\n".join(_bad_lines) + "\n\n"
+                "Fix the syntax and re-issue inside [tool use]...[/tool use]. Do NOT\n"
+                "assume these produced results — they did not.\n"
+                "══════════════════════════════════════════════════════════════════════\n\n"
+            )
+        else:
+            bad_block = ""
+
         # ── Build the "edit application results" block ────────────────
         # The dominant cause of multi-round edit loops is the model
         # writing an edit, then [CODE:] verifying it, but never seeing
@@ -3628,27 +4990,68 @@ async def call_with_tools(
         # we inject the on_stop feedback at the TOP of the continuation
         # prompt so it's the first thing the model reads next round.
         if _last_edit_feedback:
+            # The feedback may lead with a "DIFF\n<unified diff>" section
+            # (LINENO:+ added / LINENO:- removed / LINENO: context) followed
+            # by the per-file ✓/✗ summary. Split them so the diff is framed
+            # as the thing to VERIFY and the summary reads as status.
+            _fb = _last_edit_feedback
+            _diff_part, _summary_part = "", _fb
+            if _fb.startswith("DIFF\n"):
+                _rest = _fb[len("DIFF\n"):]
+                # summary lines start with the ✓/✗/↺ markers; the diff is
+                # everything before the first such line.
+                _m = re.search(r'(?m)^\s*[✓✗↺]', _rest)
+                if _m:
+                    _diff_part = _rest[:_m.start()].rstrip()
+                    _summary_part = _rest[_m.start():].rstrip()
+                else:
+                    _diff_part, _summary_part = _rest.rstrip(), ""
+            _has_reject = ('✗' in _summary_part) or ('REJECTED' in _summary_part)
+            _has_applied = ('✓' in _summary_part) or bool(_diff_part)
+            # Accurate header (bug-hunt #2): don't claim "EDITS WERE APPLIED"
+            # when some were rejected — that contradiction (header says applied,
+            # ✗ lines say rejected) made the model believe nothing landed.
+            if _has_applied and _has_reject:
+                _hdr = ("SOME EDITS APPLIED, SOME REJECTED — "
+                        "VERIFY THE DIFF, THEN FIX THE REJECTED ONES")
+            elif _has_reject:
+                _hdr = "YOUR EDIT WAS REJECTED — IT DID NOT APPLY (see ✗ below)"
+            else:
+                _hdr = "YOUR EDITS WERE APPLIED — VERIFY THIS DIFF BEFORE YOU FINISH"
             edit_results_block = (
                 "══════════════════════════════════════════════════════════════════════\n"
-                "EDIT APPLICATION RESULTS — what the runtime did with your last edits\n"
+                f"{_hdr}\n"
                 "══════════════════════════════════════════════════════════════════════\n"
-                f"{_last_edit_feedback}\n\n"
-                "▸ If an edit applied, the file IS now different — don't re-write\n"
-                "  the same edit thinking it failed. Look at the post-edit content\n"
-                "  in the [CODE:] result below to confirm.\n"
-                "▸ If an edit was REJECTED, the reason tells you what to fix.\n"
-                "  Common causes:\n"
-                "    • SEARCH anchor not unique — multiple regions matched;\n"
-                "      add more context lines to the SEARCH to disambiguate.\n"
-                "    • SEARCH anchor not matched — your SEARCH text doesn't\n"
-                "      appear verbatim in the file. Re-read the file with\n"
-                "      [CODE:] and copy the exact lines.\n"
-                "    • Catastrophic-shrink tripwire — your SEARCH would have\n"
-                "      removed >50%% of the file. Use a smaller, more unique\n"
-                "      anchor on the specific change point, not a big sweep.\n"
-                "▸ DO NOT re-issue an identical SEARCH/REPLACE that already\n"
-                "  applied. Re-applying creates duplicates.\n"
-                "══════════════════════════════════════════════════════════════════════\n\n"
+                "This is THIS ROUND's result — the ACTUAL before/after of files you changed.\n"
+                "(Any ✗ REJECTED lines from EARLIER rounds in the history above may have\n"
+                " since been fixed — trust THIS block + the file view, not stale history.)\n"
+                "  `N:+ …`  a line you ADDED       (N = its new line number)\n"
+                "  `N:- …`  a line you REMOVED     (N = its old line number)\n"
+                "  `N:  …`  unchanged context\n\n"
+                + (f"{_diff_part}\n\n" if _diff_part else "")
+                + (f"{_summary_part}\n\n" if _summary_part else "")
+                + "▶ VERIFY, line by line, before [DONE]:\n"
+                "  1. Every `:-` line — did you MEAN to remove it? An unexpected\n"
+                "     `:-` is a deletion you didn't intend (a swallowed line, a\n"
+                "     dropped blank). If so, the edit is WRONG — fix it.\n"
+                "  2. Every `:+` line — right indentation? right place? complete?\n"
+                "  3. Does the change actually do what the step asked?\n\n"
+                "▶ THEN decide:\n"
+                "  • Diff is correct and the step is satisfied → write\n"
+                "      [DONE]\n      [CONFIRM_DONE]\n"
+                "    (The edits are already on disk — do NOT re-issue them; a\n"
+                "     second copy of the same edit DUPLICATES the lines.)\n"
+                "  • Diff is wrong / incomplete → write a CORRECTIVE [edit]\n"
+                "    block now (anchor the lines as they are AFTER this diff —\n"
+                "    use the new line numbers above). Do not repeat the edit\n"
+                "    that already applied.\n"
+                + ("  • An edit was REJECTED (see ✗ above) — it did NOT apply;\n"
+                   "    the file is unchanged for that one. The reason says what\n"
+                   "    to fix. Common: anchor text doesn't match the file (re-read\n"
+                   "    with [CODE:] and copy the exact line), or a blank/trivial\n"
+                   "    anchor (use a distinctive code line as your top & bottom).\n"
+                   if _has_reject else "")
+                + "══════════════════════════════════════════════════════════════════════\n\n"
             )
         else:
             edit_results_block = ""
@@ -3675,8 +5078,8 @@ async def call_with_tools(
                     )
                 else:
                     unterm_lines.append(
-                        f"  ✗ `=== EDIT: {fp}` is missing `[/REPLACE]`, "
-                        f"`[/INSERT]`, or `=== END FILE ===`"
+                        f"  ✗ `=== EDIT: {fp}` is missing its close "
+                        f"(`[/edit]` then `=== END EDIT ===`)"
                     )
             unterminated_block = (
                 "══════════════════════════════════════════════════════════════════════\n"
@@ -3693,10 +5096,10 @@ async def call_with_tools(
                 "      === END FILE ===\n"
                 "    on its own line. Anything between the header and that line\n"
                 "    is treated as file content.\n"
-                "  • For `=== EDIT:` — every change inside the block must end with\n"
-                "      [/REPLACE]   (for [SEARCH]…[/SEARCH] [REPLACE]…)\n"
-                "      [/INSERT]    (for [INSERT AFTER LINE N]…)\n"
-                "      [/REPLACE]   (for [REPLACE LINES N-M]…)\n"
+                "  • For `=== EDIT:` — close the `[edit]` block with `[/edit]`,\n"
+                "    then end the envelope with `=== END EDIT ===`, then your\n"
+                "    `[STOP][CONFIRM_STOP]` on its own line. (Legacy SEARCH/REPLACE\n"
+                "    and INSERT blocks close with [/REPLACE] / [/INSERT].)\n"
                 "    A new `=== EDIT:` header does NOT close the previous one.\n\n"
                 "Tool calls you wanted to fire — re-issue them in a NEW round\n"
                 "after closing the unterminated block.\n"
@@ -3756,23 +5159,30 @@ async def call_with_tools(
         # to "I haven't seen the result yet" re-issues. With results
         # FIRST, the model reads them as context, then reads its own
         # work, then continues writing — natural flow, no back-tracking.
-        # Continuation prompt — every section is clearly labelled and has
-        # ONE owner. The model never has to guess "is this for me to do, or
-        # is this what I already did?". The [SYSTEM] block (in `prompt`)
-        # gives WORKFLOW + HOW TO THINK. The [USER REQUEST] gives the GOAL.
-        # [YOUR PAST THINKING] is the model's own chronological history —
-        # round by round, each round showing "what you thought" then
-        # "what your tools returned". That ordering matches the actual
-        # temporal flow: you wrote tool calls, then results came back,
-        # then you wrote more, then more results came back, etc.
+        # Continuation prompt — order matters for PREFIX CACHING.
         #
-        # [WRITE YOUR NEXT TURN BELOW] is the bottom marker — the model
-        # writes its NEXT response below it. The cue avoids any reference
-        # to the prior `[tool use]` block (which earlier framings caused
-        # models to pattern-complete by emitting the same shape again).
-        current_prompt = f"""{unterminated_block}{_budget_drop_block}{dropped_block}{edit_results_block}{prompt}
+        # The {prompt} block (= [SYSTEM] + [USER REQUEST] + [PROJECT
+        # CONTEXT]) is STABLE across rounds for a given task. Putting it
+        # FIRST means the token prefix is identical on every round; vLLM
+        # (which NVIDIA NIM uses under the hood) caches the KV for that
+        # prefix automatically. Round 2's prefill skips most of the work
+        # Round 1 already did. The 4 parallel planners on the same host
+        # also share the cache.
+        #
+        # Anything that CHANGES between rounds (per-round warning banners,
+        # tool index, past thinking, plan section, the next-turn cue) goes
+        # AFTER the stable prefix. Earlier the warning banners were
+        # PREPENDED to {prompt}, which killed every cache hit: even a
+        # single-round "BUDGET OVERFLOW" appearance shifted every later
+        # token. Now those banners attach AFTER the stable block.
+        #
+        # Section ownership (already covered in [SYSTEM]'s PROMPT
+        # STRUCTURE explainer): [SYSTEM]/[USER REQUEST]/[PROJECT CONTEXT]
+        # = JARVIS or HUMAN; [YOUR ...] sections = YOU; [WRITE YOUR NEXT
+        # TURN BELOW] is where the new response goes.
+        current_prompt = f"""{prompt}
 
-══════════════════════════════════════════════════════════════════════
+{unterminated_block}{_budget_drop_block}{dropped_block}{bad_block}{edit_results_block}══════════════════════════════════════════════════════════════════════
 [YOUR TOOL INDEX] — every tool call you've made so far
 ══════════════════════════════════════════════════════════════════════
 {manifest_str}
@@ -3781,9 +5191,9 @@ async def call_with_tools(
 ══════════════════════════════════════════════════════════════════════
 [YOUR PAST THINKING] — your previous rounds, oldest first
 ══════════════════════════════════════════════════════════════════════
-Your own past work, in order. Each round shows what YOU thought
-(prose + tool calls) and what your TOOLS returned for those calls.
-Build on it. Do not repeat it.
+Your own past work, in order. Each round shows YOUR THINKING (prose
++ tool calls you made) and the TOOL RESULT (the content the runtime
+returned for those calls). Build on it. Do not repeat it.
 
 {past_thinking}
 {plan_section}
@@ -3805,6 +5215,7 @@ round's results — what changed? Then either:
         "model": model,
         "answer": full_response,
         "done": _done_signaled,
+        "force_done": _force_done_signaled,
         "research": local_research,
         # `persistent_lookups` reflects the FINAL view the model had: CODE
         # entries replaced by their KEEP-filtered version, DISCARDed entries

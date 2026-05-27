@@ -65,8 +65,8 @@ the reviewer might miss them. Be precise. Be explicit.
 
 YOUR TOOLS — use in this order, escalate only if you need more:
 - [REFS: name] — find all definitions, imports, usages of a name (fast, always works)
-- [LSP: name] — semantic search: dependencies, types, indirect references
-  (only if REFS didn't give enough info)
+- [DEPENDENCY: #tag] — type-resolved callers (LSP-precise, follows aliases)
+  (only if REFS missed sites due to import aliases or type indirection)
 - [DETAIL: section name] — organized code map for a feature
 - [PURPOSE: category] — all code snippets serving a specific purpose
 - [CODE: path/to/file] — read actual source code (last resort)

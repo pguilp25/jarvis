@@ -5,9 +5,11 @@ Used for free models like Nemotron Super.
 
 import json as _json
 import os
+import asyncio
 import aiohttp
 from core.cli import thinking
 from core import thought_logger
+from config import STREAM_TTFT_TIMEOUT
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -18,7 +20,14 @@ OPENROUTER_MODELS = {
 
 
 def _get_key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    # Share the round-robin key pool with clients/nvidia.py so both
+    # OpenRouter accounts are used here too (doubles the :free budget and
+    # spreads quota — see _openrouter_keys there for the full rationale).
+    try:
+        from clients.nvidia import _next_openrouter_key
+        key = _next_openrouter_key()
+    except Exception:
+        key = os.environ.get("OPENROUTER_API_KEY", "")
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     return key
@@ -57,7 +66,7 @@ async def call_openrouter(
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")
@@ -102,21 +111,53 @@ async def call_openrouter_stream(
     # stop_check must only see VISIBLE content (no <think> block).
     visible = ""
     in_thinking = False
+    done = False
     async with aiohttp.ClientSession() as session:
-        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")
 
-            async for line in resp.content:
-                line = line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[6:]
-                if data_str == "[DONE]":
-                    break
+            buf = b""
+            # Time-to-first-token / idle watchdog (uniform STREAM_TTFT_TIMEOUT,
+            # 10 min). OpenRouter sends ': OPENROUTER PROCESSING' SSE heartbeats
+            # while an upstream works, so this trips only on a genuine stall —
+            # and the heartbeat bytes reset the timer (readany sees them). On a
+            # stall we raise, and core/retry.py fails over to the NEXT model.
+            while True:
                 try:
-                    data = _json.loads(data_str)
+                    raw = await asyncio.wait_for(
+                        resp.content.readany(), timeout=STREAM_TTFT_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"OpenRouter {api_model} stream idle "
+                        f"{STREAM_TTFT_TIMEOUT:.0f}s — server stalled"
+                    )
+                if not raw:
+                    break  # EOF
+                buf += raw
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").rstrip("\r").strip()
+                    if not line.startswith("data: "):
+                        continue  # skips ': OPENROUTER PROCESSING' heartbeats + blanks
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        data = _json.loads(data_str)
+                    except _json.JSONDecodeError:
+                        continue
+                    # Mid-stream error: OpenRouter keeps HTTP 200 but delivers a
+                    # top-level `error` object (e.g. an upstream 429/5xx). Raise
+                    # so the retry layer fails over to the next model in the chain.
+                    if isinstance(data, dict) and data.get("error"):
+                        raise RuntimeError(
+                            f"OpenRouter {api_model} stream error: "
+                            f"{str(data['error'])[:200]}"
+                        )
                     delta = data.get("choices", [{}])[0].get("delta", {})
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
                     if reasoning:
@@ -137,9 +178,10 @@ async def call_openrouter_stream(
                         thought_logger.write_chunk(model_id, chunk)
                         if stop_check and ("]" in chunk or "\n" in chunk):
                             if stop_check(visible):
+                                done = True
                                 break
-                except _json.JSONDecodeError:
-                    continue
+                if done:
+                    break
             if in_thinking:
                 full += "</think>\n\n"
                 thought_logger.write_chunk(model_id, "</think>\n\n")

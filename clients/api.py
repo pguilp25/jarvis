@@ -6,6 +6,7 @@ from clients.groq import call_groq, call_groq_stream
 from clients.nvidia import call_nvidia, call_nvidia_stream
 from clients.gemini import call_gemini
 from clients.openrouter import call_openrouter, call_openrouter_stream
+from clients.openai_compat import call_openai_compat, call_openai_compat_stream, PROVIDERS as _OAI_PROVIDERS
 from config import MODELS
 
 
@@ -31,6 +32,8 @@ async def call_api(
         return await call_gemini(model_id, prompt, system, temperature, max_tokens)
     elif provider == "openrouter":
         return await call_openrouter(model_id, prompt, system, temperature, max_tokens, json_mode)
+    elif provider in _OAI_PROVIDERS:  # cerebras / zai / mistral / pollinations
+        return await call_openai_compat(model_id, prompt, system, temperature, max_tokens, json_mode)
     else:
         raise ValueError(f"Unknown provider '{provider}' for model '{model_id}'")
 
@@ -74,6 +77,11 @@ async def call_api_stream(
         return result
     elif provider == "openrouter":
         return await call_openrouter_stream(
+            model_id, prompt, system, temperature, max_tokens, log_label,
+            stop_check=stop_check,
+        )
+    elif provider in _OAI_PROVIDERS:  # cerebras / zai / mistral / pollinations
+        return await call_openai_compat_stream(
             model_id, prompt, system, temperature, max_tokens, log_label,
             stop_check=stop_check,
         )

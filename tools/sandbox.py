@@ -8,6 +8,7 @@ until the user explicitly approves the diff.
 import os
 import shutil
 import difflib
+import subprocess
 from pathlib import Path
 from core.cli import step, status, warn, success
 
@@ -106,21 +107,42 @@ class Sandbox:
             return None
 
     def write_file(self, rel_path: str, content: str):
-        """Write modified content to sandbox."""
+        """Write modified content to sandbox.
+
+        A write is only recorded as a "modification" if the content differs
+        from the original. SEARCH/REPLACE blocks whose REPLACE body is
+        byte-identical to the matched range produce no diff in git — and so
+        should not be counted in `Applied N changes`. Observed failure mode
+        on django-11551 / django-14631: workflow reported "Applied N
+        changes" but final `git diff` was empty because every REPLACE body
+        matched its SEARCH (no real edit).
+        """
         rel_path = self._norm(rel_path)
         # Track whether this is a new file or modification
         if rel_path in self.original_files:
-            self.modified_files[rel_path] = content
+            if content == self.original_files[rel_path]:
+                # No-op write — drop any stale modification record but do not
+                # promote this to a "change".
+                self.modified_files.pop(rel_path, None)
+            else:
+                self.modified_files[rel_path] = content
         else:
             src = self.project_root / rel_path
             if src.exists():
                 # Load original first
                 self.original_files[rel_path] = src.read_text(encoding="utf-8", errors="replace")
-                self.modified_files[rel_path] = content
+                if content == self.original_files[rel_path]:
+                    self.modified_files.pop(rel_path, None)
+                else:
+                    self.modified_files[rel_path] = content
             else:
-                self.new_files[rel_path] = content
+                if content == "":
+                    # Empty new file is also a no-op for diff purposes.
+                    self.new_files.pop(rel_path, None)
+                else:
+                    self.new_files[rel_path] = content
 
-        # Write to sandbox
+        # Always mirror to sandbox on disk, even for no-ops. Idempotent.
         dest = self.sandbox_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
@@ -173,6 +195,46 @@ class Sandbox:
 
         success(f"Applied {len(applied)} changes to project")
         return applied
+
+    def run(self, cmd: str, timeout: int = 120) -> dict:
+        """Run a shell command against the EDITED code (cwd = self.sandbox_dir).
+
+        Returns {'exit_code': int, 'output': str, 'timed_out': bool}.
+        output is stdout + '\\n' + stderr, capped to ~10000 chars (keeping the
+        TAIL if longer, since errors are usually at the end, prefixed with a
+        "...(truncated)..." marker). On timeout: exit_code=-1, timed_out=True.
+        Never raises.
+        """
+        CAP = 10000
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=str(self.sandbox_dir),
+                timeout=timeout,
+            )
+            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            if len(output) > CAP:
+                output = "...(truncated)...\n" + output[-CAP:]
+            return {
+                "exit_code": proc.returncode,
+                "output": output,
+                "timed_out": False,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "exit_code": -1,
+                "output": f"Command timed out after {timeout}s: {cmd}",
+                "timed_out": True,
+            }
+        except Exception as e:
+            return {
+                "exit_code": -1,
+                "output": f"Command failed to run: {e}",
+                "timed_out": False,
+            }
 
     def cleanup(self):
         """Remove sandbox directory."""

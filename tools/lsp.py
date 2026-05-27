@@ -33,25 +33,97 @@ LSP_SERVERS = {
     "typescript": [
         {"cmd": ["typescript-language-server", "--stdio"], "name": "tsserver"},
     ],
+    "rust": [
+        {"cmd": ["rust-analyzer"], "name": "rust-analyzer"},
+    ],
+    "go": [
+        {"cmd": ["gopls"], "name": "gopls"},
+    ],
+    "c": [
+        {"cmd": ["clangd", "--background-index=false"], "name": "clangd"},
+    ],
+    "cpp": [
+        {"cmd": ["clangd", "--background-index=false"], "name": "clangd"},
+    ],
+    "java": [
+        {"cmd": ["jdtls"], "name": "jdtls"},
+    ],
+    "ruby": [
+        {"cmd": ["solargraph", "stdio"], "name": "solargraph"},
+    ],
+    "bash": [
+        {"cmd": ["bash-language-server", "start"], "name": "bash-ls"},
+    ],
+    "yaml": [
+        {"cmd": ["yaml-language-server", "--stdio"], "name": "yaml-ls"},
+    ],
+    "json": [
+        {"cmd": ["vscode-json-languageserver", "--stdio"], "name": "json-ls"},
+        {"cmd": ["vscode-json-language-server", "--stdio"], "name": "json-ls"},
+    ],
+    "html": [
+        {"cmd": ["vscode-html-language-server", "--stdio"], "name": "html-ls"},
+    ],
+    "css": [
+        {"cmd": ["vscode-css-language-server", "--stdio"], "name": "css-ls"},
+    ],
+    "lean": [
+        {"cmd": ["lean", "--server"], "name": "lean-ls"},
+    ],
+    "lua": [
+        {"cmd": ["lua-language-server"], "name": "lua-ls"},
+    ],
+    "haskell": [
+        {"cmd": ["haskell-language-server-wrapper", "--lsp"], "name": "hls"},
+    ],
+}
+
+
+# Language → file-extension set used to count files and pick the dominant
+# language for a project. Keep the same keys as LSP_SERVERS so the lookup
+# in _find_lsp_server stays consistent.
+LANGUAGE_EXTENSIONS = {
+    "python": {".py", ".pyi"},
+    "javascript": {".js", ".jsx", ".mjs", ".cjs"},
+    "typescript": {".ts", ".tsx"},
+    "rust": {".rs"},
+    "go": {".go"},
+    "c": {".c", ".h"},
+    "cpp": {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"},
+    "java": {".java"},
+    "ruby": {".rb"},
+    "bash": {".sh", ".bash"},
+    "yaml": {".yaml", ".yml"},
+    "json": {".json"},
+    "html": {".html", ".htm"},
+    "css": {".css", ".scss", ".sass"},
+    "lean": {".lean"},
+    "lua": {".lua"},
+    "haskell": {".hs"},
 }
 
 
 def _detect_language(project_root: str) -> str | None:
-    """Detect primary language by counting file extensions."""
-    counts = {"python": 0, "javascript": 0, "typescript": 0}
+    """Detect primary language by counting file extensions across the project.
+
+    Counts every recognised file extension and returns the language with
+    the highest count. If two languages tie, the iteration order of
+    LANGUAGE_EXTENSIONS wins (Python takes priority over JS, etc.).
+    """
+    counts = {lang: 0 for lang in LANGUAGE_EXTENSIONS}
     root = Path(project_root)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in {
             "__pycache__", ".git", "node_modules", ".venv", "venv", "build", "dist",
+            ".jarvis_sandbox", "target", "vendor", ".tox", ".mypy_cache",
+            ".pytest_cache",
         }]
         for f in filenames:
-            ext = Path(f).suffix
-            if ext == ".py":
-                counts["python"] += 1
-            elif ext in (".js", ".jsx", ".mjs"):
-                counts["javascript"] += 1
-            elif ext in (".ts", ".tsx"):
-                counts["typescript"] += 1
+            ext = Path(f).suffix.lower()
+            for lang, exts in LANGUAGE_EXTENSIONS.items():
+                if ext in exts:
+                    counts[lang] += 1
+                    break
     if not any(counts.values()):
         return None
     return max(counts, key=counts.get)
@@ -98,11 +170,39 @@ class LSPClient:
                 cwd=str(self.project_root),
             )
 
-            # Initialize handshake
+            # Initialize handshake.
+            # v8.7 fix: pass `initializationOptions` for pylsp telling it
+            # to ignore snapshot/backup/audit directories. Otherwise LSP
+            # finds references in `backup_v4_20260324_*/core/retry.py`
+            # and reports those as the canonical site, masking the real
+            # callers in core/retry.py.
             init_result = await self._request("initialize", {
                 "processId": os.getpid(),
                 "rootUri": self.project_root.as_uri(),
                 "rootPath": str(self.project_root),
+                "initializationOptions": {
+                    "pylsp": {
+                        "plugins": {
+                            "jedi": {
+                                "extra_paths": [],
+                                # Block jedi from indexing these dirs:
+                                "exclude": [
+                                    "**/backup_v*/**",
+                                    "**/backup-v*/**",
+                                    "**/snapshot_*/**",
+                                    "**/snapshot-*/**",
+                                    "**/behavioral_audit/**",
+                                    "**/.jarvis_sandbox/**",
+                                    "**/prompt_snapshots/**",
+                                    "**/rendered/**",
+                                    "**/rendered_deep/**",
+                                ],
+                            },
+                            "rope_autoimport": {"enabled": False},
+                            "rope_completion": {"enabled": False},
+                        },
+                    },
+                },
                 "capabilities": {
                     "textDocument": {
                         "references": {"dynamicRegistration": False},
@@ -352,19 +452,55 @@ async def lsp_find_references(name: str, project_root: str) -> str | None:
     target_line = 0
     target_col = 0
 
-    # Quick scan for the definition
+    # v8.12 fix: handle qualified `Class.method` form. Previously the
+    # def-discovery only matched bare names, so `LSP TagDetector.__init__`
+    # always failed with the bare-name error message — even though the
+    # error itself recommended the qualified form. Resolve to the method
+    # def inside the named class.
     import re
+    qualified_class = None
+    qualified_method = None
+    if "." in name and not name.startswith("."):
+        parts = name.split(".", 1)
+        qualified_class = parts[0]
+        qualified_method = parts[1]
+        # Bare name for ripgrep is just the method
+        bare = qualified_method
+    else:
+        bare = name
+
     def_patterns = [
-        rf'^\s*(?:async\s+)?def\s+{re.escape(name)}\s*\(',
-        rf'^\s*class\s+{re.escape(name)}\s*[\(:]',
-        rf'^\s*(?:const|let|var|function|export\s+(?:default\s+)?function)\s+{re.escape(name)}\b',
-        rf'^\s*(?:pub\s+)?fn\s+{re.escape(name)}\b',
+        rf'^\s*(?:async\s+)?def\s+{re.escape(bare)}\s*\(',
+        rf'^\s*class\s+{re.escape(bare)}\s*[\(:]',
+        rf'^\s*(?:const|let|var|function|export\s+(?:default\s+)?function)\s+{re.escape(bare)}\b',
+        rf'^\s*(?:pub\s+)?fn\s+{re.escape(bare)}\b',
     ]
 
+    # v8.7 fix: exclude snapshot/backup/audit dirs from definition lookup.
+    # Otherwise we walk alphabetically and find the def in
+    # `backup_v4_*/core/retry.py:18` first, then LSP find_references
+    # returns only callers in that backup file.
+    _LSP_SKIP_DIRS = {
+        "__pycache__", ".git", "node_modules", ".venv", "venv",
+        ".jarvis_sandbox", "behavioral_audit", "prompt_snapshots",
+        "rendered", "rendered_deep",
+        # v8.15 fix (B13): subagent r17 found LSP `__class__` resolved
+        # into vendored packages inside venv_astropy_truth. Exclude all
+        # site-packages and vendor variants from def-discovery + results.
+        "site-packages", "dist-packages", "_vendor", "vendor",
+    }
+    _LSP_SKIP_PREFIXES = (
+        "backup_v", "backup-v", "snapshot_", "snapshot-",
+        # v8.15: any venv directory (venv_truth, venv_astropy_truth, etc.)
+        "venv_", "venv-", ".venv_", ".venv-",
+    )
+
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in {
-            "__pycache__", ".git", "node_modules", ".venv", "venv",
-        }]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _LSP_SKIP_DIRS
+            and not d.startswith(_LSP_SKIP_PREFIXES)
+        ]
         for fname in filenames:
             fpath = Path(dirpath) / fname
             if fpath.suffix not in {".py", ".js", ".ts", ".jsx", ".tsx"}:
@@ -373,13 +509,33 @@ async def lsp_find_references(name: str, project_root: str) -> str | None:
                 lines = fpath.read_text(errors="replace").split("\n")
             except Exception:
                 continue
+            # v8.12 fix: when caller passed `Class.method`, only accept
+            # method defs that live INSIDE a `class Class:` block. Track
+            # the enclosing class while walking.
+            current_class = None
             for i, line in enumerate(lines):
+                # Update enclosing-class context
+                cm = re.match(r'^class\s+(\w+)\s*[\(:]', line)
+                if cm:
+                    current_class = cm.group(1)
+                elif line and not line[0].isspace():
+                    # Top-level non-class line — class scope ends
+                    if not re.match(
+                        r'^(\s|@|#|def |async def |from |import )', line
+                    ):
+                        current_class = None
+
                 for pat in def_patterns:
                     m = re.match(pat, line)
                     if m:
+                        # If caller passed qualified form, require this
+                        # def to be inside the named class.
+                        if qualified_class is not None:
+                            if current_class != qualified_class:
+                                continue
                         target_file = str(fpath.relative_to(root))
                         target_line = i  # 0-indexed for LSP
-                        target_col = line.index(name)
+                        target_col = line.index(bare)
                         break
                 if target_file:
                     break
@@ -389,8 +545,56 @@ async def lsp_find_references(name: str, project_root: str) -> str | None:
     if not target_file:
         return None  # Couldn't find definition — fall back to ripgrep
 
+    # v8.10: warn if the picked def is a METHOD (indented) — bare-name
+    # lookup may give misleading results. Subagent r6: `LSP write` found
+    # one method def and returned 0 uses with no warning.
+    # v8.12 fix: only fire when the user used the BARE name. If they
+    # already qualified as `Class.method`, the warning is misleading
+    # ("qualify as ClassName.Class.method").
+    method_warning = ""
+    if qualified_class is None:
+        try:
+            lines_pick = (Path(root) / target_file).read_text(
+                errors="replace"
+            ).split("\n")
+            def_line_text = lines_pick[target_line] if target_line < len(lines_pick) else ""
+            is_method = def_line_text.startswith((" ", "\t"))
+            # Count other def sites with this name (other methods on classes)
+            other_def_count = 0
+            for ln_text in lines_pick:
+                for pat in def_patterns:
+                    if re.match(pat, ln_text):
+                        other_def_count += 1
+                        break
+            if is_method or other_def_count > 1:
+                defn_word = "definition" if other_def_count == 1 else "definitions"
+                method_warning = (
+                    f"\nNOTE: '{name}' may be a method on a class or have "
+                    f"{other_def_count} {defn_word}. Bare-name LSP only "
+                    f"resolves the first matched def; qualify as "
+                    f"`ClassName.{name}` for accurate method-specific "
+                    f"results, or use [REFS: {name}] to grep all occurrences."
+                )
+        except Exception:
+            pass
+
     # Query LSP for references
     refs = await client.find_references(target_file, target_line, target_col)
+    if not refs:
+        return None
+
+    # v8.7 fix: filter out backup/snapshot path matches from results
+    # too (LSP may still surface them even when we picked a real def).
+    def _is_skipped_path(rel_path: str) -> bool:
+        parts = rel_path.replace("\\", "/").split("/")
+        for p in parts[:-1]:  # exclude filename
+            if p in _LSP_SKIP_DIRS:
+                return True
+            if p.startswith(_LSP_SKIP_PREFIXES):
+                return True
+        return False
+
+    refs = [r for r in refs if not _is_skipped_path(r.get("file", ""))]
     if not refs:
         return None
 
@@ -432,5 +636,7 @@ async def lsp_find_references(name: str, project_root: str) -> str | None:
     if usages:
         parts.append(f"\nUSED ({len(usages)}):")
         parts.extend(usages)
+    if method_warning:
+        parts.append(method_warning)
 
     return "\n".join(parts)
