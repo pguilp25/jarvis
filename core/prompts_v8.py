@@ -1961,8 +1961,8 @@ numbers, no surrounding context lines):
     === EDIT: path/to/file.py ===
     [REPLACE LINES 72-74]
     8|if element_id is None:
-    12|return format_html('<script>{}</script>', mark_safe(json_str))
-    8|return format_html('<script id="{}">{}</script>', element_id, ...)
+    12|return format_html('<script>{{}}</script>', mark_safe(json_str))
+    8|return format_html('<script id="{{}}">{{}}</script>', element_id, ...)
     [/REPLACE]
     === END EDIT ===
     [STOP][CONFIRM_STOP]
