@@ -22,6 +22,7 @@ concurrent tasks.
 """
 import time
 import asyncio
+from collections import deque
 
 # Concurrency caps. A model at its cap is "busy" → concurrent callers skip it.
 # Models not listed get _DEFAULT_CAP (NIM / OpenRouter tolerate many in-flight).
@@ -38,15 +39,28 @@ _CAP = {
 }
 _DEFAULT_CAP = 8
 
-# Minimum seconds between the START of consecutive calls to a model (rate cap).
-# Mistral free = 2 rpm → 30s spacing. The delay is VARIABLE: the committed
-# caller waits only `interval - elapsed`, so it achieves 2 rpm, not less.
-_MIN_INTERVAL = {
-    "mistral/codestral": 30.0,
-    "mistral/magistral": 30.0,
-    "mistral/devstral":  30.0,
-    "mistral/large":     30.0,
+# SLIDING-WINDOW rate limits: model -> (max_calls, window_seconds). We COUNT the
+# calls in the trailing window and delay ONLY when it's full — and then only by
+# the minimal time for the OLDEST call to age out. No fixed spacing, no
+# calendar-minute reset: if there's budget left we fire IMMEDIATELY (e.g. at :45
+# into the minute, not waiting for :60). This drives a model to its limit without
+# the dead time a fixed inter-call gap imposes.
+#   • z.ai GLM-Flash free: 3 rpm UNDER 8K context, but OVER 8K (always, for us —
+#     big code files) it's throttled to ~1% of standard concurrency → treat as a
+#     trickle (1 per 60s) so we stop tripping 429 code 1302.
+#   • Mistral free Experiment tier ≈ 2 rpm — burst 2 then wait minimally.
+_RATE_LIMITS = {
+    "zai/glm-4.7-flash": (1, 60.0),
+    "zai/glm-4.5-flash": (1, 60.0),
+    "mistral/codestral": (2, 60.0),
+    "mistral/devstral":  (2, 60.0),
+    "mistral/magistral": (2, 60.0),
+    "mistral/large":     (2, 60.0),
 }
+_call_times: dict[str, deque] = {}   # model -> deque of recent call START times
+
+# Legacy fixed-interval pacing (kept for back-compat; prefer _RATE_LIMITS above).
+_MIN_INTERVAL: dict[str, float] = {}
 
 _inflight: dict[str, int] = {}
 _last_start: dict[str, float] = {}
@@ -57,12 +71,34 @@ def _cap(model_id: str) -> int:
 
 
 def rate_wait(model_id: str) -> float:
-    """Seconds to wait before STARTING this model to honor its rate cap (0 if
-    enough time has already elapsed since the last start)."""
+    """Seconds to wait before STARTING this model to honor its rate limit.
+
+    Sliding window: count calls in the trailing window; return 0 while there's
+    budget left (fire NOW, wherever we are in the window), and only when the
+    window is FULL return the minimal time for the oldest call to age out.
+    Falls back to legacy fixed-interval pacing for any model still in
+    _MIN_INTERVAL. (asyncio is single-threaded; no await between read & mutate.)"""
+    lim = _RATE_LIMITS.get(model_id)
+    if lim:
+        n, window = lim
+        now = time.time()
+        dq = _call_times.get(model_id)
+        if dq:
+            while dq and now - dq[0] >= window:   # drop calls that aged out
+                dq.popleft()
+            if len(dq) >= n:                       # window full → minimal wait
+                return max(0.0, (dq[0] + window) - now)
+        return 0.0                                 # budget available → fire now
     iv = _MIN_INTERVAL.get(model_id, 0.0)
     if iv <= 0:
         return 0.0
     return max(0.0, iv - (time.time() - _last_start.get(model_id, 0.0)))
+
+
+def _record_start(model_id: str) -> None:
+    """Log a call's START time into its sliding window (called when a slot opens)."""
+    if model_id in _RATE_LIMITS:
+        _call_times.setdefault(model_id, deque()).append(time.time())
 
 
 def is_busy(model_id: str) -> bool:
@@ -87,6 +123,7 @@ class slot:
             await asyncio.sleep(w)
         _inflight[self.model_id] = _inflight.get(self.model_id, 0) + 1
         _last_start[self.model_id] = time.time()
+        _record_start(self.model_id)   # log into the sliding window
         return self
 
     async def __aexit__(self, *exc):

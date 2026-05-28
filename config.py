@@ -193,12 +193,14 @@ NVIDIA_FALLBACKS = {
         "pollinations/qwen-coder", "nvidia/glm-5.1",
     ),
     "nvidia/qwen3-coder": (
-        # User-chosen coder chain (2026-05-28): when used as the coder's text
-        # fallback (after native gpt-oss), go straight to the GLM coders —
-        # glm-4.7-flash (off-NIM, 200K ctx) then glm-5.1 (last resort). Extra
-        # models kept after as deeper redundancy.
-        "zai/glm-4.7-flash", "nvidia/glm-5.1",
-        "mistral/codestral", "pollinations/qwen-coder", "nvidia/deepseek-v4-flash",
+        # User-chosen coder chain (2026-05-28): coder's text fallback after native
+        # gpt-oss. mistral/large (128K ctx, flagship, NO 8K throttle) then glm-5.1
+        # (last resort). z.ai glm-4.7-flash was DROPPED from the coder path: its
+        # free tier throttles >8K-context requests to ~1% concurrency, and our
+        # prompts are always >8K — so it just 429s (code 1302). Extras after are
+        # deeper redundancy.
+        "mistral/large", "nvidia/glm-5.1",
+        "mistral/codestral", "nvidia/deepseek-v4-flash", "zai/glm-4.7-flash",
     ),
     "nvidia/nemotron-super": (
         "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",

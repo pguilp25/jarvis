@@ -10369,16 +10369,17 @@ async def _implement_one_step(
             return produced
         # gpt-oss (native) produced NOTHING (any reason) → degrade to the TEXT
         # coder. CODER FALLBACK CHAIN (user-chosen 2026-05-28):
-        #   gpt-oss(native) → qwen3-coder → glm-4.7-flash → glm-5.1
+        #   gpt-oss(native) → qwen3-coder → mistral/large → glm-5.1
         # qwen3-coder is the FIRST text fallback because when its OR :free pool is
         # full it 429s INSTANTLY — call_with_retry then fails over in ~ms (no
-        # stall), unlike NIM glm-5.1 which idles 600s. The text path below runs
-        # call_with_retry(qwen3-coder), whose NVIDIA_FALLBACKS leads
-        # glm-4.7-flash → glm-5.1, so the whole chain is honored from here.
+        # stall), unlike NIM glm-5.1 which idles 600s. (glm-4.7-flash was dropped:
+        # z.ai throttles >8K-context requests — always our case — to ~1%
+        # concurrency.) The text path runs call_with_retry(qwen3-coder), whose
+        # NVIDIA_FALLBACKS leads mistral/large → glm-5.1, honoring the chain.
         _coder_model = "nvidia/qwen3-coder"
         warn(f"  [native coder] step {step_num} produced 0 edits "
              f"(reason={_res.get('reason')}) — falling over to text coder chain "
-             f"qwen3-coder → glm-4.7-flash → glm-5.1")
+             f"qwen3-coder → mistral/large → glm-5.1")
 
     MAX_RETRIES = 5
     # Snapshot the file content as it is at the START of this step (before any
