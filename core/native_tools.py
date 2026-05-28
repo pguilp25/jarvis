@@ -134,6 +134,19 @@ CODER_TOOLS = [
         }, "required": ["symbol"]},
     }},
     {"type": "function", "function": {
+        "name": "create_file",
+        "description": (
+            "Create a NEW file at `path` with `content` (the full file text, exact "
+            "indentation, NO line-number prefixes). Use this for files that don't "
+            "exist yet — a new module, script, or test file (greenfield builds, or "
+            "adding a file to an existing project). To change a file that ALREADY "
+            "exists, use replace_lines instead — create_file refuses to clobber."),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "repo-relative path of the new file"},
+            "content": {"type": "string", "description": "the full contents of the new file"},
+        }, "required": ["path", "content"]},
+    }},
+    {"type": "function", "function": {
         "name": "replace_lines",
         "description": (
             "Your EDIT. Replace lines start_line..end_line (inclusive, 1-based, from "
@@ -253,6 +266,46 @@ def _do_replace(args: dict, ctx: dict) -> str:
     return f"✗ NOT applied to {path}: {reason}"
 
 
+def _do_create(args: dict, ctx: dict) -> str:
+    # Reuse the `=== FILE: path ===` new-file machinery (same applier the text
+    # coder uses for new files) so greenfield / new-module work is possible —
+    # replace_lines can only edit existing lines.
+    from workflows.code import _extract_code_blocks, _apply_extracted_code
+    path = args.get("path", "")
+    content = args.get("content", "")
+    if not path:
+        return "✗ create_file needs a path."
+    existing = ctx["file_contents"].get(path)
+    if existing is None and ctx.get("sandbox") is not None:
+        existing = ctx["sandbox"].load_file(path)
+    if existing:
+        n = existing.count("\n") + 1
+        return (f"✗ create_file: {path} already exists ({n} lines). Use replace_lines "
+                f"to modify an existing file, or read_file to see it first.")
+    block = f"=== FILE: {path} ===\n{content}\n=== END FILE ==="
+    ext = _extract_code_blocks(block)
+    result, matched, attempted, skips = _apply_extracted_code(
+        ext, ctx["file_contents"], ctx.get("sandbox"),
+        viewed_versions=ctx.get("viewed_versions"))
+    produced = result.get(path) if path in result else ext.get("new_files", {}).get(path)
+    if produced is not None:
+        if ctx.get("sandbox") is not None:
+            try:
+                ctx["sandbox"].write_file(path, produced)
+            except Exception as ex:
+                return (f"✗ create_file: computed {path} but FAILED to write the "
+                        f"sandbox ({str(ex)[:120]}); retry.")
+        ctx["file_contents"][path] = produced
+        if isinstance(ctx.get("viewed_versions"), dict):
+            ctx["viewed_versions"][path] = produced
+        ctx.setdefault("files_changed", set()).add(path)
+        n = produced.count("\n") + 1
+        return f"✓ Created: {path} ({n} lines)."
+    reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
+        "no file produced (content may be empty or malformed)"
+    return f"✗ create_file NOT applied for {path}: {reason}"
+
+
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
     sym = args.get("symbol", "")
@@ -309,6 +362,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         return await _do_read(args, ctx)
     if name == "replace_lines":
         return _do_replace(args, ctx)
+    if name == "create_file":
+        return _do_create(args, ctx)
     if name == "find_refs":
         return await _do_refs(args, ctx)
     if name == "find_callers":
@@ -324,7 +379,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
     return (f"✗ Unknown tool '{name}'. Available: read_file, find_refs, find_callers, "
-            f"search_text, file_purpose, semantic_search, symbol_detail, replace_lines, finish.")
+            f"search_text, file_purpose, semantic_search, symbol_detail, create_file, "
+            f"replace_lines, finish.")
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────

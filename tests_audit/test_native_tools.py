@@ -70,7 +70,7 @@ def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     assert names == {"read_file", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "symbol_detail",
-                     "replace_lines", "finish"}
+                     "create_file", "replace_lines", "finish"}
 
 
 def test_every_schema_is_wellformed():
@@ -247,6 +247,56 @@ def test_replace_lines_noop_is_rejected():
         assert isinstance(out, str) and out.startswith("✗")
         assert "no-op" in out.lower()
         assert rel not in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
+# ── create_file: greenfield / new-module support ─────────────────────────────
+def test_create_file_makes_new_file():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("create_file",
+                    {"path": "new_mod.py", "content": "def f():\n    return 42\n"}, ctx)
+        assert out.startswith("✓ Created")
+        assert "new_mod.py" in ctx["files_changed"]
+        produced = ctx["file_contents"]["new_mod.py"]
+        assert "def f():" in produced and "return 42" in produced
+        # in-memory and on-sandbox content agree
+        assert ctx["sandbox"].load_file("new_mod.py") == produced
+    finally:
+        _cleanup(root)
+
+
+def test_create_file_refuses_to_clobber_existing():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("create_file", {"path": rel, "content": "x = 1\n"}, ctx)
+        assert out.startswith("✗") and "already exists" in out
+        # original untouched
+        assert "greet" in ctx["file_contents"][rel]
+    finally:
+        _cleanup(root)
+
+
+def test_create_file_missing_path_no_crash():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("create_file", {"content": "x=1"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+    finally:
+        _cleanup(root)
+
+
+def test_created_file_is_then_editable():
+    # after create_file, the file is "viewed" so replace_lines can edit it
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("create_file", {"path": "n.py", "content": "a = 1\nb = 2\n"}, ctx)
+        out = _disp("replace_lines",
+                    {"path": "n.py", "start_line": 1, "end_line": 1,
+                     "new_content": "0|a = 99"}, ctx)
+        assert out.startswith("✓ Applied")
+        assert ctx["file_contents"]["n.py"].split("\n")[0] == "a = 99"
     finally:
         _cleanup(root)
 
