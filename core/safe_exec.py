@@ -32,6 +32,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 
 _BWRAP = shutil.which("bwrap")
 
@@ -186,9 +187,19 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
         argv += ["--ro-bind", d, d]
     for d in _RO_BINDS_TRY:
         argv += ["--ro-bind-try", d, d]
-    # the project + the working dir, read-only (writes/deletes physically fail)
+    # The interpreter JARVIS runs in (the venv) carries pytest + the repo's deps;
+    # the bare system python3 on the default PATH does not, and there's no bare
+    # `python` at all. Without this a [VERIFY:]/[RUN:] `python …` resolved to
+    # nothing (exit 127 "python not found") so verification SILENTLY never ran.
+    # Bind the venv bin read-only and put it first on PATH so python / python3 /
+    # pytest resolve to it. (Read-only bind → no new write/network capability.)
+    # NOTE: do NOT realpath() — a venv's bin/python is a symlink to the system
+    # python, and resolving it would point _interp_dir back at /usr/bin (which
+    # has no `python` and no pytest). We want the venv bin itself.
+    _interp_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
+    # the project + the working dir + the interpreter dir, read-only
     seen = set()
-    for d in (project_root, cwd):
+    for d in (project_root, cwd, _interp_dir):
         if d and d not in seen and os.path.isdir(d):
             argv += ["--ro-bind", d, d]
             seen.add(d)
@@ -200,7 +211,9 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
     # ~/.aws etc. are simply absent (home is never bound).
     argv += [
         "--clearenv",
-        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        "--setenv", "PATH",
+        (f"{_interp_dir}:" if _interp_dir else "")
+        + "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
         "--setenv", "HOME", "/tmp",
         "--setenv", "TMPDIR", "/tmp",
         "--setenv", "LANG", os.environ.get("LANG", "C.UTF-8"),
