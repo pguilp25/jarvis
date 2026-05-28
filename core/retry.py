@@ -106,6 +106,46 @@ def _is_transient_gateway_error(exc: BaseException) -> bool:
 def _mark_down(model_id: str, seconds: float = _COOLDOWN_SEC) -> None:
     _down_until[model_id] = time.time() + seconds
 
+
+# ── "Continue, not restart" — positive counterpart to the circuit breaker ────
+# _down_until is NEGATIVE memory (who just failed). Without a POSITIVE memory,
+# once a role's strong primary starts storming, every following round re-probes
+# the primary first and re-pays its stall/5xx before failing over again — the
+# user's "it should CONTINUE, not RESTART; behave like ONE model" complaint.
+# When a primary's call falls over to a fallback that WORKS, remember it: the
+# next calls go straight to that fallback. A short TTL (NOT refreshed on reuse)
+# means the primary is re-probed at most once per window, so it reclaims the
+# slot soon after it recovers — bounding both the waste and the time pinned to a
+# weaker model.
+_last_good: dict[str, tuple[str, float]] = {}
+_LAST_GOOD_TTL = 90.0
+
+
+def _remember_good(primary: str, served_by: str) -> None:
+    """Record which model actually served `primary`. If the primary served
+    itself, it's healthy → drop any stickiness so it keeps the slot."""
+    if served_by and served_by != primary:
+        _last_good[primary] = (served_by, time.time())
+    else:
+        _last_good.pop(primary, None)
+
+
+def _sticky_fallback(primary: str) -> "str | None":
+    """The fallback that recently served `primary`, if still fresh and currently
+    usable (not cooling/busy). Else None (evicting a stale entry). Not time-
+    refreshed by callers, so it naturally expires `_LAST_GOOD_TTL` after the
+    fallover that set it — re-probing the primary then."""
+    rec = _last_good.get(primary)
+    if not rec:
+        return None
+    fb, ts = rec
+    if time.time() - ts > _LAST_GOOD_TTL:
+        _last_good.pop(primary, None)
+        return None
+    if fb == primary or _is_down(fb) or _ml.is_busy(fb):
+        return None
+    return fb
+
 try:
     from tools.connectivity import is_online, wait_for_connection
     _HAS_CONNECTIVITY = True
@@ -160,6 +200,27 @@ async def call_with_retry(
     error_attempt = 0   # counts non-timeout failures (has a limit)
     timeout_attempt = 0  # counts timeout failures (no limit)
 
+    # Continue, not restart: if a fallback recently served this primary and is
+    # still usable, go straight to it instead of re-probing the (likely still
+    # storming) primary and re-paying its stall. On success return; on failure
+    # drop the stickiness and fall through to the normal primary-first path.
+    _sticky = _sticky_fallback(model_id)
+    if _sticky:
+        try:
+            async with _ml.slot(_sticky):
+                _sres = await asyncio.wait_for(
+                    call_api_stream(_sticky, prompt, system, temperature, max_tokens,
+                                    json_mode, log_label, stop_check=stop_check),
+                    timeout=_default_timeout(_sticky),
+                )
+            status(f"  ↻ {model_id} still cooling — continuing on {_sticky}")
+            return _sres
+        except Exception as _se:
+            if _is_failover_now_error(_se) or _is_permanent_error(_se):
+                _mark_down(_sticky)
+            _last_good.pop(model_id, None)
+            warn(f"  sticky {_sticky} for {model_id} failed ({str(_se)[:60]}) — reverting to chain")
+
     while True:
         if _is_down(model_id) or _ml.is_busy(model_id):
             last_error = last_error or f"{model_id} busy/cooling — skip to fallback"
@@ -171,6 +232,7 @@ async def call_with_retry(
                                     json_mode, log_label, stop_check=stop_check),
                     timeout=timeout,
                 )
+            _remember_good(model_id, model_id)   # primary healthy → drop stickiness
             return result
 
         except asyncio.TimeoutError:
@@ -239,11 +301,13 @@ async def call_with_retry(
             error(f"{model_id} unreachable ({last_error}). Falling back to {fb}...")
             try:
                 async with _ml.slot(fb):
-                    return await asyncio.wait_for(
+                    _fbres = await asyncio.wait_for(
                         call_api_stream(fb, prompt, system, temperature, max_tokens,
                                         json_mode, log_label, stop_check=stop_check),
                         timeout=_default_timeout(fb),
                     )
+                _remember_good(model_id, fb)   # this fallback worked — prefer it next round
+                return _fbres
             except Exception as e2:
                 if _is_failover_now_error(e2) or _is_permanent_error(e2):
                     _mark_down(fb)
@@ -287,6 +351,27 @@ async def call_with_retry_stream(
     error_attempt = 0
     timeout_attempt = 0
 
+    # Continue, not restart: if a fallback recently served this primary and is
+    # still usable, go straight to it instead of re-probing the (likely still
+    # storming) primary and re-paying its stall. On success return; on failure
+    # drop the stickiness and fall through to the normal primary-first path.
+    _sticky = _sticky_fallback(model_id)
+    if _sticky:
+        try:
+            async with _ml.slot(_sticky):
+                _sres = await asyncio.wait_for(
+                    call_api_stream(_sticky, prompt, system, temperature, max_tokens,
+                                    json_mode, log_label, stop_check=stop_check),
+                    timeout=_default_timeout(_sticky),
+                )
+            status(f"  ↻ {model_id} still cooling — continuing on {_sticky}")
+            return _sres
+        except Exception as _se:
+            if _is_failover_now_error(_se) or _is_permanent_error(_se):
+                _mark_down(_sticky)
+            _last_good.pop(model_id, None)
+            warn(f"  sticky {_sticky} for {model_id} failed ({str(_se)[:60]}) — reverting to chain")
+
     while True:
         if _is_down(model_id) or _ml.is_busy(model_id):
             last_error = last_error or f"{model_id} busy/cooling — skip to fallback"
@@ -298,6 +383,7 @@ async def call_with_retry_stream(
                                     json_mode, log_label, stop_check=stop_check),
                     timeout=timeout,
                 )
+            _remember_good(model_id, model_id)   # primary healthy → drop stickiness
             return result
 
         except asyncio.TimeoutError:
@@ -360,11 +446,13 @@ async def call_with_retry_stream(
             error(f"{model_id} unreachable ({last_error}). Falling back to {fb}...")
             try:
                 async with _ml.slot(fb):
-                    return await asyncio.wait_for(
+                    _fbres = await asyncio.wait_for(
                         call_api_stream(fb, prompt, system, temperature, max_tokens,
                                         json_mode, log_label, stop_check=stop_check),
                         timeout=_default_timeout(fb),
                     )
+                _remember_good(model_id, fb)   # this fallback worked — prefer it next round
+                return _fbres
             except Exception as e2:
                 if _is_failover_now_error(e2) or _is_permanent_error(e2):
                     _mark_down(fb)
