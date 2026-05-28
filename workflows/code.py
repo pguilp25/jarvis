@@ -8683,12 +8683,25 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             "Write tags, wait, then proceed.\n"
         )
 
+    # #1 UNION scope across drafts: hand the merger the FULL candidate file set
+    # (vs picking one draft's narrower view) so it accounts for every file the
+    # drafts found instead of silently dropping a file another draft identified.
+    from core.plan_scope import (union_file_scopes, majority_files,
+                                 format_candidate_block)
+    _per_draft = [_extract_files_from_plan(p.get("answer", ""), files or [])
+                  for p in plans]
+    _scope_union, _scope_votes = union_file_scopes(_per_draft)
+    _candidate_block = (format_candidate_block(_scope_union, _scope_votes, len(plans))
+                        or "(the drafts named no concrete files — derive scope "
+                           "from the task and the code you read.)")
+
     merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
         n_plans=len(plans),
         task=task,
         context=context[:12000],
         verify_block=verify_block,
         all_plans_text=all_plans_text[:30000],
+        candidate_files=_candidate_block,
         preloaded_research=preloaded_research,
     )
     merger_result = await _call_with_tools(
@@ -8857,6 +8870,72 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     if len(best_plan) != _before:
         warn(f"  plan sanitized: {_before:,} → {len(best_plan):,} chars "
              f"(stripped protocol tokens / capped bloat)")
+
+    # ── Deterministic scope-completeness backstop (planning #2/#3/#4/#5) ──
+    # Catch under-scoping WITHOUT relying on a weak model to explore: cross-check
+    # the final plan's file set against (a) files ≥2 drafts agreed on, (b) tests
+    # that reference the scope, (c) callers the planners' REFS/DEPENDENCY already
+    # surfaced. Surface any gaps as a note the coder sees (we don't force scope
+    # creep — the coder confirms change-or-skip). All data is already gathered;
+    # fully guarded so it can NEVER break planning.
+    try:
+        from core.plan_scope import (imported_modules, modules_to_files,
+            referenced_files_outside_scope, completeness_lint, format_plan_gaps)
+        _proj_files = list(files or [])
+        _scope = _extract_files_from_plan(best_plan, _proj_files)
+        _scope_set = set(_scope)
+        _required: list = []
+        def _add_req(fp):
+            if fp and fp not in _scope_set and fp not in _required:
+                _required.append(fp)
+        # (a) #1 majority vote across drafts
+        for fp in majority_files(_scope_votes, len(plans)):
+            _add_req(fp)
+        # (b) #2 test-derived: a test importing a scope module pins symbols/files
+        # the fix must satisfy → its other imported project files are in scope.
+        _stems = {os.path.splitext(os.path.basename(s))[0] for s in _scope}
+        _tests = [f for f in _proj_files if "test" in f.lower() and f.endswith(".py")]
+        _tests.sort(key=lambda f: 0 if any(st and st in f for st in _stems) else 1)
+        for _tf in _tests[:12]:
+            try:
+                _src = sandbox.load_file(_tf) if sandbox else None
+                if not _src:
+                    continue
+                _hit = modules_to_files(imported_modules(_src), _proj_files)
+                if any(h in _scope_set for h in _hit):   # test exercises our scope
+                    for h in _hit:
+                        if "test" not in h.lower():
+                            _add_req(h)
+            except Exception:
+                continue
+        # (c) #3 callers the planners' REFS/DEPENDENCY already surfaced
+        _dep_text = "\n".join(str(v) for k, v in research_cache.items()
+                              if re.search(r'refs|dependency', str(k), re.I))
+        if _dep_text:
+            for fp in referenced_files_outside_scope(_dep_text, _scope, _proj_files):
+                _add_req(fp)
+        # (d) #4 lint + attach gaps (cap so the note stays readable)
+        _gaps = completeness_lint(best_plan, _scope, _required)[:6]
+        # (e) #5 ground-in-real-reads: an EXISTING scope file the planners never
+        # actually read (not in the research cache) was planned from headings —
+        # nudge the coder to read it before editing. New files are exempt.
+        _read = set()
+        for _k in research_cache:
+            for _p in re.findall(r'[\w./-]+\.py', str(_k)):
+                _read.add(_p)
+        _unread = [s for s in _scope
+                   if s in set(_proj_files) and not any(s in r or r.endswith(s) for r in _read)]
+        if _unread:
+            _gaps.append("planned-but-unread: " + ", ".join(_unread[:5])
+                         + " — read each (read_file/[CODE:]) before editing; the "
+                         "plan named them without a verified read.")
+        if _gaps:
+            best_plan += format_plan_gaps(_gaps)
+            warn(f"  Plan scope check: flagged {len(_gaps)} file(s) multiple "
+                 f"sources agree on but the plan omitted (coder will confirm)")
+            _wlog.phase_warn("plan scope gaps flagged", n=len(_gaps))
+    except Exception as _sce:
+        warn(f"  plan-scope backstop skipped: {str(_sce)[:120]}")
 
     status(f"Phase 2: final plan = {len(best_plan)} chars")
     success(f"Phase 2 complete ({mode_label}, {len(research_cache)} cached lookups)")

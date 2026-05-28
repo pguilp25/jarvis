@@ -1356,20 +1356,29 @@ emitting a thin/empty visible plan. That plan is GONE — discarded, and the
 run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
 
 Do all of this in ONE pass:
-  1. PICK the strongest baseline plan (the one closest to a correct,
-     minimal fix — not the longest).
-  2. IMPROVE it — but the improvement is GATED BY TASK SHAPE (see below):
-       • FIX (a bug): keep it MINIMAL. "Improve" means make the EXISTING
-         fix correct and complete — right location/anchor, a guard the bug
-         actually needs, a missing step a draft dropped. DO NOT add extra
-         features, refactors, cleanups, or "while we're here" steps. If the
-         bug needs one line changed, the plan is one step. Adding scope to a
-         FIX is the #1 way these plans go wrong.
+  1. ESTABLISH THE FULL SCOPE — do NOT just pick one draft's view. Take the
+     UNION of the files/areas every input plan identified (you'll get a
+     CANDIDATE FILES list below). For a COMPLETE fix you must account for EACH
+     candidate: cover it in a STEP, or state in one line why it needs NO change.
+     Never silently drop a file that ≥2 drafts agreed on — that is the #1 cause
+     of an incomplete fix. Where the drafts disagree on scope, the UNION is your
+     starting point, not the smallest draft.
+  2. FIND THE ROOT CAUSE, not the symptom. The fix usually belongs where the
+     wrong/missing data is PRODUCED, not where the symptom shows up. If the
+     drafts only touch the layer that DISPLAYS or RETURNS a value, trace one hop
+     UPSTREAM to where it is set/computed and put the fix there. If a test pins
+     the behaviour, the symbols and files that test references ARE in scope.
+  3. IMPROVE, gated by TASK SHAPE:
+       • FIX (a bug): minimize the CHANGES, never the AWARENESS. A FIX may
+         legitimately span several files (the producer, its callers, a helper) —
+         include every file the fix actually needs, but make each STEP the
+         smallest correct change. Don't add features/refactors/"while we're
+         here" steps; DO include every file required for the fix to be complete.
        • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs
          that no draft covered; prefer the thorough path (layout, tests, docs).
      In every shape: drop wrong or ungrounded steps, and pull the better
      parts of the other plans where they beat the baseline.
-  3. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
+  4. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
      `### STEP N: …` steps, each with a `FILES:` line and plain-English
      WHAT-TO-DO. No code bodies. At least one `### STEP`.
 
@@ -1407,10 +1416,12 @@ Read TASK SHAPE from the inputs. If the input plans disagree on
 the shape, decide and explain in [think]. The shape drives merge
 style:
 
-    FIX       Prefer the MINIMAL plan. Strip "thoughtful
-              improvements" from richer plans. If 3 plans say
-              "also fix X" and 1 says "X is unrelated", trust
-              the 1 unless evidence says otherwise.
+    FIX       Minimal CHANGES, full AWARENESS. Strip "thoughtful
+              improvements"/refactors, but KEEP every file the fix
+              genuinely needs (producer + callers + helper). If a
+              draft says "also touch X" because the contract there
+              changes, keep X; only drop X if it's an unrelated
+              cleanup, not a part of the fix.
     ADD-EX    Prefer the THOROUGH plan for the NEW path. Strip
               cross-cutting refactors that aren't part of the
               feature request.
@@ -1537,9 +1548,13 @@ TASK: {task}
 {verify_block}
 
 ══════════════════════════════════════════════════════════════════════
-[INPUT PLANS] — {n_plans} Layer-2 plans to merge
+[INPUT PLANS] — {n_plans} Layer-1 drafts to merge
 ══════════════════════════════════════════════════════════════════════
 {all_plans_text}
+
+══════════════════════════════════════════════════════════════════════
+{candidate_files}
+══════════════════════════════════════════════════════════════════════
 
 {preloaded_research}
 """
