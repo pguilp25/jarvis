@@ -38,6 +38,8 @@ OPENROUTER_MODELS = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
     "minimax-m2.5":      "minimax/minimax-m2.5:free",
     "gpt-oss-120b":      "openai/gpt-oss-120b:free",  # coder primary (non-NIM, OR :free)
+    "qwen3-coder":       "qwen/qwen3-coder:free",     # 1st text-coder fallback: 429s
+                                                      # INSTANTLY when full → ~ms failover
     # User reported (2026-05-18 dashboard inspection): glm-4.5-air:free on
     # OR is the source of free-tier 429 storms. glm-5.1 stays on NIM where
     # it works reliably; do NOT route glm-* to OR.
@@ -51,6 +53,7 @@ OPENROUTER_FORCED = {
     "deepseek-v4-flash",
     "minimax-m2.5",
     "gpt-oss-120b",   # coder: route OR :free FIRST, not NIM (NIM 502s on big prompts)
+    "qwen3-coder",    # text-coder fallback on OR :free (instant-429 fast failover)
 }
 
 # ── OpenRouter key pool ──────────────────────────────────────────────

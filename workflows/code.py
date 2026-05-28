@@ -10354,39 +10354,31 @@ async def _implement_one_step(
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
-                # Seed viewed_versions from the file block injected into the
-                # prompt: the coder has effectively "read" those files (the line
-                # numbers it sees come straight from them), so its FIRST
-                # replace_lines lands instead of being rejected for "no read"
-                # (a wasted round) and told to use [CODE:] — a text tag a native
-                # model can't emit. (rough-edge #1 / native audit #34.)
+                # Seed viewed_versions from the injected file block so the coder's
+                # FIRST replace_lines lands (no wasted "read first" round).
                 "viewed_versions": dict(_nat_targets),
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
                 "files_changed": set()}
         _res = await call_with_native_tools(IMPLEMENT_MODEL, _nat_system, _nat_user, _ctx)
         produced = {fp: file_contents[fp] for fp in _res.get("files_changed", [])}
         status(f"  [native coder] step {step_num}: {len(produced)} file(s) edited, "
-               f"done={_res.get('done')}, rounds={_res.get('rounds')}")
+               f"done={_res.get('done')}, rounds={_res.get('rounds')}, reason={_res.get('reason')}")
         _wlog.phase_event("native coder step", step=step_num,
-                          files=len(produced), done=_res.get("done"),
-                          rounds=_res.get("rounds"))
-        # If the native coder produced edits, ship them. But if it produced
-        # NOTHING — for ANY reason (provider error, gave up via empty-turn, or
-        # burned its round budget) — don't silently return an empty step: fall
-        # through to the TEXT coder on a text fallback model (glm-5.1 …), which
-        # goes via call_with_retry and so honors gpt-oss's cross-provider chain.
-        # The goal is to PRODUCE THE FIX; when gpt-oss can't, a different/stronger
-        # coder is worth a shot before giving up. (review #1, broadened after a
-        # live run where matplotlib-25332 gave up via empty-turn with 0 edits.)
+                          files=len(produced), reason=_res.get("reason"))
         if produced:
             return produced
-        from config import NVIDIA_FALLBACKS as _NF
-        _text_fb = next((m for m in _NF.get(IMPLEMENT_MODEL, ())
-                         if not is_native_tool_model(m)), "nvidia/glm-5.1")
+        # gpt-oss (native) produced NOTHING (any reason) → degrade to the TEXT
+        # coder. CODER FALLBACK CHAIN (user-chosen 2026-05-28):
+        #   gpt-oss(native) → qwen3-coder → glm-4.7-flash → glm-5.1
+        # qwen3-coder is the FIRST text fallback because when its OR :free pool is
+        # full it 429s INSTANTLY — call_with_retry then fails over in ~ms (no
+        # stall), unlike NIM glm-5.1 which idles 600s. The text path below runs
+        # call_with_retry(qwen3-coder), whose NVIDIA_FALLBACKS leads
+        # glm-4.7-flash → glm-5.1, so the whole chain is honored from here.
+        _coder_model = "nvidia/qwen3-coder"
         warn(f"  [native coder] step {step_num} produced 0 edits "
-             f"(reason={_res.get('reason')}) — falling over to the text coder "
-             f"{_text_fb} (native path has no model fallback chain)")
-        _coder_model = _text_fb
+             f"(reason={_res.get('reason')}) — falling over to text coder chain "
+             f"qwen3-coder → glm-4.7-flash → glm-5.1")
 
     MAX_RETRIES = 5
     # Snapshot the file content as it is at the START of this step (before any

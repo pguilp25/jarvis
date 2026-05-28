@@ -193,8 +193,12 @@ NVIDIA_FALLBACKS = {
         "pollinations/qwen-coder", "nvidia/glm-5.1",
     ),
     "nvidia/qwen3-coder": (
-        "nvidia/deepseek-v4-flash", "mistral/codestral", "zai/glm-4.7-flash",
-        "pollinations/qwen-coder", "nvidia/glm-5.1",
+        # User-chosen coder chain (2026-05-28): when used as the coder's text
+        # fallback (after native gpt-oss), go straight to the GLM coders —
+        # glm-4.7-flash (off-NIM, 200K ctx) then glm-5.1 (last resort). Extra
+        # models kept after as deeper redundancy.
+        "zai/glm-4.7-flash", "nvidia/glm-5.1",
+        "mistral/codestral", "pollinations/qwen-coder", "nvidia/deepseek-v4-flash",
     ),
     "nvidia/nemotron-super": (
         "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
