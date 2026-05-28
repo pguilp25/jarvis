@@ -167,6 +167,36 @@ def _strip_think(text: str) -> str:
     return _THINK_BLOCK.sub('', text)
 
 
+# Markers that signal "the plan starts here" inside otherwise-prose text.
+_PLAN_BODY_MARKER = re.compile(
+    r'(===\s*PLAN\s*===|##\s*TASK\s*SHAPE|##\s*GOAL|###?\s*STEP\s*\d)',
+    re.IGNORECASE,
+)
+
+
+def _salvage_plan_from_think(text: str) -> str:
+    """Last-resort recovery for a planner/merger that did its WHOLE plan inside
+    the thinking channel and emitted a thin/empty visible body.
+
+    A reasoning model (e.g. glm-5.1) can reason its way to the correct plan
+    entirely inside native `<think>` (or a `[think]` block), then stop — leaving
+    nothing visible. _strip_think would then zero it and the run would discard a
+    correct plan and fall back to a weaker draft (observed on pylint-4551). When
+    that happens, the plan IS in the reasoning — pull it back out rather than
+    throwing it away. Prefer the slice from the first plan-structure marker
+    (=== PLAN ===, ## GOAL, ### STEP, …); else return the full reasoning text.
+    Returns '' if there's no reasoning content to salvage."""
+    blocks = re.findall(
+        r'(?:<think>(.*?)</think>|\[think\](.*?)\[/think\])',
+        text, re.DOTALL | re.IGNORECASE,
+    )
+    reasoning = "\n".join((a or b) for a, b in blocks).strip()
+    if not reasoning:
+        return ""
+    m = _PLAN_BODY_MARKER.search(reasoning)
+    return (reasoning[m.start():].strip() if m else reasoning)
+
+
 def _apply_plan_edits(current_plan: str, edit_body: str) -> tuple[str, list[str]]:
     """Apply REPLACE LINES / INSERT AFTER ops from a PLAN_EDIT body to the
     current plan. Returns (new_plan, log_lines). Ops are sorted bottom-up
@@ -536,6 +566,9 @@ _PLAN_DONE_LONG_LOOKBACK = 2000   # for END PLAN / terminal section
 _PLAN_DONE_SHORT_LOOKBACK = 800   # for [/think] (kept tighter because
                                   # the model should think THEN commit
                                   # immediately, not write more prose)
+# Below this many chars, a visible "plan" is empty/boilerplate — try to salvage
+# the real plan from the thinking channel before falling back to a weaker draft.
+_PLAN_SALVAGE_THRESHOLD = 200
 
 
 # Backtrack-in-response directive. Models can write
@@ -3384,11 +3417,29 @@ async def call_with_tools(
                     '', _answer, flags=re.IGNORECASE,
                 ).strip()
                 _src = "raw-prose plan (no === PLAN === block used)"
-                warn(
-                    f"  [{model.split('/')[-1]}] round {round_num}: "
-                    f"[PLAN DONE] with empty === PLAN === — falling back "
-                    f"to raw-prose response ({len(_answer):,} chars)"
-                )
+                # SALVAGE: if the visible body is also thin, the model did its
+                # plan inside the thinking channel and emitted nothing usable.
+                # Recover the plan from the reasoning rather than discarding it
+                # (the correct plan is in there — see pylint-4551). Belt to the
+                # prompt's "think then EXIT and WRITE" suspenders.
+                if len(_answer) < _PLAN_SALVAGE_THRESHOLD:
+                    _salvaged = _salvage_plan_from_think(result)
+                    if len(_salvaged) > len(_answer):
+                        _answer = _salvaged
+                        _src = ("salvaged from the thinking channel (plan was "
+                                "written inside think, not as visible output)")
+                        warn(
+                            f"  [{model.split('/')[-1]}] round {round_num}: "
+                            f"[PLAN DONE] with empty visible plan — SALVAGED "
+                            f"{len(_answer):,} chars from the reasoning channel "
+                            f"(emit the plan as VISIBLE text next time)"
+                        )
+                if "salvaged" not in _src:
+                    warn(
+                        f"  [{model.split('/')[-1]}] round {round_num}: "
+                        f"[PLAN DONE] with empty === PLAN === — falling back "
+                        f"to raw-prose response ({len(_answer):,} chars)"
+                    )
             status(
                 f"  [{model.split('/')[-1]}] round {round_num}: "
                 f"[PLAN DONE] in context '{_ctx_kind}' — "
