@@ -10370,21 +10370,22 @@ async def _implement_one_step(
         _wlog.phase_event("native coder step", step=step_num,
                           files=len(produced), done=_res.get("done"),
                           rounds=_res.get("rounds"))
-        # If the native coder produced edits, or failed for a non-provider reason
-        # (the reviewer route-back handles those), return. But if it lost its
-        # PROVIDER (OpenRouter quota/outage → reason "api-error") and produced
-        # nothing, don't silently ship an empty step: fall through to the TEXT
-        # coder on a text fallback model, which goes via call_with_retry and so
-        # honors gpt-oss's cross-provider fallback chain (glm-5.1, codestral, …).
-        # This restores the redundancy the native path bypasses. (review #1.)
-        if produced or _res.get("reason") != "api-error":
+        # If the native coder produced edits, ship them. But if it produced
+        # NOTHING — for ANY reason (provider error, gave up via empty-turn, or
+        # burned its round budget) — don't silently return an empty step: fall
+        # through to the TEXT coder on a text fallback model (glm-5.1 …), which
+        # goes via call_with_retry and so honors gpt-oss's cross-provider chain.
+        # The goal is to PRODUCE THE FIX; when gpt-oss can't, a different/stronger
+        # coder is worth a shot before giving up. (review #1, broadened after a
+        # live run where matplotlib-25332 gave up via empty-turn with 0 edits.)
+        if produced:
             return produced
         from config import NVIDIA_FALLBACKS as _NF
         _text_fb = next((m for m in _NF.get(IMPLEMENT_MODEL, ())
                          if not is_native_tool_model(m)), "nvidia/glm-5.1")
-        warn(f"  [native coder] provider error with 0 edits — falling over to the "
-             f"text coder {_text_fb} for step {step_num} (native path has no model "
-             f"fallback chain)")
+        warn(f"  [native coder] step {step_num} produced 0 edits "
+             f"(reason={_res.get('reason')}) — falling over to the text coder "
+             f"{_text_fb} (native path has no model fallback chain)")
         _coder_model = _text_fb
 
     MAX_RETRIES = 5
