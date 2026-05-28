@@ -1156,9 +1156,13 @@ scope the user didn't ask for. First plan line:
 See SYSTEM RUNTIME / THINK INTERLEAVED above. Same operational
 rules: commit early, interleave, backtrack without apology.
 
-End with these two lines, each on its own line:
+Write ALL of the above as VISIBLE output — NOT inside `<think>`/`[think]`
+(both are stripped by the runtime). End with these two lines, each on its
+own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
+If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,
+your plan is empty and gets discarded — never do that.
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1291,9 +1295,13 @@ VERIFICATION / TESTS), plus:
     1-line; 1-10 on CORRECTNESS / PRECISION / RISK; if any below
     6, name the gap.
 
-End with these two lines, each on its own line:
+Write ALL of the above as VISIBLE output — NOT inside `<think>`/`[think]`
+(both are stripped by the runtime). End with these two lines, each on its
+own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
+If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,
+your plan is empty and gets discarded — never do that.
 
 
 ══════════════════════════════════════════════════════════════════════
@@ -1327,6 +1335,18 @@ partly wrong, or in disagreement. You are the ONLY refinement step:
 there is no separate "improver" layer and no review of your output.
 You must both IMPROVE and MERGE these drafts into the FINAL plan the
 coder executes — it ships exactly as you write it.
+
+⚠ WHERE THE PLAN MUST GO — READ THIS FIRST ⚠
+Your reasoning channel is STRIPPED before anyone reads you: BOTH your
+model's automatic `<think>…</think>` AND any `[think]…[/think]` block are
+DELETED by the runtime. They are NOT your deliverable. The runtime keeps
+ONLY the visible `=== PLAN === … === END PLAN ===` block. If you reason
+your way to the plan inside think and never WRITE the `=== PLAN ===` block
+in your visible output, your entire plan is DISCARDED — the run silently
+falls back to a weaker draft and your work is wasted. So: think briefly if
+you must, then ALWAYS write the complete `=== PLAN ===` … `=== END PLAN ===`
+block as visible text. The `## DEEP THINK` preamble below is VISIBLE output
+too (it's a heading you type out), not something to do inside think.
 
 Do all of this in ONE pass:
   1. PICK the strongest baseline plan (the one closest to a correct,
@@ -1485,9 +1505,13 @@ End your plan with these sections in this order:
                               ACCEPTED
     ## CONFIDENCE             1-line; name a gap if any axis < 6
 
-End with these two lines, each on its own line:
+Write ALL of the above as VISIBLE output — NOT inside `<think>`/`[think]`
+(both are stripped by the runtime). End with these two lines, each on its
+own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
+If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,
+your plan is empty and gets discarded — never do that.
 
 
 ══════════════════════════════════════════════════════════════════════
