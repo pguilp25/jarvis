@@ -12031,44 +12031,54 @@ async def phase_review(
     # operates on a potentially shifting sandbox), the reviewer reads real files
     # from disk and writes targeted line-number edits. Blocking those caused
     # reviewer fixes to be silently dropped while reporting "APPROVED".
-    if _rev_stop_applied:
-        produced = dict(_rev_stop_applied)
-        # Catch any edits written after the last [STOP]. Dedup against the
-        # mid-stream seen-keys so blocks already applied during the loop
-        # aren't applied a second time here (which would have duplicated
-        # changes on the file and silently invalidated `pre_lines` tracking).
-        extracted = _extract_code_blocks(answer)
-        _dedup_against_seen(extracted, _rev_seen_edit_keys)
-        late_produced, late_m, late_t, late_skips = _apply_extracted_code(
-            extracted, changed_files, sandbox,
-            viewed_versions=_rev_viewed_versions,
-        )
-        if late_produced:
-            produced.update(late_produced)
-            for fp, content in late_produced.items():
-                sandbox.write_file(fp, content)
-                changed_files[fp] = content
-        for s in late_skips:
-            warn(f"  Review late-skip: {s}")
-        rev_matched = len(produced)
-        rev_total = rev_matched
-    else:
-        extracted = _extract_code_blocks(answer)
-        produced, rev_matched, rev_total, _skips = _apply_extracted_code(
-            extracted, changed_files, sandbox,
-            viewed_versions=_rev_viewed_versions,
-        )
-        for s in _skips:
-            warn(f"  Review skip: {s}")
-
-    if rev_total > 0 and rev_matched < rev_total:
-        warn(f"  Review edits: {rev_matched}/{rev_total} matched (some fixes didn't apply)")
-
+    # Applying the reviewer's edits must not abort the run — on any failure here
+    # we still want to reach routing/verification with the edits that did land.
+    # (stability audit #8; checkpoint 3 already guarantees the sandbox is
+    # delivered, this keeps the review phase itself fail-soft.)
+    produced: dict = {}
+    rev_matched = rev_total = 0
     total_fixes = 0
-    for matched_fp, modified in produced.items():
-        sandbox.write_file(matched_fp, modified)
-        total_fixes += 1
-        status(f"  {matched_fp}: fixed")
+    try:
+        if _rev_stop_applied:
+            produced = dict(_rev_stop_applied)
+            # Catch any edits written after the last [STOP]. Dedup against the
+            # mid-stream seen-keys so blocks already applied during the loop
+            # aren't applied a second time here (which would have duplicated
+            # changes on the file and silently invalidated `pre_lines` tracking).
+            extracted = _extract_code_blocks(answer)
+            _dedup_against_seen(extracted, _rev_seen_edit_keys)
+            late_produced, late_m, late_t, late_skips = _apply_extracted_code(
+                extracted, changed_files, sandbox,
+                viewed_versions=_rev_viewed_versions,
+            )
+            if late_produced:
+                produced.update(late_produced)
+                for fp, content in late_produced.items():
+                    sandbox.write_file(fp, content)
+                    changed_files[fp] = content
+            for s in late_skips:
+                warn(f"  Review late-skip: {s}")
+            rev_matched = len(produced)
+            rev_total = rev_matched
+        else:
+            extracted = _extract_code_blocks(answer)
+            produced, rev_matched, rev_total, _skips = _apply_extracted_code(
+                extracted, changed_files, sandbox,
+                viewed_versions=_rev_viewed_versions,
+            )
+            for s in _skips:
+                warn(f"  Review skip: {s}")
+
+        if rev_total > 0 and rev_matched < rev_total:
+            warn(f"  Review edits: {rev_matched}/{rev_total} matched (some fixes didn't apply)")
+
+        for matched_fp, modified in produced.items():
+            sandbox.write_file(matched_fp, modified)
+            total_fixes += 1
+            status(f"  {matched_fp}: fixed")
+    except Exception as _rev_apply_err:
+        warn(f"  Review edit-apply failed ({str(_rev_apply_err)[:120]}) — "
+             f"proceeding to routing with the {total_fixes} fix(es) that landed")
 
     if total_fixes:
         success(f"Code review: applied {total_fixes} fixes across {len(changed_files)} files")
