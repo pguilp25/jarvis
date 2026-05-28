@@ -228,6 +228,7 @@ def _do_replace(args: dict, ctx: dict) -> str:
         return (f"✗ replace_lines: start_line and end_line must be integers "
                 f"(got start_line={s!r}, end_line={e!r}).")
     before = ctx["file_contents"].get(path)
+    _before_all = dict(ctx["file_contents"])   # to catch a suffix-resolved key (review #2)
     block = (f"=== EDIT: {path} ===\n[REPLACE LINES {s_i}-{e_i}]\n"
              f"{new}\n[/REPLACE]\n=== END EDIT ===")
     ext = _extract_code_blocks(block)
@@ -261,6 +262,26 @@ def _do_replace(args: dict, ctx: dict) -> str:
         n = result[path].count("\n") + 1
         return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced. File is now {n} lines. "
                 f"Re-read with read_file if you need the new numbering before another edit.")
+    # Safety net: the coder may spell `path` differently from a known file, and
+    # _match_fp can suffix-resolve it to another key — mutating file_contents
+    # WITHOUT the write above (path not in result) → silent sandbox divergence.
+    # Sync any key that actually changed so disk and memory never disagree. (review #2)
+    _changed = {k: v for k, v in result.items()
+                if k != path and v != _before_all.get(k)}
+    if _changed:
+        for k, v in _changed.items():
+            if ctx.get("sandbox") is not None:
+                try:
+                    ctx["sandbox"].write_file(k, v)
+                except Exception:
+                    pass
+            ctx["file_contents"][k] = v
+            if isinstance(ctx.get("viewed_versions"), dict):
+                ctx["viewed_versions"][k] = v
+            ctx.setdefault("files_changed", set()).add(k)
+        _keys = ", ".join(_changed)
+        return (f"✓ Applied (your path '{path}' resolved to {_keys}). Use that exact "
+                f"path for further edits so line numbers anchor cleanly.")
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
         "no change produced (range may be invalid)"
     return f"✗ NOT applied to {path}: {reason}"

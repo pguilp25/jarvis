@@ -10294,6 +10294,7 @@ async def _implement_one_step(
     # file_contents + sandbox in place (via the [REPLACE LINES] machinery the
     # native dispatcher reuses), so we return the changed files like the text path.
     from core.native_tools import is_native_tool_model, call_with_native_tools
+    _coder_model = IMPLEMENT_MODEL   # text path uses this; native fallover overrides it
     if is_native_tool_model(IMPLEMENT_MODEL):
         from tools.codebase import add_line_numbers as _aln
         _nat_targets = {fp: file_contents[fp] for fp in step_files if fp in file_contents}
@@ -10369,7 +10370,22 @@ async def _implement_one_step(
         _wlog.phase_event("native coder step", step=step_num,
                           files=len(produced), done=_res.get("done"),
                           rounds=_res.get("rounds"))
-        return produced
+        # If the native coder produced edits, or failed for a non-provider reason
+        # (the reviewer route-back handles those), return. But if it lost its
+        # PROVIDER (OpenRouter quota/outage → reason "api-error") and produced
+        # nothing, don't silently ship an empty step: fall through to the TEXT
+        # coder on a text fallback model, which goes via call_with_retry and so
+        # honors gpt-oss's cross-provider fallback chain (glm-5.1, codestral, …).
+        # This restores the redundancy the native path bypasses. (review #1.)
+        if produced or _res.get("reason") != "api-error":
+            return produced
+        from config import NVIDIA_FALLBACKS as _NF
+        _text_fb = next((m for m in _NF.get(IMPLEMENT_MODEL, ())
+                         if not is_native_tool_model(m)), "nvidia/glm-5.1")
+        warn(f"  [native coder] provider error with 0 edits — falling over to the "
+             f"text coder {_text_fb} for step {step_num} (native path has no model "
+             f"fallback chain)")
+        _coder_model = _text_fb
 
     MAX_RETRIES = 5
     # Snapshot the file content as it is at the START of this step (before any
@@ -10746,7 +10762,7 @@ async def _implement_one_step(
 
         # ── 1. Coder writes edits ────────────────────────────────────
         impl_result = await _call_with_tools(
-            IMPLEMENT_MODEL, impl_prompt, project_root,
+            _coder_model, impl_prompt, project_root,
             detailed_map=detailed_map, purpose_map=purpose_map,
             research_cache=research_cache,
             log_label=f"step {step_num}: {step_name} (attempt {attempt})",
