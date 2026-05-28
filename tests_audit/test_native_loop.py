@@ -276,6 +276,23 @@ def test_loop_reason_budget():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_loop_breaker_escalates_repeated_failing_edit():
+    ctx, rel, root = _mk_ctx()
+    try:
+        # the same blind edit (no prior read → rejected by the viewed_versions
+        # gate) sent twice, then finish. The 2nd reject must carry an escalation.
+        bad = _tc("x", "replace_lines", path=rel, start_line=2, end_line=2,
+                  new_content='4|return "hi " + name')
+        script = [_msg(tool_calls=[bad]), _msg(tool_calls=[bad]),
+                  _msg(tool_calls=[_tc("f", "finish")])]
+        res, model = _run(script, ctx)
+        flat = [m for conv in model.seen_messages for m in conv]
+        tool_results = [m["content"] for m in flat if m.get("role") == "tool"]
+        assert any("EXACT" in r and "rejected" in r for r in tool_results), tool_results
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_loop_reason_empty_turn():
     ctx, rel, root = _mk_ctx()
     try:

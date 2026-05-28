@@ -462,6 +462,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     final = ""
     reason = "budget-exhausted"
     rnd = 0
+    _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
     for rnd in range(1, max_rounds + 1):
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
@@ -523,6 +524,21 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     result_str = "Task marked finished."
                 else:
                     result_str = str(out)
+            # Loop-breaker: if the SAME tool call keeps getting rejected, escalate
+            # so the coder changes approach instead of spinning the same failing
+            # edit until the budget runs out. (Audit #46.)
+            if isinstance(result_str, str) and result_str.startswith("✗"):
+                _sig = (name, raw_args)
+                _fail_counts[_sig] = _fail_counts.get(_sig, 0) + 1
+                if _fail_counts[_sig] >= 2:
+                    result_str += (f"\n⚠ You have now sent this EXACT {name or 'tool'} "
+                                   f"call {_fail_counts[_sig]}× and it was rejected each "
+                                   f"time. STOP repeating it — change the arguments, "
+                                   f"read_file to get the CURRENT line numbers, try a "
+                                   f"different approach, or call finish if the file is "
+                                   f"already correct.")
+            else:
+                _fail_counts.pop((name, raw_args), None)   # success clears the streak
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
         if done:
