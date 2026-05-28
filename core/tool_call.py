@@ -4064,9 +4064,20 @@ async def call_with_tools(
                             f"looked up by a parallel model. Result follows.]\n"
                             + cached
                         )
-                result = run_fn(clean_tag)
-                if asyncio.iscoroutine(result):
-                    result = await result
+                try:
+                    result = run_fn(clean_tag)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                except Exception as e:
+                    # A tool executor blowing up must degrade to a VISIBLE error
+                    # in the round output, never abort the whole run (stability
+                    # audit #5). The model sees it and can try another approach.
+                    # Not stored, so a transient failure can be retried next round
+                    # (the stall detector guards against endless repeats).
+                    warn(f"  [{tag_type}: {clean_tag[:60]}] tool error: {str(e)[:120]}")
+                    return (f"\n✗ {tag_type}: {clean_tag} failed — {str(e)[:160]}. "
+                            f"Try a different lookup, a narrower input, or proceed "
+                            f"with what you have.\n")
                 _store(tag_type, tag, result)
                 return result
 
