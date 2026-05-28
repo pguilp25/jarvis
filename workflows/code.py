@@ -12409,13 +12409,25 @@ async def code_agent(state: AgentState) -> AgentState:
         )
 
         # ── Phase 3.5: REVIEW → RUN [VERIFY:] → ROUTE (up to 3 cycles) ──
-        # The reviewer proves the patch by running it; on failure it routes
-        # back to the coder (fixable code) or planner (design error), each
-        # re-entering with full context. The loop is bounded; on exhaustion
-        # or any routing error we deliver whatever's in the sandbox — never
-        # worse than the prior linear flow.
+        # DISABLED BY DEFAULT (2026-05-28). Across SWE-bench runs the reviewer was
+        # net-NEGATIVE: it never once caught a wrong patch and fixed it into a
+        # resolve; it rubber-stamped broken patches when the verify failed on a
+        # sandbox/env issue ("environment failure → APPROVED" — matplotlib, pylint);
+        # and the route→reimplement loop DEGRADED a correct patch (django-14053:
+        # a correct fix bloated to 7105B → UNRESOLVED, while the no-loop runs that
+        # shipped the coder's patch directly RESOLVED). The verify can't import an
+        # instance's deps in the read-only/no-net sandbox, so it can't truly gate.
+        # Skipping it is faster and empirically no worse (often better). The
+        # verify-and-route CONCEPT is the path to higher resolve-rate once verify
+        # runs in the instance's real env — re-enable then with JARVIS_ENABLE_REVIEW=1.
+        _review_enabled = os.environ.get("JARVIS_ENABLE_REVIEW", "0") == "1"
         MAX_ROUTE_CYCLES = 3
         for _cycle in range(MAX_ROUTE_CYCLES + 1):
+            if not _review_enabled:
+                status("  Phase 3.5 REVIEW: skipped (reviewer disabled) — "
+                       "delivering the coder's patch as-is")
+                _wlog.phase_event("review_skipped", reason="JARVIS_ENABLE_REVIEW!=1")
+                break
             route, sandbox = await phase_review(
                 task, plan, sandbox, project_root, detailed_map, purpose_map, context,
                 research_cache=research_cache,
