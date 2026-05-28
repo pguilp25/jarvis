@@ -11588,9 +11588,15 @@ async def phase_implement(
                     research_cache=research_cache,
                 )
             except Exception as ex:
-                _wlog.phase_error(f"Step {num} raised",
+                # A single step blowing up must NOT discard the other steps'
+                # work (stability audit #2). Log it and move on — edits from
+                # completed steps are already on the sandbox and downstream
+                # review/deliver still runs. Continuing beats aborting the run.
+                _wlog.phase_error(f"Step {num} raised — skipping, keeping prior steps",
                                   error=str(ex)[:200])
-                raise
+                warn(f"  Step {num} failed ({str(ex)[:120]}) — skipping, "
+                     f"keeping {len(total_produced)} file(s) from earlier steps")
+                continue
             total_produced.update(step_result)
             # Per-step snapshot: which files this step actually wrote.
             step_summary = "\n".join(
@@ -12310,6 +12316,12 @@ async def code_agent(state: AgentState) -> AgentState:
 
         # Create sandbox
         sandbox.setup()
+        # Make the sandbox deliverable from this point ON. Edits are written to
+        # .jarvis_sandbox/ as each step applies them, so if a LATER phase raises,
+        # the work done so far is still on disk — surface it instead of silently
+        # returning a 0-byte patch. (Stability audit #1: pending_sandbox used to
+        # be set only on full success, so any exception threw away real edits.)
+        state["pending_sandbox"] = sandbox
 
         # ── Phase 2: PLAN ────────────────────────────────────────────────
         # TEST SPEEDUP: when JARVIS_PLAN_CACHE=<dir> is set, reuse a cached plan
@@ -12478,6 +12490,11 @@ Apply these changes to {project_root}? (y/n)"""
         error(f"Coding agent failed: {e}")
         error(tb)
         state["final_answer"] = f"Coding agent error: {e}\n\nTraceback:\n{tb}\n\nPartial results may be in the sandbox."
+        # Deliver whatever edits reached the sandbox before the failure rather
+        # than discarding them. setup() already set pending_sandbox; this is a
+        # belt-and-suspenders guard in case the failure happened before that.
+        if "sandbox" in dir() and state.get("pending_sandbox") is None:
+            state["pending_sandbox"] = sandbox
 
     finally:
         # Don't cleanup sandbox — user might want to inspect
