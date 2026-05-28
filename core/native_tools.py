@@ -174,7 +174,14 @@ async def _do_read(args: dict, ctx: dict) -> str:
     if not path:
         return "✗ read_file needs a path."
     s = args.get("start_line"); e = args.get("end_line")
-    arg = f"{path} {int(s)}-{int(e)}" if (s and e) else path
+    if s is not None and e is not None:
+        try:
+            arg = f"{path} {int(s)}-{int(e)}"
+        except (TypeError, ValueError):
+            return (f"✗ read_file: start_line/end_line must be integers "
+                    f"(got start_line={s!r}, end_line={e!r}).")
+    else:
+        arg = path
     try:
         out = await _run_code_reads(
             [arg], ctx.get("project_root", ""),
@@ -200,7 +207,13 @@ def _do_replace(args: dict, ctx: dict) -> str:
     new = args.get("new_content", "")
     if not path or s is None or e is None:
         return "✗ replace_lines needs path, start_line, end_line, new_content."
-    block = (f"=== EDIT: {path} ===\n[REPLACE LINES {int(s)}-{int(e)}]\n"
+    try:
+        s_i, e_i = int(s), int(e)
+    except (TypeError, ValueError):
+        return (f"✗ replace_lines: start_line and end_line must be integers "
+                f"(got start_line={s!r}, end_line={e!r}).")
+    before = ctx["file_contents"].get(path)
+    block = (f"=== EDIT: {path} ===\n[REPLACE LINES {s_i}-{e_i}]\n"
              f"{new}\n[/REPLACE]\n=== END EDIT ===")
     ext = _extract_code_blocks(block)
     result, matched, attempted, skips = _apply_extracted_code(
@@ -209,15 +222,29 @@ def _do_replace(args: dict, ctx: dict) -> str:
     # malformed-range messages live on the extracted dict
     skips = list(ext.get("malformed_edits", [])) + list(skips)
     if path in result:
-        if ctx.get("sandbox") is not None:
-            ctx["sandbox"].write_file(path, result[path])
+        # No-op guard: a byte-identical replace is not a real edit. Reporting it
+        # as "✓ Applied" would pollute files_changed and let a coder that changed
+        # nothing think it succeeded. (The text coder has this; native must too.)
+        if before is not None and result[path] == before:
+            return (f"✗ replace_lines was a NO-OP on {path}: new_content is "
+                    f"byte-identical to lines {s_i}-{e_i}. Nothing changed — if you "
+                    f"intended a change, re-check new_content; if the file is already "
+                    f"correct, call finish.")
+        sb = ctx.get("sandbox")
+        if sb is not None:
+            try:
+                sb.write_file(path, result[path])
+            except Exception as ex:
+                return (f"✗ replace_lines: edit computed but FAILED to write the "
+                        f"sandbox for {path} ({str(ex)[:120]}). The change did not "
+                        f"persist; retry.")
         ctx["file_contents"][path] = result[path]
         # The edit shifted line numbers; the old read snapshot is now stale.
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
         n = result[path].count("\n") + 1
-        return (f"✓ Applied: {path} lines {s}-{e} replaced. File is now {n} lines. "
+        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced. File is now {n} lines. "
                 f"Re-read with read_file if you need the new numbering before another edit.")
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
         "no change produced (range may be invalid)"
@@ -309,34 +336,85 @@ async def _call_tools_with_retry(model_id, messages, tools, max_tokens):
             return await call_nvidia_tools(model_id, messages, tools, max_tokens=max_tokens)
         except Exception as e:
             last = e
-            s = str(e)
-            transient = any(c in s for c in ("429", "502", "503", "504", "overloaded", "rate"))
+            s = str(e).lower()
+            tname = type(e).__name__.lower()
+            # Treat gateway 5xx / 429 / overload AND network blips (timeouts,
+            # connection resets) as transient — a dropped socket should retry,
+            # not end the coder's step. (Audit #5/#6.)
+            transient = (
+                isinstance(e, asyncio.TimeoutError)
+                or any(c in s for c in ("429", "502", "503", "504", "overloaded",
+                                        "rate limit", "rate-limit", "timed out",
+                                        "timeout", "connection", "temporarily"))
+                or any(c in tname for c in ("timeout", "clienterror", "connector",
+                                            "serverdisconnected", "connectionreset"))
+            )
             if not transient or attempt == 3:
                 raise
             wait = 3 * (attempt + 1)
-            warn(f"  [native:{model_id.split('/')[-1]}] {s[:80]} — retry {attempt+1}/3 in {wait}s")
+            warn(f"  [native:{model_id.split('/')[-1]}] {str(e)[:80]} — retry {attempt+1}/3 in {wait}s")
             await asyncio.sleep(wait)
     raise last
 
 
+def _est_chars(messages) -> int:
+    return sum(len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+               for m in messages)
+
+
+def _trim_history(messages: list, max_chars: int, model_id: str) -> list:
+    """Bound message-history growth so a long loop never drifts into a silent
+    HTTP-400 context overflow (audit #47/#7). Keeps system + user + the newest
+    assistant/tool groups, evicting the oldest groups first. Pairing is preserved
+    (an assistant-with-tool_calls and its tool results are dropped together) so
+    the request stays API-valid."""
+    if _est_chars(messages) <= max_chars or len(messages) <= 4:
+        return messages
+    head, rest = messages[:2], messages[2:]
+    groups, i = [], 0
+    while i < len(rest):
+        grp = [rest[i]]
+        j = i + 1
+        while j < len(rest) and rest[j].get("role") == "tool":
+            grp.append(rest[j]); j += 1
+        groups.append(grp); i = j
+    dropped = 0
+    while len(groups) > 2 and _est_chars(head + [m for g in groups for m in g]) > max_chars:
+        groups.pop(0); dropped += 1
+    if dropped:
+        warn(f"  [native:{model_id.split('/')[-1]}] context near cap — dropped "
+             f"{dropped} old tool round(s) to avoid overflow")
+    return head + [m for g in groups for m in g]
+
+
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 16,
-                                 max_tokens: int = 8192) -> dict:
+                                 max_tokens: int = 8192,
+                                 max_history_chars: int = 400_000) -> dict:
     """Run a structured tool-use coding loop. `ctx` carries the mutable state the
     tools act on: {file_contents, sandbox, project_root, viewed_versions,
     purpose_map, detailed_map}. Edits are applied to ctx['file_contents'] + the
-    sandbox in place. Returns {answer, done, files_changed, rounds}."""
+    sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
+    reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
+    short = model_id.split('/')[-1]
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
     done = False
     final = ""
+    reason = "budget-exhausted"
     rnd = 0
     for rnd in range(1, max_rounds + 1):
+        messages = _trim_history(messages, max_history_chars, model_id)
         try:
             msg = await _call_tools_with_retry(model_id, messages, CODER_TOOLS, max_tokens)
         except Exception as e:
-            warn(f"  [native] giving up after error: {str(e)[:120]}")
+            warn(f"  [native:{short}] giving up after error: {str(e)[:120]}")
+            reason = "api-error"
+            break
+        if not isinstance(msg, dict):
+            warn(f"  [native:{short}] non-dict model message — stopping")
+            reason = "api-error"
             break
         # The assistant message that issued tool_calls MUST precede the tool
         # results in history, with its tool_calls intact.
@@ -348,29 +426,58 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         tcs = msg.get("tool_calls") or []
         if not tcs:
             final = msg.get("content") or ""
-            status(f"  [native:{model_id.split('/')[-1]}] round {rnd}: no tool call — finishing")
+            # An empty assistant turn (no tool calls, no content) is a STALL, not
+            # a finish — distinguish so the workflow can tell "model did nothing"
+            # from a deliberate stop. (Audit #11/#45.)
+            reason = "no-tool-call" if final.strip() else "empty-turn"
+            status(f"  [native:{short}] round {rnd}: no tool call ({reason})")
             break
         n_edit = sum(1 for tc in tcs if tc.get("function", {}).get("name") == "replace_lines")
         names = ",".join(tc.get("function", {}).get("name", "?") for tc in tcs)
-        status(f"  [native:{model_id.split('/')[-1]}] round {rnd}: {len(tcs)} tool call(s) [{names}]"
+        status(f"  [native:{short}] round {rnd}: {len(tcs)} tool call(s) [{names}]"
                + (f", {n_edit} edit(s)" if n_edit else ""))
         for tc in tcs:
-            fn = tc.get("function", {})
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
             name = fn.get("name", "")
+            raw_args = fn.get("arguments")
             try:
-                args = json.loads(fn.get("arguments") or "{}")
+                args = json.loads(raw_args) if raw_args else {}
             except Exception:
-                args = {}
-            out = await _dispatch(name, args, ctx)
-            if isinstance(out, tuple) and out and out[0] == "__FINISH__":
-                done = True
-                final = out[1] or "done"
-                result_str = "Task marked finished."
+                args = None
+            if not isinstance(args, dict):
+                # Malformed / non-object arguments — tell the coder exactly that
+                # instead of the misleading "needs a path". (Audit #15/#16.)
+                result_str = (f"✗ {name or 'tool'}: arguments were not a valid JSON "
+                              f"object — re-emit the call with a proper object "
+                              f"(got: {str(raw_args)[:80]}).")
             else:
-                result_str = str(out)
-            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                # NEVER let a tool executor exception kill the run. Any raise
+                # becomes a role-coherent ✗ the coder can react to. (Audit #1/#22.)
+                try:
+                    out = await _dispatch(name, args, ctx)
+                except Exception as e:
+                    out = (f"✗ {name or 'tool'} failed internally: {str(e)[:160]} — "
+                           f"try a different tool or a narrower input.")
+                if isinstance(out, tuple) and out and out[0] == "__FINISH__":
+                    done = True
+                    final = out[1] or "done"
+                    reason = "finished"
+                    result_str = "Task marked finished."
+                else:
+                    result_str = str(out)
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
         if done:
             break
-    return {"answer": final, "done": done,
-            "files_changed": sorted(ctx.get("files_changed", set())), "rounds": rnd}
+    files = sorted(ctx.get("files_changed", set()))
+    # Make a step that produced NOTHING visible (audit #44/#48): a clean finish
+    # with no edits, a stall, or a budget blow-out should never look like success.
+    if reason == "budget-exhausted":
+        warn(f"  [native:{short}] hit the {max_rounds}-round budget without finishing "
+             f"— step may be incomplete ({len(files)} file(s) edited).")
+    elif reason in ("empty-turn", "no-tool-call") and not files:
+        warn(f"  [native:{short}] stopped ({reason}) with ZERO edits — step produced nothing.")
+    elif done and not files:
+        warn(f"  [native:{short}] called finish but made ZERO edits — step produced nothing.")
+    return {"answer": final, "done": done, "files_changed": files,
+            "rounds": rnd, "reason": reason}

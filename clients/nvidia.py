@@ -266,11 +266,41 @@ async def call_nvidia_tools(
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers,
                                 timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+            raw = await resp.text()
             if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
-            data = await resp.json()
-    return data["choices"][0]["message"]
+                raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
+    return _extract_tool_message(raw, api_model)
+
+
+def _extract_tool_message(raw: str, api_model: str) -> dict:
+    """Parse a chat-completions body into the assistant message, raising CLEAR,
+    retry-classifiable errors for every malformed shape instead of a bare
+    KeyError/IndexError. Free providers (OpenRouter :free) sometimes return an
+    error object or an empty `choices` with HTTP 200 — those must surface as a
+    real error (and 429/rate strings stay retryable), not crash the coder."""
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        raise RuntimeError(f"NVIDIA {api_model} returned non-JSON body: {raw[:200]}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"NVIDIA {api_model} returned non-object JSON: {str(data)[:200]}")
+    if data.get("error"):
+        err = data["error"]
+        if isinstance(err, dict):
+            msg = err.get("message", str(err))
+            code = err.get("code", err.get("type", ""))
+        else:
+            msg, code = str(err), ""
+        raise RuntimeError(f"NVIDIA {api_model} error {code}: {str(msg)[:200]}")
+    choices = data.get("choices")
+    if not choices:
+        raise RuntimeError(f"NVIDIA {api_model} returned no choices: {str(data)[:200]}")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        fr = choices[0].get("finish_reason", "") if isinstance(choices[0], dict) else ""
+        raise RuntimeError(f"NVIDIA {api_model} choice has no message "
+                           f"(finish_reason={fr}): {str(choices[0])[:200]}")
+    return message
 
 
 async def call_nvidia_stream(

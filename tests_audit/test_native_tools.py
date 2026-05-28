@@ -195,6 +195,46 @@ def test_replace_lines_missing_args_no_crash():
         _cleanup(root)
 
 
+def test_replace_lines_noninteger_lines_no_crash():
+    # a non-numeric start_line must reject cleanly, NEVER raise (would kill the run)
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": "L6", "end_line": "L6",
+                     "new_content": "x = 1"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+        assert "integer" in out.lower()
+    finally:
+        _cleanup(root)
+
+
+def test_read_file_noninteger_lines_no_crash():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("read_file", {"path": rel, "start_line": "abc", "end_line": "def"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+        assert "integer" in out.lower()
+    finally:
+        _cleanup(root)
+
+
+def test_replace_lines_noop_is_rejected():
+    # a byte-identical replace must NOT report success or pollute files_changed
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        # line 6 currently is `    return "hello " + name` (4 spaces) — re-write it identical
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 6, "end_line": 6,
+                     "new_content": '4|return "hello " + name'}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+        assert "no-op" in out.lower()
+        assert rel not in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
 # ── lookup tools: each returns a string, never raises ────────────────────────
 @pytest.mark.skipif(not _HAS_RG, reason="ripgrep not installed")
 def test_find_refs():
@@ -280,3 +320,37 @@ def test_unknown_tool_message():
         assert isinstance(out, str) and out.startswith("✗ Unknown")
     finally:
         _cleanup(root)
+
+
+# ── call_nvidia_tools response-shape guard (_extract_tool_message) ───────────
+def test_extract_message_valid():
+    import json as _j
+    from clients.nvidia import _extract_tool_message
+    raw = _j.dumps({"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+    msg = _extract_tool_message(raw, "m")
+    assert msg["content"] == "hi"
+
+
+def test_extract_message_malformed_shapes_raise_clearly():
+    import json as _j
+    import pytest as _p
+    from clients.nvidia import _extract_tool_message
+    # non-JSON body
+    with _p.raises(RuntimeError, match="non-JSON"):
+        _extract_tool_message("<html>502 bad gateway</html>", "m")
+    # non-object JSON
+    with _p.raises(RuntimeError, match="non-object"):
+        _extract_tool_message("[1,2,3]", "m")
+    # error-shaped 200 with a rate-limit message → RuntimeError carrying '429'
+    # so the retry layer still classifies it transient
+    with _p.raises(RuntimeError, match="429"):
+        _extract_tool_message(_j.dumps({"error": {"message": "rate limited", "code": 429}}), "m")
+    # missing choices
+    with _p.raises(RuntimeError, match="no choices"):
+        _extract_tool_message(_j.dumps({"id": "x"}), "m")
+    # empty choices
+    with _p.raises(RuntimeError, match="no choices"):
+        _extract_tool_message(_j.dumps({"choices": []}), "m")
+    # choice without a message
+    with _p.raises(RuntimeError, match="no message"):
+        _extract_tool_message(_j.dumps({"choices": [{"finish_reason": "stop"}]}), "m")
