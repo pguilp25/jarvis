@@ -177,6 +177,40 @@ def test_replace_lines_with_seeded_viewed_version_applies():
         _cleanup(root)
 
 
+def test_replace_lines_on_nonexistent_file_rejected_no_junk():
+    # The pylint-4551 nonsense: a placeholder step targeted a non-existent file
+    # ("main"), the coder issued replace_lines, and the applier FABRICATED a junk
+    # file from the REPLACE bodies (leaking 0|/4| prefixes) and marked it success.
+    # Now it must REJECT and create NO file.
+    ctx, rel, root = _mk_ctx()
+    try:
+        # exact failing shape: an empty placeholder entry (as phase_implement set
+        # file_contents["main"]="" + seeded viewed_versions with it)
+        ctx["file_contents"]["ghost.py"] = ""
+        ctx["viewed_versions"]["ghost.py"] = ""
+        out = _disp("replace_lines",
+                    {"path": "ghost.py", "start_line": 1, "end_line": 1,
+                     "new_content": "0|# Entry point\nif __name__ == '__main__':"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗"), out
+        assert "ghost.py" not in ctx["files_changed"]
+        # the applier must NOT have fabricated the file on the sandbox
+        assert (ctx["sandbox"].load_file("ghost.py") or "") == ""
+    finally:
+        _cleanup(root)
+
+
+def test_create_file_is_the_path_for_new_files():
+    # the correct way to make a new file — create_file, not replace_lines
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("create_file",
+                    {"path": "brand_new.py", "content": "x = 1\n"}, ctx)
+        assert out.startswith("✓ Created")
+        assert "brand_new.py" in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
 def test_replace_lines_without_read_is_rejected_not_crash():
     # The applier requires a prior read (viewed_versions gate). Editing blind
     # must reject cleanly with guidance, never crash or silently corrupt.

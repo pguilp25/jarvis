@@ -8738,9 +8738,33 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.IGNORECASE)
         return re.sub(r"\n{3,}", "\n\n", t).strip()
 
+    # A plan DESCRIBES the change in prose; it must never carry live protocol /
+    # tool directives. Drop those lines so an exploration transcript (all
+    # [PURPOSE:]/[CODE:]/… directives, no prose) can't masquerade as a plan
+    # (pylint-4551: a directive-only Layer-1 draft won the fallback, then
+    # sanitized down to file-less prose → 0 target files).
+    def _sanitize_plan(p: str) -> str:
+        out = []
+        for ln in p.split("\n"):
+            s = ln.strip()
+            if re.match(r'^\[(KEEP|CODE|VIEW|RUN|REPLACE LINES|INSERT|DELETE|edit|'
+                        r'/edit|STOP|DONE|CONFIRM|PURPOSE|SEMANTIC|DETAIL|REFS|'
+                        r'SEARCH|WEBSEARCH|DEPENDENCY|CONTINUE)', s, re.I):
+                continue
+            if re.match(r'^===\s*(EDIT|END EDIT|FILE|END FILE)\b', s, re.I):
+                continue
+            out.append(ln)
+        return re.sub(r'\n{3,}', '\n\n', "\n".join(out)).strip()
+
+    # actionable content = the plan minus thinking AND minus tool directives.
+    # Rank/measure plans on THIS, not raw length — so neither a think dump nor a
+    # directive flood can win on volume alone.
+    def _actionable(body: str) -> str:
+        return _sanitize_plan(_strip_think(body or ""))
+
     # below this, a "plan" is headers/boilerplate, not actionable guidance
     MIN_PLAN_CHARS = 400
-    _merger_body = _strip_think(best_plan)
+    _merger_body = _actionable(best_plan)
     has_plan_block = "=== PLAN ===" in best_plan
     has_step_header = bool(re.search(r"###\s*STEP\s*\d+", best_plan, re.IGNORECASE))
     # Fall back when the merger gave us thinking-with-no-plan OR a structurally-
@@ -8764,11 +8788,21 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # anything below the usefulness floor, and prefer the longest body with
         # a structure bonus as a tie-breaker. (Layer 2 was removed 2026-05-27,
         # so `improved` no longer exists — the merger IS the improver now.)
+        # SALVAGE: a reasoning model can derive the whole (correct) plan inside
+        # <think> and emit a thin visible body — _strip_think would then zero it
+        # and the run would discard a correct plan (pylint-4551, where the merger
+        # named the right files only inside its thinking). Recover it and let it
+        # compete as a ranking candidate.
+        from core.tool_call import _salvage_plan_from_think
+        _merger_salvaged = _salvage_plan_from_think(best_plan)
         pool = (list(plans)
-                + [{"model": "merger", "answer": best_plan}])
+                + [{"model": "merger", "answer": best_plan},
+                   {"model": "merger(salvaged-from-think)", "answer": _merger_salvaged}])
         ranked = []
         for d in pool:
-            body = _strip_think(d.get("answer") or "")
+            # rank by ACTIONABLE content (no thinking, no tool directives) so a
+            # think dump or a directive flood can't win on raw volume.
+            body = _actionable(d.get("answer") or "")
             if len(body) < MIN_PLAN_CHARS:
                 continue
             bonus = 0
@@ -8788,13 +8822,13 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             )
             best_plan = picked_body
         else:
-            # Nothing clears the floor — merger output minus thinking is the
-            # least-bad option (still better than a sub-floor stub).
-            stripped = _strip_think(best_plan)
+            # Nothing clears the floor — prefer the salvaged merger reasoning,
+            # else the merger output minus thinking (least-bad over a stub).
+            stripped = _merger_salvaged or _strip_think(best_plan)
             warn(
                 f"  No plan clears the {MIN_PLAN_CHARS}-char floor; passing "
-                f"merger output minus thinking to coder ({len(best_plan):,} → "
-                f"{len(stripped):,} chars)."
+                f"{'salvaged merger reasoning' if _merger_salvaged else 'merger output minus thinking'} "
+                f"to coder ({len(stripped):,} chars)."
             )
             best_plan = stripped or best_plan
         # Strip stray signal tags on whatever we chose.
@@ -8812,21 +8846,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # coder's prompt and gave it no actionable steps; (sphinx-7440) the plan
     # embedded `=== EDIT === … [edit:1] …` scaffolding that poisoned the
     # coder's edit parser. Neutralize those tokens, then cap the size.
-    def _sanitize_plan(p: str) -> str:
-        out = []
-        for ln in p.split("\n"):
-            s = ln.strip()
-            # drop bare protocol/tool directives that don't belong in a plan
-            if re.match(r'^\[(KEEP|CODE|VIEW|RUN|REPLACE LINES|INSERT|DELETE|edit|/edit|STOP|DONE|CONFIRM)', s, re.I):
-                continue
-            if re.match(r'^===\s*(EDIT|END EDIT|FILE|END FILE)\b', s, re.I):
-                continue
-            out.append(ln)
-        cleaned = re.sub(r'\n{3,}', '\n\n', "\n".join(out)).strip()
-        # Collapse any run of >3 near-identical lines (a directive flood that
-        # slipped the line filter) so it can't dominate the plan.
-        return cleaned
-
+    # (_sanitize_plan is defined near the top of this function — it's also used
+    # by the plan-selection ranking above so a directive-only draft can't win.)
     _before = len(best_plan)
     best_plan = _sanitize_plan(best_plan)
     PLAN_CHAR_CEILING = 12000   # a real STEP plan is < ~6K; beyond this is bloat
@@ -9541,10 +9562,23 @@ def _apply_extracted_code(
                 for s in skip_msgs:
                     all_ambiguous_skips.append(f"- {s}")
             else:
-                code_parts = [c.strip() for _, _, c in line_edits if c.strip()]
-                if code_parts:
-                    result[matched_fp] = "\n\n".join(code_parts)
-                    total_matched += n_edits
+                # The target is empty / doesn't exist (no viewed snapshot AND no
+                # current content). You cannot REPLACE LINES that don't exist —
+                # fabricating a file from the REPLACE bodies is exactly how a junk
+                # file gets committed as "success" (pylint-4551: a placeholder
+                # `main` step produced a 5-line stub, raw `0|`/`4|` prefixes and
+                # all, at repo root). REJECT. New files go through the new-file
+                # path (`=== FILE: … === END FILE ===` / create_file) only.
+                all_ambiguous_skips.append(
+                    f"- [REPLACE LINES] on {matched_fp} REJECTED: the file is "
+                    f"empty or does not exist — there are no lines to replace. "
+                    f"To CREATE a new file use `=== FILE: {matched_fp} === … "
+                    f"=== END FILE ===` (or the create_file tool). REPLACE LINES "
+                    f"only edits a file you have already read."
+                )
+                if pushed_revert and matched_fp not in result:
+                    _pop_revert_state(matched_fp)
+                    pushed_revert = False
 
     # New files
     for filepath, content in extracted["new_files"].items():
@@ -11569,7 +11603,16 @@ async def phase_implement(
     all_files = list(dict.fromkeys(all_files))  # dedup, preserve order
 
     if not all_files:
-        all_files = files_to_modify if files_to_modify else ["main"]
+        # NEVER invent a filename. A file-less plan means planning failed to name
+        # targets; the old `["main"]` default fabricated a junk file at repo root
+        # (pylint-4551). Proceed with whatever files_to_modify gave us (possibly
+        # none) — the coder then works from the step text / search, and an empty
+        # target set yields an honest empty patch, not nonsense.
+        all_files = list(files_to_modify)
+        if not all_files:
+            warn("Phase 3: the plan named NO target files — coder will work from "
+                 "the step text (nothing preloaded). Honest no-op if none found.")
+            _wlog.phase_warn("plan named no target files")
     all_files = [
         os.path.relpath(f, project_root) if os.path.isabs(f) else f
         for f in all_files
