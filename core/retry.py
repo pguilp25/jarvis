@@ -90,8 +90,21 @@ def _is_down(model_id: str) -> bool:
     return time.time() < _down_until.get(model_id, 0.0)
 
 
-def _mark_down(model_id: str) -> None:
-    _down_until[model_id] = time.time() + _COOLDOWN_SEC
+# A transient GATEWAY 5xx (502/503/504 — NVIDIA NIM's load-balancer hiccuping
+# on a large/slow request, returns an HTML error page) is NOT a capacity wall
+# like a 429. Banishing the model for the full 120s on a blip exiles the strong
+# coder (glm-5.1) to weak fallbacks for 2 min and churns rounds (django-14792
+# audit). Park it only briefly so the next round retries it.
+_GATEWAY_5XX_COOLDOWN_SEC = 20.0
+_TRANSIENT_GATEWAY = re.compile(r'HTTP\s*(?:502|503|504)\b', re.IGNORECASE)
+
+
+def _is_transient_gateway_error(exc: BaseException) -> bool:
+    return bool(_TRANSIENT_GATEWAY.search(str(exc)))
+
+
+def _mark_down(model_id: str, seconds: float = _COOLDOWN_SEC) -> None:
+    _down_until[model_id] = time.time() + seconds
 
 try:
     from tools.connectivity import is_online, wait_for_connection
@@ -188,11 +201,15 @@ async def call_with_retry(
             # model in the chain now; retrying the same endpoint would just
             # re-queue behind the same overloaded provider.
             if _is_failover_now_error(e):
+                _gw = _is_transient_gateway_error(e)
                 warn(
-                    f"  {model_id}: {last_error} — busy/stalled, failing over "
-                    f"to next in chain (no re-queue)"
+                    f"  {model_id}: {last_error} — "
+                    + ("transient gateway 5xx, brief cooldown (retried soon)"
+                       if _gw else "busy/stalled")
+                    + ", failing over to next in chain (no re-queue)"
                 )
-                _mark_down(model_id)
+                _mark_down(model_id,
+                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else _COOLDOWN_SEC)
                 break
             error_attempt += 1
             if error_attempt >= max_retries:
@@ -307,11 +324,15 @@ async def call_with_retry_stream(
             # model in the chain now; retrying the same endpoint would just
             # re-queue behind the same overloaded provider.
             if _is_failover_now_error(e):
+                _gw = _is_transient_gateway_error(e)
                 warn(
-                    f"  {model_id}: {last_error} — busy/stalled, failing over "
-                    f"to next in chain (no re-queue)"
+                    f"  {model_id}: {last_error} — "
+                    + ("transient gateway 5xx, brief cooldown (retried soon)"
+                       if _gw else "busy/stalled")
+                    + ", failing over to next in chain (no re-queue)"
                 )
-                _mark_down(model_id)
+                _mark_down(model_id,
+                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else _COOLDOWN_SEC)
                 break
             error_attempt += 1
             if error_attempt >= max_retries:

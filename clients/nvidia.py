@@ -37,6 +37,7 @@ DEEPINFRA_MODELS = {
 OPENROUTER_MODELS = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
     "minimax-m2.5":      "minimax/minimax-m2.5:free",
+    "gpt-oss-120b":      "openai/gpt-oss-120b:free",  # coder primary (non-NIM, OR :free)
     # User reported (2026-05-18 dashboard inspection): glm-4.5-air:free on
     # OR is the source of free-tier 429 storms. glm-5.1 stays on NIM where
     # it works reliably; do NOT route glm-* to OR.
@@ -49,6 +50,7 @@ OPENROUTER_MODELS = {
 OPENROUTER_FORCED = {
     "deepseek-v4-flash",
     "minimax-m2.5",
+    "gpt-oss-120b",   # coder: route OR :free FIRST, not NIM (NIM 502s on big prompts)
 }
 
 # ── OpenRouter key pool ──────────────────────────────────────────────
@@ -230,6 +232,45 @@ async def call_nvidia(
             data = await resp.json()
 
     return data["choices"][0]["message"]["content"]
+
+
+async def call_nvidia_tools(
+    model_id: str,
+    messages: list,
+    tools: list,
+    temperature: float = 0.2,
+    max_tokens: int = 8192,
+    tool_choice: str = "auto",
+) -> dict:
+    """NATIVE tool-calling call (2026-05-27). Unlike call_nvidia (text in/out),
+    this takes a full `messages` list + OpenAI `tools` schemas and returns the
+    raw assistant MESSAGE dict (role/content/tool_calls) so the caller can run
+    a structured tool-use loop. Used for models built for native function
+    calling (gpt-oss), which don't speak JARVIS's text-tag protocol. Routes via
+    _route (gpt-oss → OpenRouter :free). Non-streaming — tool-calling turns are
+    bounded and we need the whole tool_calls array at once. Raises on non-200 so
+    the caller can retry / fall over (same error strings retry.py classifies)."""
+    await nvidia_limiter.acquire()
+    thinking(model_id)
+    url, key, api_model = _route(model_id)
+    payload = {
+        "model": api_model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "temperature": temperature,
+        "max_tokens": max(int(max_tokens), 4096),
+        **_max_thinking_payload(model_id),
+    }
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
+            data = await resp.json()
+    return data["choices"][0]["message"]
 
 
 async def call_nvidia_stream(

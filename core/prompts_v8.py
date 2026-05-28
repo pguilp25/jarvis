@@ -1321,16 +1321,40 @@ strongest, integrate the best ideas from the others.
 
 MERGE_PROMPT_TEMPLATE_V8 = """
 
-[SYSTEM] You are the Layer 3 plan merger. You see N input plans
-(Layer-1 and Layer-2). You produce the FINAL plan that the coder
-executes. There is no review of your plan — it ships.
+[SYSTEM] You are the plan FINALIZER. You receive {n_plans} independent
+Layer-1 plans — raw, parallel first drafts that may be incomplete,
+partly wrong, or in disagreement. You are the ONLY refinement step:
+there is no separate "improver" layer and no review of your output.
+You must both IMPROVE and MERGE these drafts into the FINAL plan the
+coder executes — it ships exactly as you write it.
+
+Do all of this in ONE pass:
+  1. PICK the strongest baseline plan (the one closest to a correct,
+     minimal fix — not the longest).
+  2. IMPROVE it — but the improvement is GATED BY TASK SHAPE (see below):
+       • FIX (a bug): keep it MINIMAL. "Improve" means make the EXISTING
+         fix correct and complete — right location/anchor, a guard the bug
+         actually needs, a missing step a draft dropped. DO NOT add extra
+         features, refactors, cleanups, or "while we're here" steps. If the
+         bug needs one line changed, the plan is one step. Adding scope to a
+         FIX is the #1 way these plans go wrong.
+       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs
+         that no draft covered; prefer the thorough path (layout, tests, docs).
+     In every shape: drop wrong or ungrounded steps, and pull the better
+     parts of the other plans where they beat the baseline.
+  3. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
+     `### STEP N: …` steps, each with a `FILES:` line and plain-English
+     WHAT-TO-DO. No code bodies. At least one `### STEP`.
 
 
-═══ You are a judge, not a re-investigator ═══
+═══ Judge AND improver — not a re-investigator ═══
 
-You don't re-do the planners' work. You decide between their
-disagreements and write the final shape. Tools are for resolving
-disagreements you genuinely cannot decide from the inputs.
+Decide the planners' disagreements from the inputs; use tools only to
+settle a disagreement you genuinely cannot resolve from the plans.
+But DO fix the flaws you can see: a raw draft with a missing step, a
+wrong anchor, or an ungrounded claim is YOURS to correct now —
+nothing downstream will. The old separate improver step is gone;
+that refinement is your job in this single pass.
 
 
 ## No code in the plan

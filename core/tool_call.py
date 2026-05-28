@@ -5180,6 +5180,41 @@ async def call_with_tools(
         # STRUCTURE explainer): [SYSTEM]/[USER REQUEST]/[PROJECT CONTEXT]
         # = JARVIS or HUMAN; [YOUR ...] sections = YOU; [WRITE YOUR NEXT
         # TURN BELOW] is where the new response goes.
+        # ROLE-AWARE NEXT-TURN CUE (root-cause fix 2026-05-27): the old scaffold
+        # told EVERY role "Have enough → start writing the plan … [PLAN DONE]" —
+        # planner language. A coder (esp. a fallback model) landing on that
+        # re-entered PLANNING mode every round: re-derived the bug instead of
+        # emitting the edit, burning rounds with 0 edits (django-14792 audit).
+        # Edit-writing roles (coder/self-check/reviewer pass has_pending_edits)
+        # now get an ACT-NOW cue; the planner keeps the plan cue.
+        if has_pending_edits is not None:
+            _next_turn_cue = (
+                "Your analysis in [YOUR PAST THINKING] STANDS — do NOT re-derive "
+                "it. Read the most recent result (a diff, a ✗ REJECTED, or a tool "
+                "result), then ACT:\n\n"
+                "  • Edit applied + diff looks correct → [DONE][CONFIRM_DONE].\n"
+                "  • Edit ✗ REJECTED → emit a CORRECTIVE edit NOW. Anchor on the "
+                "CURRENT file line shown in the reject / [YOUR TOOL INDEX] — NOT "
+                "the line you WISH were there (an `[edit]` keeps lines that are "
+                "ALREADY in the file). If anchors keep failing, use "
+                "[REPLACE LINES N-M] … [/REPLACE] — it bypasses anchoring.\n"
+                "  • Still missing one fact → ONE [tool use]…[/tool use] + "
+                "[STOP][CONFIRM_STOP].\n\n"
+                "You are the CODER — do NOT write `=== PLAN ===` or [PLAN DONE]. "
+                "Don't re-explain the bug; emit the edit. Keep [think] short — and "
+                "the edit/signal must be OUTSIDE [think] (tags inside [think] are "
+                "inert)."
+            )
+        else:
+            _next_turn_cue = (
+                "You're building on [YOUR PAST THINKING] above. Read the most "
+                "recent round's results — what changed? Then either:\n\n"
+                "  • Need more info → reason, then NEW tool calls (not already in "
+                "[YOUR TOOL INDEX]) in [tool use]…[/tool use] + [STOP][CONFIRM_STOP].\n"
+                "  • Have enough → start writing the plan with === PLAN === … "
+                "=== END PLAN === (or refine an existing plan with === PLAN_EDIT "
+                "=== …). When the plan is complete, signal [PLAN DONE][CONFIRM_PLAN_DONE]."
+            )
         current_prompt = f"""{prompt}
 
 {unterminated_block}{_budget_drop_block}{dropped_block}{bad_block}{edit_results_block}══════════════════════════════════════════════════════════════════════
@@ -5200,14 +5235,7 @@ returned for those calls). Build on it. Do not repeat it.
 ══════════════════════════════════════════════════════════════════════
 [WRITE YOUR NEXT TURN BELOW]
 ══════════════════════════════════════════════════════════════════════
-You're building on [YOUR PAST THINKING] above. Read the most recent
-round's results — what changed? Then either:
-
-  • Need more info → reason, then NEW tool calls (not already in
-    [YOUR TOOL INDEX]) in [tool use]…[/tool use] + [STOP][CONFIRM_STOP].
-  • Have enough → start writing the plan with === PLAN === … === END PLAN ===
-    (or refine an existing plan with === PLAN_EDIT === …). When the
-    plan is complete, signal [PLAN DONE][CONFIRM_PLAN_DONE].
+{_next_turn_cue}
 {preamble_cue}
 ──────────────────────────────────────────────────────────────────────"""
 

@@ -80,7 +80,13 @@ UNDERSTAND_MODELS = [
 # Coder: glm-5.1 (NIM) — reliable, large-context. A free non-OpenRouter
 # deepseek-v4-flash does NOT exist (Pollinations charges for it = 402, NIM
 # forbids it = 403), so glm-5.1 is the realistic free coder primary.
-IMPLEMENT_MODEL = "nvidia/glm-5.1"
+IMPLEMENT_MODEL = "nvidia/gpt-oss-120b"   # coder via NATIVE tool calling (2026-05-27)
+# gpt-oss is the most redundant free model (Groq/OR/DeepInfra/NIM → distributes
+# compute at scale) and fast/reliable, but it's built for NATIVE function calling,
+# not JARVIS's text [edit]/[tool use] protocol (it emitted bare tags). So when the
+# coder is a native-tool model, _implement_one_step takes the structured
+# read_file/replace_lines loop (core/native_tools) instead of the text path. Routes
+# OR :free first (non-NIM, no 502s). REVIEWER + merger stay on glm-5.1 (text).
 
 NVIDIA_5 = [
     "nvidia/deepseek-v4-flash",
@@ -8492,23 +8498,22 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                      is_new_project: bool = False,
                      files: list | None = None) -> tuple[str, dict]:
     """
-    Planning:
-      Standard (complexity < 7):
-        Layer 1: 4 AIs race, first 3 win, last is cancelled
-        Layer 2: GLM-5.1 merges the 3 winning plans into final plan
-      Deep (complexity >= 7):
-        Layer 1: 4 AIs race, first 3 win, last is cancelled
-        Layer 2: 4 AIs each read the 3 plans, find flaws/strengths,
-                 write their own improved plan (parallel)
-        Layer 3: GLM-5.1 reads all 4 improved plans, writes final plan
+    Planning (2026-05-27: 2-layer — the separate "improve" layer was removed
+    and folded into the merger to cut ~15 min/instance of slow generations):
+      Layer 1: 4 AIs race, first 3 win, last is cancelled (parallel drafts)
+      Merge:   GLM-5.1 reads the raw Layer-1 plans and BOTH improves the best
+               baseline AND merges in the others, writing the final plan.
 
     Planners use [CODE:]+[KEEP:] inside the tool loop to read files and
     focus on relevant sections. No pre-pass needed.
 
     Returns (final_plan, research_cache).
     """
+    # Layer 2 ("improve") was removed 2026-05-27; the pipeline is now
+    # Layer-1 parallel drafts → single improve+merge. `extended` is retained
+    # only as a label hint (no longer branches the orchestration).
     extended = complexity >= 7
-    mode_label = "EXTENDED 3-layer" if extended else "STANDARD"
+    mode_label = "Layer1+Merge"
     step(f"=== Phase 2: PLAN [{mode_label}] ===")
     _wlog.phase_start("plan", mode_label, complexity=complexity,
                       task_chars=len(task), is_new_project=is_new_project)
@@ -8651,163 +8656,53 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         for i, p in enumerate(plans)
     )
 
-    if extended:
-        # == Layer 2: 4 AIs each pick the best plan and improve it ==
-        step(f"Layer 2: 4 AIs picking best plan and improving...")
+    # == MERGER — improve + merge in ONE pass ==
+    # The separate Layer-2 "improve" step was REMOVED 2026-05-27 (per user):
+    # it added ~15 min/instance of slow free-model generations and the merger
+    # can do the refinement itself. GLM-5.1 now reads the raw Layer-1 plans and
+    # BOTH improves the strongest baseline AND merges in the best of the others
+    # (see the re-engineered MERGE_PROMPT_TEMPLATE). This roughly halves the
+    # planning wall-clock that was timing instances out.
+    step("Merger: GLM-5.1 improving + merging Layer-1 plans into the final plan...")
 
-        # Pre-load Layer 1 research
-        preloaded_research = _format_research_cache(research_cache)
+    preloaded_research = _format_research_cache(research_cache)
 
-        improve_prompt = SYSTEM_KNOWLEDGE + IMPROVE_PROMPT_TEMPLATE.format(
-            task=task,
-            context=context[:15000],
-            all_plans_text=all_plans_text,
-            preloaded_research=preloaded_research,
-        )
-        # Use same 4 diverse models for Layer 2 debate as Layer 1 planning
-        # to ensure consistent capability levels throughout the planning pipeline
-        improved_results = list(await asyncio.gather(
-            *[_call_with_tools(m, improve_prompt, project_root,
-                               detailed_map=detailed_map, purpose_map=purpose_map,
-                               research_cache=research_cache,
-                               log_label="improving plan (Layer 2)",
-                               max_rounds=20,
-                               stop_on_tool_block=True,
-                               cache_file_reads=True,
-                               read_only_role=True,
-                               allow_run=True)
-              for m in PLAN_MODELS],
-            return_exceptions=True,
-        ))
-        improved = [d for d in improved_results if isinstance(d, dict) and d.get("answer")]
-
-        # Log every improver outcome — including the ones that raised so a
-        # bug-hunt can tell "model never returned" apart from "model
-        # returned empty answer."
-        for raw in improved_results:
-            if isinstance(raw, dict) and raw.get("answer"):
-                _wlog.phase_event(
-                    "Layer 2 improver complete",
-                    model=raw["model"].split("/")[-1],
-                    chars=len(raw["answer"]),
-                    done=bool(raw.get("done")),
-                )
-            elif isinstance(raw, dict):
-                _wlog.phase_warn(
-                    "Layer 2 improver returned EMPTY",
-                    model=raw.get("model", "?"),
-                )
-            else:
-                _wlog.phase_error("Layer 2 improver raised", error=str(raw)[:200])
-
-        for i, d in enumerate(improved):
-            _wlog.save_plan(layer=2, index=i, model_id=d["model"], content=d["answer"])
-
-        if not improved:
-            warn("Layer 2: all failed, falling back to Layer 1 plans")
-            _wlog.phase_warn("Layer 2 all failed — falling back to Layer 1")
-            improved = plans
-
-        status(f"Layer 2: got {len(improved)} improved plans (cache: {len(research_cache)} entries)")
-        _wlog.phase_event("Layer 2 done", n_improved=len(improved))
-
-
-        # Same labelled-block style as Layer 1 plans, marked as IMPROVED
-        # so the merger knows it's getting Layer 2 outputs (already
-        # picked + refined), not raw drafts.
-        all_improved_text = "\n\n".join(
-            f"──────────────────────────────────────────────────────────────────────\n"
-            f"[INPUT PLAN #{i + 1}] — IMPROVED, by {d['model'].split('/')[-1]}\n"
-            f"──────────────────────────────────────────────────────────────────────\n"
-            f"{d['answer']}"
-            for i, d in enumerate(improved)
+    verify_block = ""
+    if not is_new_project:
+        verify_block = (
+            "Verify claims against real code:\n"
+            "  [REFS: name]    ripgrep word-boundary — DEFINED/IMPORTED/\n"
+            "                  USED buckets, defs always preserved.\n"
+            "  [DEPENDENCY: #tag] type-resolved callers (AST + LSP).\n"
+            "                  Use when REFS misses sites due to import\n"
+            "                  aliases or type indirection.\n"
+            "  [PURPOSE: cat]  expand a Phase-1 purpose category.\n"
+            "  [SEMANTIC: q]   fuzzy match over purpose categories.\n"
+            "  [CODE: path]    read the file (skeleton for large files,\n"
+            "                  then [VIEW: path L] to drill in).\n"
+            "Write tags, wait, then proceed.\n"
         )
 
-        # == Layer 3: GLM-5 reads all improved plans, finds flaws/strengths, writes final ==
-        step("Layer 3: GLM-5 writing final plan...")
-
-        # Update pre-loaded research (now includes Layer 2's lookups too)
-        preloaded_research = _format_research_cache(research_cache)
-
-        verify_block = ""
-        if not is_new_project:
-            verify_block = (
-                "Verify claims against real code:\n"
-                "  [REFS: name]    ripgrep word-boundary — DEFINED/IMPORTED/\n"
-                "                  USED buckets, defs always preserved.\n"
-                "  [DEPENDENCY: #tag] type-resolved callers (AST + LSP).\n"
-                "                  Use when REFS misses sites due to import\n"
-                "                  aliases or type indirection.\n"
-                "  [PURPOSE: cat]  expand a Phase-1 purpose category.\n"
-                "  [SEMANTIC: q]   fuzzy match over purpose categories.\n"
-                "  [CODE: path]    read the file (skeleton for large files,\n"
-                "                  then [VIEW: path L] to drill in).\n"
-            )
-
-        merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
-            n_plans=len(improved),
-            task=task,
-            context=context[:10000],
-            verify_block=verify_block if not is_new_project else "",
-            all_plans_text=all_improved_text[:30000],
-            preloaded_research=preloaded_research,
-        )
-        merger_result = await _call_with_tools(
-            "nvidia/glm-5.1", merge_prompt, project_root,
-            detailed_map=detailed_map, purpose_map=purpose_map,
-            research_cache=research_cache,
-            log_label="merging plans (final)",
-            max_rounds=5,   # bounded: merging given plans shouldn't take 20 tool
-                            # rounds — glm-5.1 looped on lookups instead of writing
-                            # the plan, eating ~25 min. If it doesn't emit a
-                            # structured plan in a few rounds, the SANITY fallback
-                            # below uses the best Layer-2 plan instead.
-            stop_on_tool_block=True,
-            cache_file_reads=True,
-            read_only_role=True,
-            allow_run=True)
-
-    else:
-        # == Standard: GLM-5 merges plans directly (no debate) ==
-        step("Layer 2: GLM-5 merging plans...")
-
-        # Pre-load Layer 1 research for the merger
-        preloaded_research = _format_research_cache(research_cache)
-
-        verify_block = ""
-        if not is_new_project:
-            verify_block = (
-                "Verify claims against real code:\n"
-                "  [REFS: name]    ripgrep word-boundary — DEFINED/IMPORTED/\n"
-                "                  USED buckets, defs always preserved.\n"
-                "  [DEPENDENCY: #tag] type-resolved callers (AST + LSP).\n"
-                "                  Use when REFS misses sites due to import\n"
-                "                  aliases or type indirection.\n"
-                "  [PURPOSE: cat]  expand a Phase-1 purpose category.\n"
-                "  [SEMANTIC: q]   fuzzy match over purpose categories.\n"
-                "  [CODE: path]    read the file (skeleton for large files,\n"
-                "                  then [VIEW: path L] to drill in).\n"
-                "Write tags, wait, then proceed.\n"
-            )
-
-        merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
-            n_plans=len(plans),
-            task=task,
-            context=context[:15000],
-            verify_block=verify_block,
-            all_plans_text=all_plans_text,
-            preloaded_research=preloaded_research,
-        )
-        merger_result = await _call_with_tools(
-            "nvidia/glm-5.1", merge_prompt, project_root,
-            detailed_map=detailed_map, purpose_map=purpose_map,
-            research_cache=research_cache,
-            log_label="merging plans",
-            max_rounds=5,   # bounded (see "merging plans (final)" above)
-            stop_on_tool_block=True,
-            cache_file_reads=True,
-            read_only_role=True,
-            allow_run=True)
+    merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
+        n_plans=len(plans),
+        task=task,
+        context=context[:12000],
+        verify_block=verify_block,
+        all_plans_text=all_plans_text[:30000],
+        preloaded_research=preloaded_research,
+    )
+    merger_result = await _call_with_tools(
+        "nvidia/glm-5.1", merge_prompt, project_root,
+        detailed_map=detailed_map, purpose_map=purpose_map,
+        research_cache=research_cache,
+        log_label="merging plans (final)",
+        max_rounds=6,   # bounded: improve+merge from given plans shouldn't need
+                        # many tool rounds; the substance fallback below catches
+                        # a merger that doesn't emit a structured plan.
+        stop_on_tool_block=True,
+        cache_file_reads=True,
+        read_only_role=True,
+        allow_run=True)
 
     if not merger_result.get("answer"):
         _wlog.phase_warn("Merger returned EMPTY — falling back to longest Layer-1 plan")
@@ -8864,11 +8759,12 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # SUBSTANCE OVER STRUCTURE (v15 fix, astropy-8872): the old code scored
         # candidates by structure markers ONLY and tie-broke by length, so a
         # 174-char plan with a bare `### STEP` header beat a 2,939-char rich
-        # raw-prose Layer-1 plan. Now we rank by ACTIONABLE CONTENT across BOTH
-        # Layer-2 (improved) and Layer-1 (plans) plus the merger output: strip
-        # thinking, drop anything below the usefulness floor, and prefer the
-        # longest body with a structure bonus as a tie-breaker.
-        pool = (list(improved) + list(plans)
+        # raw-prose Layer-1 plan. Now we rank by ACTIONABLE CONTENT across the
+        # raw Layer-1 plans plus the merger output: strip thinking, drop
+        # anything below the usefulness floor, and prefer the longest body with
+        # a structure bonus as a tie-breaker. (Layer 2 was removed 2026-05-27,
+        # so `improved` no longer exists — the merger IS the improver now.)
+        pool = (list(plans)
                 + [{"model": "merger", "answer": best_plan}])
         ranked = []
         for d in pool:
@@ -10389,6 +10285,67 @@ async def _implement_one_step(
         f"Files: {', '.join(step_files)}\n"
         f"{step_details}\n"
     )
+
+    # ── NATIVE TOOL-CALLING coder branch (2026-05-27) ────────────────────────
+    # Models built for native function calling (gpt-oss) can't speak JARVIS's
+    # text [edit]/[tool use] protocol — they emit bare tags. For those, run a
+    # structured read_file / replace_lines tool loop instead. The planner did
+    # the thinking; this just EXECUTES the step's edit. Edits apply to
+    # file_contents + sandbox in place (via the [REPLACE LINES] machinery the
+    # native dispatcher reuses), so we return the changed files like the text path.
+    from core.native_tools import is_native_tool_model, call_with_native_tools
+    if is_native_tool_model(IMPLEMENT_MODEL):
+        from tools.codebase import add_line_numbers as _aln
+        _nat_targets = {fp: file_contents[fp] for fp in step_files if fp in file_contents}
+        _file_block = "\n\n".join(
+            f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n"
+            + _aln(c, display_mode="prefix")
+            for fp, c in _nat_targets.items()
+        ) or "(call read_file on the file(s) named in the step)"
+        _nat_system = (
+            "You are the CODER in a multi-step coding agent. A separate planner "
+            "already did the analysis — your ONLY job is to EXECUTE this one step by "
+            "editing files. You have the SAME tools as any JARVIS coder, as native "
+            "functions:\n"
+            "  • read_file(path[, start_line, end_line]) — file content as "
+            "`LINENO:INDENT|code` (LINENO=line#, INDENT=leading-space count). Huge "
+            "files return a skeleton; pass a range to expand. Read right before editing "
+            "so your line numbers are current.\n"
+            "  • find_refs(symbol) — where a name is used (cheap, first lookup).\n"
+            "  • find_callers(tag) — type-resolved callers for an `|appears N (#tag)` "
+            "symbol (blast-radius).\n"
+            "  • search_text(pattern) — ripgrep the project for a string/regex.\n"
+            "  • file_purpose(path) — a file's docstring + def gists, no bodies (triage).\n"
+            "  • semantic_search(query) — rank files by concept when you don't know where.\n"
+            "  • symbol_detail(symbol) — deep dive on one def/class.\n"
+            "  • replace_lines(path, start_line, end_line, new_content) — your EDIT. "
+            "new_content lines are `INDENT|code` (copy the INDENT count from the view; "
+            "for a new line, count the spaces it needs), no LINENO. Result says "
+            "✓applied / ✗rejected; a rejection shows the actual current line — fix and "
+            "retry.\n"
+            "  • finish(summary) — call when the step is done AND verified.\n"
+            "Reach for a lookup tool BEFORE editing whenever you're unsure who uses a "
+            "symbol or where code lives — guessing causes rejects. Keep the change "
+            "MINIMAL — implement only this step. Do not re-plan."
+            + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
+        )
+        _nat_user = (
+            f"{step_instructions}\n{iface_block}\n"
+            f"=== FILE(S) — current content as LINENO:INDENT|code ===\n{_file_block}\n\n"
+            f"Edit with replace_lines, then call finish."
+        )
+        _ctx = {"file_contents": file_contents, "sandbox": sandbox,
+                "project_root": project_root, "viewed_versions": {},
+                "purpose_map": purpose_map, "detailed_map": detailed_map,
+                "files_changed": set()}
+        _res = await call_with_native_tools(IMPLEMENT_MODEL, _nat_system, _nat_user, _ctx)
+        produced = {fp: file_contents[fp] for fp in _res.get("files_changed", [])}
+        status(f"  [native coder] step {step_num}: {len(produced)} file(s) edited, "
+               f"done={_res.get('done')}, rounds={_res.get('rounds')}")
+        _wlog.phase_event("native coder step", step=step_num,
+                          files=len(produced), done=_res.get("done"),
+                          rounds=_res.get("rounds"))
+        return produced
 
     MAX_RETRIES = 5
     # Snapshot the file content as it is at the START of this step (before any
@@ -12418,7 +12375,7 @@ async def code_agent(state: AgentState) -> AgentState:
             if route.kind == "plan":
                 status(f"↩ Reviewer → PLANNER (cycle {_cycle + 1}): {route.message[:120]}")
                 _wlog.phase_event("route_to_plan", cycle=_cycle + 1,
-                                  msg=route.message[:300])
+                                  reason=route.message[:300])
                 plan, research_cache = await phase_plan(
                     task, context, complexity, project_root,
                     plan_feedback=(route.message
@@ -12436,7 +12393,7 @@ async def code_agent(state: AgentState) -> AgentState:
                 status(f"↩ Reviewer → STEP {route.step_num} (cycle {_cycle + 1}): "
                        f"{route.message[:120]}")
                 _wlog.phase_event("route_to_step", cycle=_cycle + 1,
-                                  step=route.step_num, msg=route.message[:300])
+                                  step=route.step_num, reason=route.message[:300])
                 await _reimplement_step(
                     step_num=route.step_num, error_feedback=route.message,
                     task=task, plan=plan, context=context, sandbox=sandbox,

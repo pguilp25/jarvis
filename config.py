@@ -200,7 +200,9 @@ NVIDIA_FALLBACKS = {
         "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
     ),
     "nvidia/gpt-oss-120b": (
-        "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
+        # coder primary routes OR :free (see OPENROUTER_FORCED); when OR 429s,
+        # fall to the proven coder glm-5.1 (NIM) + reliable codestral, then weaker.
+        "nvidia/glm-5.1", "mistral/codestral", "nvidia/minimax-m2.5", "zai/glm-4.7-flash",
     ),
 
     # ── reliable-provider primaries' onward chains ──
