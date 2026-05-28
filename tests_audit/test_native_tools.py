@@ -161,6 +161,22 @@ def test_replace_lines_raw_indent_passthrough():
         _cleanup(root)
 
 
+def test_replace_lines_with_seeded_viewed_version_applies():
+    # The workflow seeds viewed_versions from the file block it injects into the
+    # prompt, so the coder's FIRST replace_lines lands without a wasted read
+    # round (rough-edge #1). Simulate that seeding here.
+    ctx, rel, root = _mk_ctx()
+    try:
+        ctx["viewed_versions"][rel] = ctx["file_contents"][rel]
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 6, "end_line": 6,
+                     "new_content": '4|return "hi " + name'}, ctx)
+        assert out.startswith("✓ Applied")
+        assert rel in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
 def test_replace_lines_without_read_is_rejected_not_crash():
     # The applier requires a prior read (viewed_versions gate). Editing blind
     # must reject cleanly with guidance, never crash or silently corrupt.

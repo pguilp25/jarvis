@@ -10331,11 +10331,21 @@ async def _implement_one_step(
         )
         _nat_user = (
             f"{step_instructions}\n{iface_block}\n"
-            f"=== FILE(S) — current content as LINENO:INDENT|code ===\n{_file_block}\n\n"
-            f"Edit with replace_lines, then call finish."
+            f"=== FILE(S) — current content as LINENO:INDENT|code (already loaded) ===\n{_file_block}\n\n"
+            f"These files are already loaded — call replace_lines on them directly "
+            f"(no need to read_file first). Use read_file only for OTHER files, or to "
+            f"re-check line numbers after an edit shifts them. When the change is done "
+            f"and you've verified it, call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
-                "project_root": project_root, "viewed_versions": {},
+                "project_root": project_root,
+                # Seed viewed_versions from the file block injected into the
+                # prompt: the coder has effectively "read" those files (the line
+                # numbers it sees come straight from them), so its FIRST
+                # replace_lines lands instead of being rejected for "no read"
+                # (a wasted round) and told to use [CODE:] — a text tag a native
+                # model can't emit. (rough-edge #1 / native audit #34.)
+                "viewed_versions": dict(_nat_targets),
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
                 "files_changed": set()}
         _res = await call_with_native_tools(IMPLEMENT_MODEL, _nat_system, _nat_user, _ctx)
