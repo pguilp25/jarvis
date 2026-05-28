@@ -1358,24 +1358,32 @@ run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
 Do all of this in ONE pass:
   1. ESTABLISH THE FULL SCOPE — do NOT just pick one draft's view. Take the
      UNION of the files/areas every input plan identified (you'll get a
-     CANDIDATE FILES list below). For a COMPLETE fix you must account for EACH
+     CANDIDATE FILES list below). For a COMPLETE change you must account for EACH
      candidate: cover it in a STEP, or state in one line why it needs NO change.
-     Never silently drop a file that ≥2 drafts agreed on — that is the #1 cause
-     of an incomplete fix. Where the drafts disagree on scope, the UNION is your
-     starting point, not the smallest draft.
-  2. FIND THE ROOT CAUSE, not the symptom. The fix usually belongs where the
-     wrong/missing data is PRODUCED, not where the symptom shows up. If the
-     drafts only touch the layer that DISPLAYS or RETURNS a value, trace one hop
-     UPSTREAM to where it is set/computed and put the fix there. If a test pins
-     the behaviour, the symbols and files that test references ARE in scope.
-  3. IMPROVE, gated by TASK SHAPE:
-       • FIX (a bug): minimize the CHANGES, never the AWARENESS. A FIX may
-         legitimately span several files (the producer, its callers, a helper) —
-         include every file the fix actually needs, but make each STEP the
-         smallest correct change. Don't add features/refactors/"while we're
-         here" steps; DO include every file required for the fix to be complete.
-       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs
-         that no draft covered; prefer the thorough path (layout, tests, docs).
+     Never silently drop a file that ≥2 drafts agreed on — dropping a needed file
+     is the #1 cause of an incomplete change. Where the drafts disagree on scope,
+     the UNION is your starting point, not the smallest draft.
+  2. TRACE THE WORK TO COMPLETION — find EVERY place that must change for the
+     task to be done and the codebase to stay consistent, not just the first
+     obvious file. What "complete" means depends on the task:
+       • bug fix → the place the wrong/missing behaviour is PRODUCED (often one
+         hop UPSTREAM of where the symptom shows), plus callers whose contract
+         changes.
+       • feature → every layer it touches (data/model, logic, wiring/entry
+         point, and its tests).
+       • refactor / rename → the symbol AND every call site / importer.
+       • new module → every file it needs to actually run, plus tests.
+     If a test or spec pins the behaviour, the symbols and files it references
+     ARE in scope. A change that compiles but leaves a caller, layer, or call
+     site unupdated is incomplete.
+  3. IMPROVE, gated by TASK SHAPE — minimize the CHANGES, never the AWARENESS:
+       • FIX (a bug): include every file the fix genuinely needs (the producer,
+         its callers, a helper), but make each STEP the smallest correct change.
+         No features/refactors/"while we're here" steps — yet DO cover every file
+         required for the fix to be complete.
+       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs that
+         no draft covered; prefer the thorough path (layout, tests, docs).
+       • REFACTOR: surgical, but update EVERY call site the change touches.
      In every shape: drop wrong or ungrounded steps, and pull the better
      parts of the other plans where they beat the baseline.
   4. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
