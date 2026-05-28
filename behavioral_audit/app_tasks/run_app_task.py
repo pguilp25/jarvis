@@ -97,6 +97,22 @@ async def _invoke_jarvis(task_text: str, project_root: str, timeout: int) -> dic
     Returns {"final_answer", "applied", "sandbox", "error"}.
     The caller is responsible for reading the resulting files off disk.
     """
+    # Load API keys the same way swe_bench does (settings.json is the UI's source
+    # of truth) so a live run is self-sufficient for the NVIDIA/OpenRouter/etc.
+    # keys. ZAI/MISTRAL/POLLINATIONS still come from the caller's env.
+    try:
+        _sf = Path.home() / ".jarvis" / "settings.json"
+        if _sf.exists():
+            _saved = json.loads(_sf.read_text(encoding="utf-8"))
+            for _k in ("NVIDIA_API_KEY", "LIGHTNING_API_KEY", "DEEPINFRA_API_KEY",
+                       "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY",
+                       "OPENROUTER_API_KEY", "OPENROUTER_API_KEYS"):
+                _v = _saved.get(_k, "")
+                if _v:
+                    os.environ[_k] = _v
+    except Exception:
+        pass
+
     # Import here (not at module top) so --dry / --list never load the heavy
     # LLM stack and never require API keys.
     from workflows.code import code_agent

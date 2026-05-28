@@ -10297,6 +10297,13 @@ async def _implement_one_step(
     if is_native_tool_model(IMPLEMENT_MODEL):
         from tools.codebase import add_line_numbers as _aln
         _nat_targets = {fp: file_contents[fp] for fp in step_files if fp in file_contents}
+        # Files named by the step that don't exist yet → must be CREATED, not
+        # edited. Telling the coder up front avoids it wasting rounds calling
+        # replace_lines on a non-existent file before discovering create_file
+        # (observed on the greenfield validation).
+        _to_create = [fp for fp in step_files
+                      if fp not in _nat_targets
+                      and (sandbox is None or sandbox.load_file(fp) is None)]
         _file_block = "\n\n".join(
             f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n"
             + _aln(c, display_mode="prefix")
@@ -10332,8 +10339,12 @@ async def _implement_one_step(
             "MINIMAL — implement only this step. Do not re-plan."
             + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
         )
+        _create_note = (
+            f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
+            f"replace_lines): {', '.join(_to_create)}\n" if _to_create else ""
+        )
         _nat_user = (
-            f"{step_instructions}\n{iface_block}\n"
+            f"{step_instructions}\n{iface_block}\n{_create_note}"
             f"=== FILE(S) — current content as LINENO:INDENT|code (already loaded) ===\n{_file_block}\n\n"
             f"These files are already loaded — call replace_lines on them directly "
             f"(no need to read_file first). Use read_file only for OTHER files, or to "
