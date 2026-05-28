@@ -1,0 +1,9 @@
+{
+  "id": "feature",
+  "mode": "feature",
+  "fixture": "todo_starter",
+  "task": "Add a `--priority` flag to the todo app's `add` command. Priority must be one of: high, med, low (default med). Requirements:\n  - The priority is stored with each task and shown in `list` output.\n  - The `list` command shows tasks ordered so that high-priority tasks appear first.\n  - Update or extend the existing tests in `test_todo.py` to cover the new priority behavior (setting it, defaulting it, ordering by it, and rejecting an invalid value).\nDo not break any existing functionality.",
+  "verify_cmd": "python -m pytest test_todo.py -q",
+  "expected_artifacts": ["todo.py", "test_todo.py"],
+  "notes": "Feature-add: starts from the todo_starter fixture. Exercises JARVIS reading existing code, extending it, and updating tests without regressions."
+}

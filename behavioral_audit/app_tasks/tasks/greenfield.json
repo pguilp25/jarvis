@@ -1,0 +1,9 @@
+{
+  "id": "greenfield",
+  "mode": "greenfield",
+  "fixture": null,
+  "task": "Build a small command-line todo app in Python. Requirements:\n  - A single module `todo.py` with functions for: add a task, list tasks, complete a task by id, delete a task by id.\n  - Persist tasks to a JSON file (`tasks.json`) so they survive between runs.\n  - A simple CLI entry point so it can be run as `python todo.py add \"buy milk\"`, `python todo.py list`, `python todo.py complete 1`, `python todo.py delete 1`.\n  - A pytest test file `test_todo.py` covering add/list/complete/delete and JSON persistence.\nKeep the code clean, readable, and self-contained. No external dependencies beyond the Python standard library and pytest.",
+  "verify_cmd": "python -m pytest test_todo.py -q",
+  "expected_artifacts": ["todo.py", "test_todo.py"],
+  "notes": "Greenfield: empty project dir. Exercises JARVIS's from-scratch build path (is_new_project branch in workflows/code.py)."
+}

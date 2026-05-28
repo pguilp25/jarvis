@@ -1,0 +1,9 @@
+{
+  "id": "refactor",
+  "mode": "refactor",
+  "fixture": "todo_starter",
+  "task": "The todo app's `list` command is O(n^2): for each task it rescans the whole list to compute a display index (see `list_tasks` in todo.py). Make it efficient (single pass / O(n)). Also add input validation: `complete` and `delete` must reject ids that are not positive integers or that do not exist, returning a clear error message instead of crashing. Keep all existing behavior and tests passing; add tests for the new validation.",
+  "verify_cmd": "python -m pytest test_todo.py -q",
+  "expected_artifacts": ["todo.py", "test_todo.py"],
+  "notes": "Improve/refactor: same fixture. Exercises JARVIS spotting an inefficiency, fixing it, and hardening input handling without behavior regressions."
+}
