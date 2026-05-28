@@ -2723,6 +2723,24 @@ def _tag_summary(
 
 # ─── Main Tool Call Loop ────────────────────────────────────────────────────
 
+def _past_thinking_keep_from(round_texts: list, cap_tokens: int, count_fn) -> int:
+    """Index of the first past-thinking round to KEEP so the NEWEST rounds fit
+    within cap_tokens. Returns 0 when everything fits (keep all). Always keeps at
+    least the last round — its tool results + reject feedback are what the model
+    needs most. Bounds the only unbounded-growth term the runtime controls, so a
+    long loop can't silently overflow the model's context window. (audit #4)"""
+    if len(round_texts) <= 1 or count_fn("\n".join(round_texts)) <= cap_tokens:
+        return 0
+    running = 0
+    keep_from = len(round_texts)
+    for j in range(len(round_texts) - 1, -1, -1):
+        running += count_fn(round_texts[j]) + 50          # ~marker overhead
+        if running > cap_tokens and j < len(round_texts) - 1:
+            break
+        keep_from = j
+    return keep_from
+
+
 async def call_with_tools(
     model: str,
     prompt: str,
@@ -4676,7 +4694,28 @@ async def call_with_tools(
                     continue
                 _by_round.setdefault(_info["round"], []).append((_k, _info))
 
+            # Bound past-thinking growth: keep the NEWEST rounds within a token
+            # budget vs the model's context window, so a long loop never grows
+            # the prompt into a silent HTTP-400 context overflow. The newest
+            # rounds (latest tool results + ✗ reject feedback) are always kept;
+            # older rounds are elided (their tool results still live in [YOUR
+            # TOOL INDEX]). Mechanical — count_tokens only, no LLM, no latency.
+            # (stability audit #4.)
+            from core.tokens import count_tokens as _ctok
+            from config import MODELS as _MODELS
+            _win = _MODELS.get(model, {}).get("window", 128_000)
+            _pt_cap = max(8_000, _win - 30_000 - 20_000 - (max_tokens // 4))
+            _keep_from = _past_thinking_keep_from(_round_texts, _pt_cap, _ctok)
+            if _keep_from > 0:
+                _past_thinking_parts.append(
+                    f"────── (rounds 1–{_keep_from} elided to stay within the "
+                    f"context budget — their tool results remain in [YOUR TOOL "
+                    f"INDEX] above) ──────"
+                )
+
             for _i, _text in enumerate(_round_texts):
+                if _i < _keep_from:
+                    continue
                 _rn = _i + 1
                 _past_thinking_parts.append(
                     f"────── ROUND {_rn} — your thinking ──────"
