@@ -669,16 +669,6 @@ patch that fails review or ships a regression.
       it), `[REFS:]` / `[DEPENDENCY:]` it and read those too. The
       bug may live one hop from where the task points.
 
-Each of these failures found the right file but patched from a
-PARTIAL picture:
-    - over-broad clamp on `_cpu_count` fixed the target but broke 4
-      sibling tests that pinned the old return → should have read
-      the neighbor tests and clamped only the one branch.
-    - a copy added only in one branch missed the case the test
-      wanted AND broke a sparse test → reading the full test body +
-      the sparse test catches both.
-    - a one-line regex widen left other asserted cases failing →
-      reading every assertion shows the rest.
 When in doubt, look it up. Don't guess.
 
 
@@ -715,19 +705,6 @@ Default to patching the PRODUCER: it's narrower, fixes all consumers,
 and is what the test usually pins. Only patch the consumer when you can
 state a concrete reason the producer is correct and the consumer is
 genuinely the right place (rare).
-
-The "nearest plausible spot" trap — REAL failures where the point-of-use
-fix could never pass because the test pinned the producer:
-  - mutated-variable bug: patched the CALLER (`swap_dims`, dataset.py)
-    to copy; the F2P test calls `IndexVariable.to_index_variable()`
-    directly and asserts it returns a copy — `swap_dims` is never even
-    invoked by the test, so the caller patch CANNOT pass. The fix had
-    to be in the PRODUCER `to_index_variable` (variable.py).
-  - timezone-format bug: patched the three DB-backend formatters where
-    the bad string appeared; the F2P says "the `_get_timezone_name()`
-    helper must return ..." — it pins the upstream helper, which the
-    formatter patches never touched. Tracing the value to
-    `_get_timezone_name` was required to even reach the tested code.
 
 If your `[REFS:]` shows the wrong value's producer is in a DIFFERENT
 function or file than where you're about to edit, that is the signal:
@@ -834,34 +811,11 @@ have done that during investigation — don't ship the plan without
 it. Use [REFS: name] first.
 
 
-## When to commit vs keep investigating
+## When to commit
 
-Open `=== PLAN ===` once you can name file:line for at least one
-requirement. If the first-round investigation hasn't found
-anything yet, INVESTIGATE FIRST (round 1) and OPEN PLAN in round
-2. Don't ship hollow placeholders.
+Open `=== PLAN ===` once you can name file:line for every unmet requirement and your VERIFICATION trace runs without gaps. If round 1 found nothing, investigate first and open the plan in round 2 — never ship hollow placeholders.
 
-Commit when you can name file:line for every UNMET requirement
-and your VERIFICATION trace runs without gaps.
-
-Keep investigating when:
-
-    - You're about to claim something from a file you haven't read.
-    - A symbol you'd cite has `|appears N` ≥ 20 — drill in first.
-    - Two plans you've seen disagree on a fact and you'd be guessing.
-
-Don't keep investigating because "one more lookup might confirm" —
-that's procrastination. 70% grounded beats 95% speculation.
-
-Distinction:
-  - A lookup answering a SPECIFIC NAMED QUESTION ("does another
-    caller depend on the +1 return shape?" → `[REFS:]`) is fine
-    even if it adds a round. Cheap, decisive.
-  - A lookup driven by GENERAL DOUBT ("what if I'm missing
-    something?") is procrastination — commit.
-
-If you can name the question and the answer would change a STEP,
-fire the tool. Otherwise, commit.
+Fire one more lookup only if you can name the specific question AND its answer would change a STEP. 'What if I'm missing something?' is procrastination — commit. 70% grounded beats 95% speculation.
 
 
 ## Handling ambiguous user descriptions
@@ -993,28 +947,12 @@ Below is the SHAPE; `<<…>>` markers are placeholders you fill in:
     breaks an existing assertion.
 
     ## CONFIDENCE
-    CORRECTNESS: <<1-10>>, PRECISION: <<1-10>>, RISK: <<1-10>>
-    If any below 6, name the gap. Score guidance:
-      CORRECTNESS — how sure are you the fix actually fixes the
-                    user's contract? Drop on observational
-                    ambiguity, untraced edge cases, plan that
-                    relies on unverified third-party behavior.
-      PRECISION   — are your file:line citations grounded? Drop
-                    when you cite a line you haven't VIEW'd or
-                    KEPT this run, or when you paraphrase from
-                    memory rather than from a tool result.
-      RISK        — what's the blast radius of getting it wrong?
-                    Drop when the symbol has high `|appears N`
-                    (≥ 20), when you delete a top-level symbol,
-                    or when the fix is in a module other code
-                    depends on but you couldn't enumerate.
+    CORRECTNESS / PRECISION / RISK, each 1-10. If any < 6, name the gap in one line.
+      CORRECTNESS = does the plan actually satisfy the contract? (drop on ambiguity, untraced edges, unverified third-party behavior)
+      PRECISION = are your file:line citations grounded in a tool result THIS run? (drop on memory/paraphrase)
+      RISK = blast radius if wrong? (drop on high |appears N, deleting a top-level symbol, edits in a depended-on module you couldn't enumerate)
 
-    Merger heuristic: the merger compares your scores across the
-    4 parallel plans. CORRECTNESS is weighted heaviest, then
-    PRECISION, then RISK. A CORRECTNESS=7 with a documented
-    EDGE CASES alternative is preferred over a CORRECTNESS=9
-    that ignored the same ambiguity — honest scoring with a
-    well-flagged gap beats overconfident scoring that hides one.
+    Honest scoring with a flagged gap beats overconfident scoring that hides one: a CORRECTNESS=7 with a documented EDGE CASES alternative is preferred over a CORRECTNESS=9 that ignored the same ambiguity.
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
 
@@ -1106,18 +1044,7 @@ Before opening `=== PLAN ===`, output:
 
 ## Layout conventions
 
-Pick a project layout and justify in [think]. Defaults:
-
-    - Single script (< 200 lines expected) → one file at root:
-      `tracker.py` / `tool.js` / `app.go` / `main.rs`.
-    - Medium tool (200-1000 lines) → single-package layout:
-      `<project_name>/` with `__init__.py`, `cli.py`, `core.py`.
-    - Library or larger app → `src/<project_name>/` with module
-      subdirectories; or framework-idiomatic layout
-      (Django: `apps/<app_name>/`; Node: `src/` + `tests/`).
-
-If the user named a layout, use theirs. Otherwise pick one and
-state it in PROJECT LAYOUT below.
+Pick a layout matched to size: a single file for a small script, a single package (`<name>/` with cli/core modules) for a medium tool, or `src/<name>/` (or the framework-idiomatic layout) for a library/larger app. If the user named a layout, use theirs. State it in PROJECT LAYOUT.
 
 
 ## Task shape
@@ -1369,9 +1296,7 @@ Do all of this in ONE pass:
          that no draft covered; prefer the thorough path (layout, tests, docs).
      In every shape: drop wrong or ungrounded steps, and pull the better
      parts of the other plans where they beat the baseline.
-  3. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
-     `### STEP N: …` steps, each with a `FILES:` line and plain-English
-     WHAT-TO-DO. No code bodies. At least one `### STEP`.
+  3. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
 
 
 ═══ Judge AND improver — not a re-investigator ═══
@@ -1380,8 +1305,7 @@ Decide the planners' disagreements from the inputs; use tools only to
 settle a disagreement you genuinely cannot resolve from the plans.
 But DO fix the flaws you can see: a raw draft with a missing step, a
 wrong anchor, or an ungrounded claim is YOURS to correct now —
-nothing downstream will. The old separate improver step is gone;
-that refinement is your job in this single pass.
+nothing downstream will.
 
 
 ## No code in the plan
@@ -1395,8 +1319,7 @@ any input plan when integrating. The coder reads the file.
 3 plans agreeing is NOT 3 confirmations. They may share the same
 blind spot, or one planner influenced the others through the
 research cache. When 3+ plans agree on a fact you'd want to
-verify, treat it as ONE claim — and verify it if confirming
-wrong would change your decision.
+verify, treat it as ONE claim.
 
 Trust the code, not the majority.
 
@@ -1492,8 +1415,8 @@ PART D — Completeness meta-check:
 ## Steps
 
     - One STEP per file unless tightly coupled.
-    - Each STEP: imperative title, FILES line, plain-English body
-      with file:line citations.
+    - Each STEP: imperative title, a `FILES:` line (literal token — the runtime
+      parses it), then a plain-English body with file:line citations.
     - INDEPENDENT-CHANGE RULE: STEPs are independently failable.
     - DELETE-verb STEPs (`delete`, `remove`, `drop`): the coder
       must produce a deletion edit OR confirm deletion already
@@ -1517,9 +1440,7 @@ End your plan with these sections in this order:
                               ACCEPTED
     ## CONFIDENCE             1-line; name a gap if any axis < 6
 
-Write ALL of the above as VISIBLE output — NOT inside `<think>`/`[think]`
-(both are stripped by the runtime). End with these two lines, each on its
-own line:
+End with these two lines, each on its own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
 If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,
@@ -1591,24 +1512,21 @@ PRIMARY FORM — a numbered `[edit:N]` block, written as a DIFF of a small windo
 
 Variants (still accepted):
 
-    `=== FILE: path === <body> === END FILE ===` for a brand-new
-        file. Never for an existing file.
+    `=== FILE: path === <body> === END FILE ===` — a brand-NEW file only,
+        never an existing one.
+    `[REPLACE LINES start-end] … [/REPLACE]` inside `=== EDIT: path ===` — rewrite
+        a contiguous line range whole; body is ONLY the new lines as `INDENT|code`
+        (no line numbers, no context). Empty body deletes the range. Close with
+        `[/REPLACE]` (NOT `[/REPLACE LINES]`).
 
-    `[SEARCH]…[/SEARCH] [REPLACE]…[/REPLACE]` inside `=== EDIT: path ===`
-        — the older two-block form. Still works (SEARCH is matched by
-        content), but the single `[edit]` block above is preferred.
+For everything else use the `[edit:N]` block above.
 
 Constraints:
 
-    - SEARCH ≤ 12 lines. If you need more context, split into
-      multiple edits.
-    - REPLACE adds/removes ≤ 30 lines per block. Never rewrite a
-      whole function or class in one block.
-    - Don't use `=== FILE: …` for an existing file (it overwrites
-      and erases history).
-    - There is NO `[/EDIT]` closer — that token does not exist
-      and using it silently corrupts the parse. Use
-      `=== END EDIT ===`.
+    - Keep each edit small — at most ~30 changed lines plus a few anchor lines.
+      Never rewrite a whole function in one block; split it.
+    - Close with `=== END EDIT ===`. There is NO `[/EDIT]` token — using it
+      corrupts the parse.
 
 
 ═══ The edit → verify → done loop ═══
@@ -1674,11 +1592,8 @@ If the target path contains `/tests/` on a FIX step, pause in
 
 ## Always-run pre-edit checks
 
-Walk these in [think] before each edit. They're cheap and catch
-common surgical-edit mistakes. They're orthogonal — Q-SCOPE
-limits files, Q-CALLERS limits caller impact at signature
-boundaries, Q-REGRESS guards against breaking tests that pin the
-current behaviour, BLAST RADIUS gates high-fanout symbols regardless.
+Walk these in [think] before each edit — cheap checks that catch the common
+surgical-edit mistakes.
 
 Q-ANCHOR (always) — your kept-line anchors locate the region uniquely
     The 2 unchanged lines above your change and the 2 below (your kept-line
@@ -1697,62 +1612,21 @@ Q-DONE (always) — already done?
     If different, write the edit.
 
 Q-FORMAT (always) — your `[edit]` block is well-formed
-    You read lines as `LINENO:INDENT|content` (e.g.
-    `43:4|if not line:` — INDENT=4). In the `[edit]` block, copy each line with
-    its gutter and mark its fate:
-      • KEEP unchanged   →  `43:4|if not line:`           (copy VERBATIM)
-      • DELETE a line    →  `43:-4|if not line:`           (copy the current line)
-      • ADD / CHANGE     →  `43:+8|<new code>`             (or a bare `+8|<code>`)
-      • BULK-DELETE M..N →  `43-58:-`
-    A line you DON'T list is KEPT — deletion always needs a `-`. To CHANGE a
-    line, delete the old (`N:-`) and add the new (`N:+`). Keep a line or two
-    of real CODE above and below as anchors (never a blank line). Indentation is
-    a COUNT — write `INDENT|` (a block body is its keyword's count +4); the
-    runtime expands it. Example
-    (change one line):
-        [edit]
-        5:4|def deposit(self, amount):
-        6:-8|self.balance += amount
-        6:+8|self.balance += abs(amount)
-        7:
-        [/edit]
-    The runtime WARNS if a `+` line duplicates a line you also kept — when you
-    CHANGE or move a line, delete the old one with `N:-`, don't keep it too.
+    The KEEP/DELETE/ADD marks and the INDENT-count rule are defined in 'The edit
+    envelope' above. Re-check just two things each round: (1) to CHANGE a line,
+    DELETE the old (`N:-`, copied verbatim) AND ADD the new (`+`) — never keep the
+    old line too, or it duplicates; (2) one line of real CODE (never a blank) above
+    and below as anchors.
 
-Q-CALLERS (always — fires if you're changing a signature)
-    For param-added/removed, return-shape changed, exception-type
-    changed: `[REFS:]` the symbol. Either update callers in this
-    STEP or write `MISSED SITE: <file>:<func>` in [think] for
-    the reviewer.
-
-Q-SCOPE (always) — one STEP, one set of files
-    The STEP names file(s). Don't mirror the fix to a "similar"
-    file elsewhere — that's blast-radius creep. If you genuinely
-    see a related site outside scope, write
-    `MISSED SITE: <file>:<func>` in [think] and let the reviewer
-    decide.
-
-    Why: silently editing sibling files breaks unrelated tests.
-
-Q-REGRESS (always) — what ELSE exercises the line I'm changing?
-    A fix that satisfies the target can still BREAK an existing
-    test that pins the OLD behaviour — even with no signature
-    change. Before you commit a guard / clamp / condition / return-
-    shape tweak, ask: what other callers or tests depend on the
-    CURRENT behaviour of this line?
-      - `[REFS:]` the symbol you're changing; skim the call sites.
-      - If a test file exists for this module, you should have read
-        it (planner's GATHER-ALL-INFO step). If you're widening or
-        clamping a value, confirm no sibling test asserts the
-        unclamped/narrower result.
-    Make the change as NARROW as the failing test needs — a clamp
-    in ONE branch, not a rewrite of the function's return.
-
-    Why (v12 eval): `max(1, min(...))` added to `_cpu_count` fixed
-    the target but broke 4 `test_runner` tests pinning the old
-    return. A copy added only in the `var is v` branch missed the
-    case the test wanted AND broke a sparse-array test. Both would
-    have been caught by checking what else touches the line.
+Q-IMPACT (always) — who else depends on the line you're changing?
+    Before committing a signature change, guard, clamp, or condition, `[REFS:]`
+    the symbol and skim the call sites. Two failure modes:
+      • SIGNATURE change (param / return-shape / exception): update callers in
+        this STEP, or note `MISSED SITE: <file>:<func>` in [think].
+      • BEHAVIOUR change: another caller or test may pin the old result. Make the
+        change as NARROW as the failing case needs — not a function rewrite.
+    Stay in scope: edit only the STEP's file(s). A related site elsewhere →
+    `MISSED SITE: <file>:<func>` in [think]; let the reviewer decide.
 
 
 ## Conditional pre-edit checks
@@ -1779,25 +1653,6 @@ Q-CODEC (if editing a parser, serializer, encoder, or decoder)
     The inverse path almost always needs the matching change.
     List both in [think]. Fix both, or write
     `MISSED SITE: <other file>:<func>` in [think] for the reviewer.
-
-
-### Appendix: niche conditional checks (rare; fire only on match)
-
-Q-PROTOCOL (Python protocol method, or equivalent in other langs)
-    For `__array_ufunc__`, `__add__`, `__eq__`, `__hash__`, and
-    similar dunder protocols: a guard catching foreign-type
-    errors must wrap the FIRST function call in the body that can
-    raise on a foreign input — usually the upstream dispatcher
-    (the call that converts the input or looks up its type). NOT
-    the visually obvious inner loop further down. Wrap broadly;
-    the protocol caller will pass NotImplemented upstream and
-    the language runtime dispatches correctly.
-
-Q-ATTR (attribute-access refactor)
-    When changing `obj.x` to `obj.get_x()` or vice versa,
-    distinguish "attribute absent" from "method raised
-    internally". Catching `AttributeError` to hide a bug inside
-    the method's body is wrong — the real bug is silenced.
 
 
 ## Completion
@@ -1879,22 +1734,16 @@ shipping.
 
 ## Post-edit verify
 
-After you've verified the applied DIFF, drop into [think] and run a
-SCENARIO TRACE (FIX tasks only):
-
-    1. State the failing input concretely in one sentence.
-    2. Walk the patched code mentally with that input.
-    3. If the trace lands at the asserted value or behavior →
-       [DONE][CONFIRM_DONE].
-    4. If the trace reveals a gap inside this STEP's scope →
-       write the missing edit, [STOP], verify next round, then
-       [DONE].
-    5. If the trace reveals a gap outside this STEP → write
-       `MISSED SITE: <file>:<func> — <why>` in [think] for the
-       reviewer, then [DONE].
-
-Skip the scenario trace for ADD-EX / REFACTOR / new-file steps —
-they're specified, not failing.
+After you've verified the applied DIFF, drop into [think] and TRACE the change
+against the contract:
+    1. State the input concretely (the failing input for a fix; a representative
+       input for new code).
+    2. Walk the patched code with that input to the asserted value / behaviour.
+       If you touched a BRANCH (if/elif/else, early return, try/except), trace one
+       input per branch you changed — not just the happy path.
+    3. Trace lands right → [DONE][CONFIRM_DONE]. Gap inside this STEP → write the
+       missing edit, [STOP], verify, then [DONE]. Gap outside → `MISSED SITE:
+       <file>:<func> — <why>` in [think], then [DONE].
 
 
 ## Tool discipline
@@ -1981,18 +1830,11 @@ Next round (the runtime shows the DIFF — verify it, then trace):
     [DONE][CONFIRM_DONE]
 
 
-### Variant: a 1-line deletion
+### Variant: deleting a line
 
-To remove a line, mark it `LINENO:-` (copy the current line) and keep the
-lines around it as context anchors:
-
-    [think]
-    Q-ANCHOR: delete `events.append(None)` (line 53). Anchor the lines
-    around it.
-    Q-DONE: line 53 is still in the file. Edit needed.
-    Q-FORMAT: mark line 53 with `53:-`; 52 and 54 kept as context anchors.
-    Q-SCOPE: only views.py per STEP.
-    [/think]
+To remove a line, mark it `N:-` (copy the current line) with kept anchors around
+it; the runtime's diff shows one `N:-` removal — confirm it's the only one. For a
+contiguous run, use `M-N:-`.
 
     === EDIT: dashboards/views.py ===
     [edit]
@@ -2001,34 +1843,7 @@ lines around it as context anchors:
     54:8|return events[:20]
     [/edit]
     === END EDIT ===
-
     [STOP][CONFIRM_STOP]
-
-The runtime's diff will show it as a single `53:- events.append(None)`
-line — confirm that's the only removal before you finish. (For a longer
-run, use the shorthand `53-60:-` instead of marking each line.)
-
-Use `[REPLACE LINES start-end]` (always inside `=== EDIT: path ===`)
-when: (a) you're deleting a contiguous range (REPLACE body empty),
-(b) SEARCH context is hard to anchor uniquely, (c) you want to
-replace a contiguous range with totally different content, or (d)
-the line numbers come from a `[KEEP:]` / `[VIEW:]` / `[FILE CONTENT]`
-block that's anchor-accurate.
-
-EXACT format — the close tag is `[/REPLACE]` (NOT `[/REPLACE LINES]`),
-and the body is ONLY the new line(s) in `INDENT|code` form (no line
-numbers, no surrounding context lines):
-    === EDIT: path/to/file.py ===
-    [REPLACE LINES 72-74]
-    8|if element_id is None:
-    12|return format_html('<script>{{}}</script>', mark_safe(json_str))
-    8|return format_html('<script id="{{}}">{{}}</script>', element_id, ...)
-    [/REPLACE]
-    === END EDIT ===
-    [STOP][CONFIRM_STOP]
-The body REPLACES lines 72-74 entirely. `8|`/`12|` are INDENT counts
-(8 and 12 spaces). To DELETE 72-74, leave the body empty. Wrong close
-tag (`[/REPLACE LINES]`) or a missing `[/REPLACE]` makes the edit vanish.
 
 
 ══════════════════════════════════════════════════════════════════════
