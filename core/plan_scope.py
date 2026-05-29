@@ -105,6 +105,51 @@ def rank_relevant_tests(test_files, scope_files, cap: int = 16) -> list:
     return tests[:cap]
 
 
+# Capture `from MODULE import a, b as c, d` → {MODULE: {a, b, d}}. Same-line and
+# the first line of a parenthesised import; aliases reduced to the imported name.
+_FROM_IMPORT_RE = re.compile(r'^[ \t]*from[ \t]+([\w.]+)[ \t]+import[ \t]+(.+)$', re.M)
+
+
+def imported_symbols(test_source: str) -> dict:
+    """{module: {symbol,...}} for `from module import …` lines. The symbols a test
+    imports from a project module ARE the interface that module must expose — if
+    one isn't defined yet, the test can't even be collected (ImportError), so
+    creating it is non-optional. (`import a.b` binds no specific symbol → ignored
+    here; `imported_modules` already covers module-level scope.)"""
+    out: dict = {}
+    for m in _FROM_IMPORT_RE.finditer(test_source or ""):
+        mod = m.group(1).strip()
+        rhs = m.group(2)
+        if "(" in rhs:                      # `from x import (` … take this line's part
+            rhs = rhs.split("(", 1)[1]
+        rhs = rhs.replace(")", "").split("#", 1)[0]
+        for piece in rhs.split(","):
+            name = piece.strip().split(" as ")[0].strip()
+            if name and name != "*" and name.isidentifier():
+                out.setdefault(mod, set()).add(name)
+    return out
+
+
+def missing_symbols(symbols, module_source: str) -> list:
+    """Of `symbols`, the ones NOT defined anywhere in `module_source` (no
+    `def`/`class`/assignment/`import … as name`). Conservative — any plausible
+    binding form counts as 'present' so we never invent a phantom create-step for
+    a symbol that's actually there (e.g. re-exported)."""
+    src = module_source or ""
+    miss: list = []
+    for name in sorted(symbols or []):
+        n = re.escape(name)
+        present = re.search(
+            rf'(?m)^[ \t]*(?:def|class)[ \t]+{n}\b'      # def/class name
+            rf'|^[ \t]*{n}[ \t]*[:=]'                     # name = … / name: type
+            rf'|[ \t]+as[ \t]+{n}\b'                      # import … as name
+            rf'|^[ \t]*{n}[ \t]*,'                        # name, in a tuple-LHS / __all__
+            , src)
+        if not present:
+            miss.append(name)
+    return miss
+
+
 def modules_to_files(modules, project_files) -> list:
     """Map dotted modules (pkg.sub.mod) to existing project file paths
     (pkg/sub/mod.py), matching by exact path or path-suffix (project paths may

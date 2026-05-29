@@ -8944,8 +8944,34 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     try:
         from core.plan_scope import (imported_modules, modules_to_files,
             referenced_files_outside_scope, completeness_lint, format_plan_gaps,
-            rank_relevant_tests)
+            rank_relevant_tests, imported_symbols, missing_symbols)
         _proj_files = list(files or [])
+        # Phase-1 file lists are SCRAPED from the planners' prose, so a test file
+        # nobody happened to mention is invisible to rank_relevant_tests — exactly
+        # why pylint's contract test (tests/unittest_pyreverse_writer.py) was never
+        # considered. Build a REAL test index by walking the project so test
+        # discovery never depends on a model typing the path. (Covers test_*/
+        # *_test/unittest_*/conftest and anything under a tests|test dir.)
+        _disk_tests: list = []
+        try:
+            import os as _os
+            _SKIP = {".git", ".jarvis_sandbox", "venv", ".venv", "node_modules",
+                     "__pycache__", ".tox", "build", "dist", ".mypy_cache"}
+            for _root, _dirs, _fs in _os.walk(project_root):
+                _dirs[:] = [d for d in _dirs if d not in _SKIP]
+                _rel = _os.path.relpath(_root, project_root)
+                _in_testdir = any(p in ("test", "tests") for p in _rel.split(_os.sep))
+                for _f in _fs:
+                    if not _f.endswith(".py"):
+                        continue
+                    bn = _f.lower()
+                    if (_in_testdir or bn.startswith(("test_", "unittest_"))
+                            or bn.endswith("_test.py") or bn == "conftest.py"):
+                        _disk_tests.append(_os.path.join(_rel, _f).lstrip("./")
+                                           if _rel != "." else _f)
+        except Exception:
+            pass
+        _test_pool = sorted(set(_proj_files) | set(_disk_tests))
         _scope = _extract_files_from_plan(best_plan, _proj_files)
         _scope_set = set(_scope)
         # Sibling test/dependency signals only count when they live in the SAME
@@ -8973,16 +8999,46 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # Rank candidate tests by BASENAME match against meaningful scope stems
         # (see plan_scope.rank_relevant_tests — generic stems like main/__init__
         # used to bury the real gold test past the cap on big repos like pylint).
-        for _tf in rank_relevant_tests(_proj_files, _scope, cap=16):
+        _contract_gaps: list = []   # the test imports a symbol that doesn't exist yet
+        for _tf in rank_relevant_tests(_test_pool, _scope, cap=16):
             try:
                 _src = sandbox.load_file(_tf) if sandbox else None
                 if not _src:
                     continue
                 _hit = modules_to_files(imported_modules(_src), _proj_files)
-                if any(h in _scope_set for h in _hit):   # test exercises our scope
-                    for h in _hit:
-                        if "test" not in h.lower():
-                            _add_req(h, require_sibling=True)
+                # RELEVANT = the test imports a module IN scope OR a same-package
+                # sibling of one (broadened so a writer-test counts for an
+                # inspector-scoped plan in the same pyreverse package).
+                if not any(h in _scope_set or _same_pkg(h) for h in _hit):
+                    continue
+                for h in _hit:
+                    if "test" not in h.lower():
+                        _add_req(h, require_sibling=True)
+                # CONTRACT CHECK: of the SYMBOLS this test imports from a project
+                # module, which are NOT defined there yet? Those are the interface
+                # the change MUST create — without them the test can't even import
+                # (the exact pylint-4551 failure: utils.get_annotation/infer_node/
+                # get_annotation_label imported by the test, absent in utils.py).
+                for _mod, _syms in imported_symbols(_src).items():
+                    _mf = modules_to_files([_mod], _proj_files)
+                    if not _mf:
+                        continue   # 3rd-party / stdlib — not ours to create
+                    _modfile = _mf[0]
+                    if not (_modfile in _scope_set or _same_pkg(_modfile)):
+                        continue   # only modules in/next-to scope
+                    _modsrc = sandbox.load_file(_modfile) if sandbox else None
+                    if _modsrc is None:
+                        continue
+                    _miss = missing_symbols(_syms, _modsrc)
+                    if _miss:
+                        _add_req(_modfile)   # force it into the required set
+                        _contract_gaps.append(
+                            f"CONTRACT: {os.path.basename(_tf)} imports "
+                            f"{', '.join(_miss)} from {_modfile}, but they are NOT "
+                            f"defined there — the test can't even be collected "
+                            f"without them. Add a STEP that DEFINES "
+                            f"{', '.join(_miss)} in {_modfile} (or confirm in one "
+                            f"line they're re-exported there).")
             except Exception:
                 continue
         # (c) #3 callers the planners' REFS/DEPENDENCY already surfaced (siblings)
@@ -8991,8 +9047,11 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         if _dep_text:
             for fp in referenced_files_outside_scope(_dep_text, _scope, _proj_files):
                 _add_req(fp, require_sibling=True)
-        # (d) #4 lint + attach gaps (cap so the note stays readable)
-        _gaps = completeness_lint(best_plan, _scope, _required)[:6]
+        # (d) #4 lint + attach gaps (cap so the note stays readable). CONTRACT
+        # gaps (a test imports a symbol that doesn't exist yet) go FIRST and
+        # uncapped — they're the hardest-to-recover-from miss (ImportError = 0
+        # tests collected), so the coder must see them.
+        _gaps = _contract_gaps + completeness_lint(best_plan, _scope, _required)[:6]
         # (e) #5 ground-in-real-reads: an EXISTING scope file the planners never
         # actually read (not in the research cache) was planned from headings —
         # nudge the coder to read it before editing. New files are exempt.

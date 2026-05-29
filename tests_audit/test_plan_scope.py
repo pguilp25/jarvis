@@ -3,8 +3,42 @@ from core.plan_scope import (
     union_file_scopes, majority_files, format_candidate_block,
     imported_modules, modules_to_files,
     referenced_files_outside_scope, completeness_lint, format_plan_gaps,
-    rank_relevant_tests,
+    rank_relevant_tests, imported_symbols, missing_symbols,
 )
+
+
+# ── contract detection: a test imports a symbol that doesn't exist yet ─────────
+# (the pylint-4551 root cause — utils.get_annotation/infer_node/get_annotation_label
+#  imported by the test, absent in utils.py → ImportError → 0 tests collected)
+def test_imported_symbols_and_missing_detects_contract():
+    test_src = (
+        "import pytest\n"
+        "from pylint.pyreverse.utils import get_annotation, get_annotation_label, infer_node\n"
+        "from pylint.pyreverse.diadefs import DiadefsHandler\n"
+        "from unittest import mock\n"
+    )
+    isyms = imported_symbols(test_src)
+    assert isyms["pylint.pyreverse.utils"] == {
+        "get_annotation", "get_annotation_label", "infer_node"}
+    utils_before = "import os\ndef is_exception(n):\n    return True\n"
+    assert sorted(missing_symbols(isyms["pylint.pyreverse.utils"], utils_before)) == [
+        "get_annotation", "get_annotation_label", "infer_node"]
+    utils_after = utils_before + "def get_annotation(n):\n    pass\n" \
+        "def get_annotation_label(a):\n    pass\ndef infer_node(n):\n    pass\n"
+    assert missing_symbols(isyms["pylint.pyreverse.utils"], utils_after) == []
+
+
+def test_missing_symbols_no_false_positive():
+    assert missing_symbols({"Foo"}, "class Foo:\n    pass\n") == []
+    assert missing_symbols({"BAZ"}, "BAZ = 1\n") == []
+    assert missing_symbols({"foo"}, "from x import bar as foo\n") == []
+    assert missing_symbols({"x"}, "x, y = 1, 2\n") == []
+    assert missing_symbols({"nope"}, "def other():\n    pass\n") == ["nope"]
+
+
+def test_imported_symbols_handles_paren_and_alias():
+    syms = imported_symbols("from a.b import (one, two as t)\n")
+    assert "one" in syms["a.b"] and "two" in syms["a.b"]
 
 
 # ── test ranking (the pylint utils.py regression) ──────────────────────────────
