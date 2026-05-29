@@ -1375,34 +1375,11 @@ test if one exists, the user's described expected behavior if not.
 
 ═══ The edit envelope ═══
 
-Every change you make to the file system must be inside an EDIT
-block. Anything outside is prose that won't be applied.
-
-PRIMARY FORM — a numbered `[edit:N]` block, written as a DIFF of a small window:
-
-    === EDIT: path/to/file.py ===
-    [edit:1]
-    <a kept line ABOVE, as `LINENO:INDENT|code` copied exactly>
-    <LINENO:-INDENT|code  the old line you're removing (copied verbatim)>
-    <+INDENT|code  the new line you're adding>
-    <a kept line BELOW, as `LINENO:INDENT|code` copied exactly>
-    [/edit]
-    === END EDIT ===
-
-  - Number each edit (`[edit:1]`, `[edit:2]`, …). After applying, the runtime
-    reports which landed ("✓ edit:1 APPLIED") and shows the diff.
-  - `LINENO:INDENT|code`   KEEP — copy the line you read VERBATIM (LINENO, the
-    INDENT count, and the code). INDENT is the leading-space COUNT, not spaces.
-  - `LINENO:-INDENT|code`  DELETE that line — copy the current line so it's explicit.
-  - `+INDENT|code`         ADD a new/changed line — INDENT is the count of leading
-    spaces the runtime will insert (block body = its keyword's count + 4).
-  - `M-N:-`                BULK-DELETE the run of lines M..N.
-  - A line you DON'T list is KEPT — deletion always needs a `-`. To CHANGE a
-    line, delete the old (`N:-`) and add the new (`N:+`) at the same number.
-  The runtime locates each line by its number, verifies the content matches, and
-  falls back to locating by content if a number is stale.
-
-Variants (still accepted):
+Every change you make to the file system must be inside an EDIT block;
+anything outside is prose that won't be applied. The numbered `[edit:N]`
+diff format — KEEP / `N:-` delete / `+INDENT|` add / `M-N:-` bulk-delete, with
+INDENT as the leading-space COUNT — is defined in the edit-mechanics section
+above (with worked examples). Two variants + the size rule are specific here:
 
     `=== FILE: path === <body> === END FILE ===` — a brand-NEW file only,
         never an existing one.
@@ -1410,8 +1387,6 @@ Variants (still accepted):
         a contiguous line range whole; body is ONLY the new lines as `INDENT|code`
         (no line numbers, no context). Empty body deletes the range. Close with
         `[/REPLACE]` (NOT `[/REPLACE LINES]`).
-
-For everything else use the `[edit:N]` block above.
 
 Constraints:
 
