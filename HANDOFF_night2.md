@@ -103,9 +103,25 @@ gold: django=storage.py | matplotlib=cbook.py | pylint=diagrams+inspector+utils+
 ACTIONABLE: pylint's utils.py miss is specific — utils.py holds NEW functions that
 don't exist yet, so the planner can't REFS/find them; exploration never surfaces
 the file. The TEST references utils.get_annotation, so test-derived scope (#2 in
-core/plan_scope.py) SHOULD flag it — BUT the ckpt-24 sibling-filter (test-referenced
-file must be SAME-DIR as a scope file) likely SUPPRESSES it: pylint's test is in
-tests/ while utils.py is in pylint/pyreverse/. FIX TO TRY (low-risk, validate via
-PLAN_ONLY): for a file referenced by a test that ALSO imports a current scope
-module, allow it even cross-dir (relax the sibling rule for test-derived files),
-and consider promoting a strongly-test-referenced file from a NOTE to actual scope.
+core/plan_scope.py) SHOULD flag it.
+
+## ckpt 33 — ROOT-CAUSED + FIXED the pylint utils.py miss
+Traced it end to end (NOT the sibling-filter I first guessed — that check actually
+PASSES, utils.py is same-dir as the scoped inspector.py):
+- Gold test `tests/unittest_pyreverse_writer.py` does a clean module import
+  `from pylint.pyreverse.utils import get_annotation, get_visibility, infer_node`
+  (verified against the SWE-bench test_patch — even the PRE-patch test imports
+  pyreverse.utils). So imported_modules→modules_to_files maps it to utils.py and
+  _same_pkg(utils.py)=True. The backstop SHOULD add it.
+- REAL BUG: the backstop ranks candidate tests by stem-match to pick which 12 to
+  LOAD, but matched generic scope stems (`__init__`, `main` — both in pylint's
+  scope) as WHOLE-PATH substrings. On pylint (hundreds of test files) nearly every
+  path contains 'main'/'init' → ranking collapses to alphabetical → the real gold
+  test sits past the cap and is NEVER LOADED → utils.py never surfaces.
+- FIX (committed): extracted `plan_scope.rank_relevant_tests()` — rank by BASENAME
+  against MEANINGFUL stems only (≥4 chars; drop main/__init__/base/utils/… catch-
+  alls); cap 12→16. Pure, unit-tested (pylint scenario pinned). suite 15,562 green.
+- VALIDATION: deterministic unit test proves the gold test now ranks #1 within the
+  cap. A live JARVIS_PLAN_ONLY pylint re-run is in flight to confirm utils.py
+  appears in the planout end-to-end (compare /tmp/pylint.planout.ckpt32 vs the
+  fresh behavioral_audit/planout/pylint-dev__pylint-4551.planout).
