@@ -121,7 +121,16 @@ PASSES, utils.py is same-dir as the scoped inspector.py):
 - FIX (committed): extracted `plan_scope.rank_relevant_tests()` — rank by BASENAME
   against MEANINGFUL stems only (≥4 chars; drop main/__init__/base/utils/… catch-
   alls); cap 12→16. Pure, unit-tested (pylint scenario pinned). suite 15,562 green.
-- VALIDATION: deterministic unit test proves the gold test now ranks #1 within the
-  cap. A live JARVIS_PLAN_ONLY pylint re-run is in flight to confirm utils.py
-  appears in the planout end-to-end (compare /tmp/pylint.planout.ckpt32 vs the
-  fresh behavioral_audit/planout/pylint-dev__pylint-4551.planout).
+- VALIDATION (honest): the deterministic unit test proves the ranking fix surfaces
+  the gold test #1 within the cap WHEN the writer/inspector/diagrams files are in
+  scope. BUT a live JARVIS_PLAN_ONLY re-run did NOT surface utils.py — because that
+  run's PLANNER scoped only 2 files (diagrams.py + inspector.py), DROPPING writer.py
+  (the ckpt-32 sample had 6 incl. writer). The utils-importing gold test is the
+  WRITER test; with writer.py unscoped, its basename doesn't match the meaningful
+  stems {diagrams,inspector}, so it isn't prioritized. CONCLUSION: ckpt-33 fixes a
+  GENUINELY BROKEN ranking (whole-path substring let main/__init__ rank everything),
+  but it is NOT a silver bullet for pylint — the dominant blocker is UPSTREAM
+  PLANNER SCOPE VARIANCE (this 3rd run scoped 2 files and wrote NO STEPs for them).
+  The backstop can only amplify a signal when the right scope file is already
+  present. So the lever remains: make the PLANNER's own scope consistent. The
+  ranking fix is correct hygiene that helps on the runs where scope is right.
