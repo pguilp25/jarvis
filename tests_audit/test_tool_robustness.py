@@ -150,3 +150,42 @@ def test_tool_exception_is_visible_then_ephemeral(monkeypatch):
     if len(prompts) >= 3:
         assert "ripgrep exploded" not in prompts[2], \
             "the tool error persisted into a later round (not ephemeral / bloats context)"
+
+
+# ── MEDIUM: self-explaining failure messages (what / why / how) ────────────────
+
+def test_view_not_found_tells_how_to_recover():
+    """VIEW on a missing file must say WHY (not found) and HOW (search/refs)."""
+    import asyncio, tempfile, os
+    import core.tool_call as TC
+
+    root = tempfile.mkdtemp(prefix="viewnf_")
+    open(os.path.join(root, "real.py"), "w").write("x = 1\n")
+
+    blob = asyncio.run(TC._run_view(["nope.py 1-5"], root, {}))
+    assert "file not found" in blob.lower()
+    assert "SEARCH" in blob or "REFS" in blob, f"no recovery hint: {blob}"
+
+
+def test_websearch_failure_says_do_not_retry():
+    import asyncio
+    import core.tool_call as TC
+    import tools.search as S
+
+    async def _boom(*a, **k):
+        raise RuntimeError("no network")
+    orig = S.web_search
+    S.web_search = _boom
+    try:
+        out = asyncio.run(TC._run_web_searches(["anything"]))
+    finally:
+        S.web_search = orig
+    assert "do NOT retry" in out and ("SEARCH" in out or "CODE" in out)
+
+
+def test_semantic_unavailable_says_do_not_retry():
+    """The SEMANTIC key-missing / build-failure message must steer to alternatives."""
+    import inspect
+    import tools.embeddings as E
+    src = inspect.getsource(E)
+    assert "Do NOT retry" in src and "[SEARCH:" in src

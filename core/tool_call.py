@@ -1046,7 +1046,10 @@ async def _run_web_searches(queries: list[str]) -> str:
                 output_parts.append(f"\n=== Web search '{query}': no results ===")
         except Exception as e:
             warn(f"Web search failed for '{query}': {e}")
-            output_parts.append(f"\n=== Web search '{query}': error — {e} ===")
+            output_parts.append(
+                f"\n=== Web search '{query}': error — {e} ===\n"
+                f"  The web is unreachable here; do NOT retry [WEBSEARCH:]. "
+                f"Answer from the codebase ([SEARCH]/[CODE]/[REFS]) and your own knowledge.")
     return "\n".join(output_parts)
 
 
@@ -2298,7 +2301,10 @@ async def _run_view(
         if raw_content is None or any(
             (raw_content or "").startswith(p) for p in _READ_FAIL_PREFIXES
         ):
-            _msg = f"=== VIEW: file not found '{filepath}' ==="
+            _msg = (f"=== VIEW: file not found '{filepath}' ===\n"
+                    f"Check the path/spelling against the FILES list in PROJECT "
+                    f"CONTEXT. If you don't know the path, [SEARCH: <name>] or "
+                    f"[REFS: <symbol>] to find it first.")
             output_parts.append(_msg)
             _persist_view_failure(arg, _msg)
             continue
@@ -4277,6 +4283,13 @@ async def call_with_tools(
                     del _label_to_keys[label]
                 else:
                     warn(f"  [DISCARD: #{label}] — label not found, ignoring")
+                    # Surface to the model too (was stderr-only): it asked to drop
+                    # a label that doesn't exist → tell it, don't silently no-op.
+                    _avail = ", ".join(f"#{l}" for l in _label_to_keys) or "(none)"
+                    _tool_errors[f"DISCARD:{label}"] = (
+                        f"✗ [DISCARD: #{label}] — no such label; nothing removed. "
+                        f"Labels come from prefixing a tool call with '#name = '. "
+                        f"Active labels: {_avail}.")
 
         total = (
             len(code_tags) + len(web_tags) + len(detail_tags) + len(file_tags)

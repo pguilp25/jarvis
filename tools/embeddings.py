@@ -351,7 +351,8 @@ async def semantic_retrieve(
             chunks = await build_code_embeddings(project_root, maps_dir, file_hash)
         except Exception as e:
             warn(f"    Semantic index build failed: {e}")
-            return f"(semantic search unavailable: {e})"
+            return (f"✗ semantic search unavailable: {e}. Do NOT retry it this run — "
+                    f"use [SEARCH: text], [REFS: symbol], or [PURPOSE: path] instead.")
 
     if not chunks:
         return "(no code to search)"
@@ -361,7 +362,8 @@ async def semantic_retrieve(
         qvec = query_vecs[0]
     except Exception as e:
         warn(f"    Query embedding failed: {e}")
-        return f"(semantic search unavailable: {e})"
+        return (f"✗ semantic search unavailable: {e}. Do NOT retry it this run — "
+                    f"use [SEARCH: text], [REFS: symbol], or [PURPOSE: path] instead.")
 
     scored = []
     for chunk in chunks:
