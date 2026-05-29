@@ -39,10 +39,15 @@ TWO real, separable levers — proven by isolation, not guessed:
    ungated self-check fired but didn't reliably catch it.
 
 ## App-building (anti-overfit)
-- Greenfield: builds todo.py + test_todo.py, app logic sound, but the GENERATED
-  TEST had a cwd bug (`run_cli(cwd=tmp_path)` where todo.py isn't copied) → verify
-  failed. App-test-quality is a real gap (frontier writes runnable tests).
-- Feature/refactor: (running at handoff time — see behavioral_audit/app_tasks/runs).
+The app LOGIC is built correctly; the GENERATED TESTS are buggy/inconsistent:
+- Greenfield: app sound, generated test cwd'd to tmp_path where todo.py isn't
+  copied (errno 2) → verify=1.
+- Feature: 5 original tests PASS (feature didn't break anything); the 3 NEW
+  generated tests fail because the test asserts numeric priority (`== 0`) while
+  the code (correctly, per the spec's "high/med/low") uses strings. Test ⊥ code.
+=> Gap #3: JARVIS writes correct app code but inconsistent/unrunnable TESTS.
+   Addressable via a coder nudge (tests must match the implementation's contract
+   and run as written); respect the lean law; validate before keeping.
 
 ## Where to push next (ranked)
 1. **Coder plan-adherence on subtle structural fixes** — strengthen the self-check
