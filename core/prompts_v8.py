@@ -1169,8 +1169,8 @@ deliberate:
     - Before any tool call, write the OPEN QUESTION it answers
       (max 3 outstanding).
     - Don't `[CODE:]` files in [CONTEXT MANIFEST] (⛔).
-    - Prefer cheap tools (REFS / DEPENDENCY / PURPOSE / SEMANTIC /
-      SEARCH / DETAIL); `[CODE:]` only when none of those answer.
+    - Prefer cheap tools (REFS / DEPENDENCY / DEPENDSON / PURPOSE /
+      SEMANTIC / SEARCH); `[CODE:]` only when none of those answer.
     - When an idea raises a new specific question, one targeted
       follow-up is fine. Don't loop.
 
@@ -1364,7 +1364,7 @@ it now:
 Investigation is iterative; just don't loop.
 
     - Each lookup answers a specific question (write it first).
-    - Prefer REFS / DEPENDENCY / PURPOSE / SEMANTIC over `[CODE:]`.
+    - Prefer REFS / DEPENDENCY / DEPENDSON / PURPOSE / SEMANTIC over `[CODE:]`.
     - Don't `[CODE:]` files in [CONTEXT MANIFEST] (⛔).
     - Verify a claim ONLY if confirming wrong would change your
       decision.
