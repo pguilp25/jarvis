@@ -134,3 +134,45 @@ PASSES, utils.py is same-dir as the scoped inspector.py):
   The backstop can only amplify a signal when the right scope file is already
   present. So the lever remains: make the PLANNER's own scope consistent. The
   ranking fix is correct hygiene that helps on the runs where scope is right.
+## ckpt 34 — FULL pylint root-cause chain (traced end to end from the live log)
+The pylint planout was a 978-char PREAMBLE with 0 STEPs. Reading the live log gave
+the COMPLETE causal chain (each layer ruled in/out by evidence, not guessed):
+1. NOT the scope-backstop ranking (ckpt-33 fixed a real ranking bug — correct
+   hygiene — but it can only amplify a signal when the right scope file is present).
+2. NOT plan-selection: the substance-over-structure fallback (code.py ~8784) FIRED
+   correctly; it ranked all 3 drafts + merger + salvage and the 978-char merger
+   preamble still won → meaning EVERY layer-1 draft was ALSO thin/preamble.
+3. THE MECHANISM: the merger (`_call_with_tools max_rounds=6`) spent ALL 6 rounds
+   INVESTIGATING (reading files) and on its final round was STILL requesting
+   inspector.py ("I need to understand … before I can merge. Let me investigate the
+   key files. [tool use][PURPOSE: inspector.py][/tool use][STOP]") → ran out of
+   rounds → never emitted the plan. ([STOP] does NOT end the loop — it runs tools +
+   continues; max_rounds is what ended it.)
+4. THE FLOOR: pylint-4551 (multi-file + NEW functions get_annotation/infer_node) is
+   at/over the weak models' PLANNING-CAPABILITY ceiling.
+
+FIX (ckpt 34, committed): merger FORCED-COMMIT. When the merged plan is unusable,
+make ONE forced NO-TOOLS merger turn that must emit === PLAN === + ### STEPs,
+BEFORE the draft-salvage fallback. Gated on the existing unusable test → never
+touches the healthy django/matplotlib path. Prompt leads with the POSITIVE
+directive after observing the glm-5.1 fallback RUMINATE on "do NOT use tools"
+instead of writing.
+
+HONEST VALIDATION: the forced-commit fired + gated correctly, but did NOT rescue
+pylint-4551 — mistral/large was rate-limited so the call fell to glm-5.1, which
+can't one-shot this hard instance (it looped on the meta-instruction). So ckpt-34
+is a SOUND, GENERAL, gated robustness fix (helps when the model just needs a commit
+nudge and mistral/large is up) — NOT a proven pylint win. pylint-4551 needs a
+stronger planner model, not more prompt surgery.
+
+RANKED NEXT LEVERS (post-ckpt-34):
+1. django merger plan STRUCTURE (collect-all vs collect-adjustable) — coder-isolation
+   shows the coder is reliable GIVEN a correct plan, so getting the merger to emit
+   the right structure is the django lever. Validate via JARVIS_PLAN_CACHE + a
+   structure check.
+2. A STRONGER planner/merger model for hard multi-file instances (pylint class) —
+   the weak free models hit a real ceiling there; no prompt fix clears it.
+3. App test-quality nudge (generated tests must run as written / match the impl
+   contract).
+All planner/merger changes: validate via PLAN_ONLY (~45-300s/run, free-model speed
+varies) BEFORE trusting; they are the regression-prone area.
