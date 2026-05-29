@@ -9012,7 +9012,11 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 _src = sandbox.load_file(_tf) if sandbox else None
                 if not _src:
                     continue
-                _hit = modules_to_files(imported_modules(_src), _proj_files)
+                # Resolve the test's imports against the DISK pool, not the prose-
+                # scraped _proj_files — else a test that imports pyreverse.utils/
+                # .writer (modules no planner named) resolves to nothing, is judged
+                # irrelevant, and the contract check never runs. (The ckpt-53b miss.)
+                _hit = modules_to_files(imported_modules(_src), _resolve_pool)
                 # RELEVANT = the test imports a module IN scope OR a same-package
                 # sibling of one (broadened so a writer-test counts for an
                 # inspector-scoped plan in the same pyreverse package).
@@ -9039,6 +9043,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                     _miss = missing_symbols(_syms, _modsrc)
                     if _miss:
                         _add_req(_modfile)   # force it into the required set
+                        warn(f"  CONTRACT detected: {os.path.basename(_tf)} imports "
+                             f"undefined {', '.join(_miss)} from {_modfile}")
                         _contract_gaps.append(
                             f"CONTRACT: {os.path.basename(_tf)} imports "
                             f"{', '.join(_miss)} from {_modfile}, but they are NOT "

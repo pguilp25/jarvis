@@ -32,16 +32,15 @@ def _is_permanent_error(exc: BaseException) -> bool:
     HTTP 410 (Gone) = model was deprecated/removed.
     HTTP 404 = model name not recognised by the provider.
     HTTP 401/403 = auth wrong — won't get better with a sleep.
-    HTTP 429 on a `:free` model = OpenRouter free-tier DAILY quota exhausted —
-      persistent, not a transient rate-limit; retrying 2s/4s just wastes time
-      on every planner/coder call. Fall straight back to the NIM model.
+
+    NOTE: a 429 on a `:free` model is NOT treated as permanent. In practice it's
+    usually MOMENTARY pool saturation, not a hard daily wall — and the OpenRouter
+    client round-robins API keys per call, so a retry lands on a FRESH account.
+    Classing it permanent made the chain abandon the preferred model on the first
+    blip and cascade all the way to glm-5.1 every time (user, 2026-05-29). It's now
+    a CAPACITY error: retried-same a few times, then a SHORT cooldown.
     """
-    s = str(exc)
-    if _PERMANENT_STATUS.search(s):
-        return True
-    if "429" in s and ":free" in s:
-        return True
-    return False
+    return bool(_PERMANENT_STATUS.search(str(exc)))
 
 
 # Errors meaning "this endpoint can't serve right NOW — go straight to the
@@ -96,6 +95,13 @@ def _is_down(model_id: str) -> bool:
 # coder (glm-5.1) to weak fallbacks for 2 min and churns rounds (django-14792
 # audit). Park it only briefly so the next round retries it.
 _GATEWAY_5XX_COOLDOWN_SEC = 20.0
+# Capacity errors (429 / overload / stall) get RETRIED on the same model a few
+# times before failover — the OpenRouter key round-robin means each retry can hit
+# a fresh account, so a momentary :free 429 no longer cascades straight to glm.
+# When they finally fail over, the cooldown is SHORT so the preferred model is
+# re-probed soon (not exiled for the full 120s).
+_CAPACITY_RETRIES = 2
+_CAPACITY_COOLDOWN_SEC = 45.0
 _TRANSIENT_GATEWAY = re.compile(r'HTTP\s*(?:502|503|504)\b', re.IGNORECASE)
 
 
@@ -197,8 +203,9 @@ async def call_with_retry(
             raise ConnectionError(f"Internet lost >10min during call to {model_id}")
 
     last_error = None
-    error_attempt = 0   # counts non-timeout failures (has a limit)
+    error_attempt = 0    # counts non-timeout failures (has a limit)
     timeout_attempt = 0  # counts timeout failures (no limit)
+    capacity_attempt = 0  # counts 429/5xx/stall — retried same-model before failover
 
     # Continue, not restart: if a fallback recently served this primary and is
     # still usable, go straight to it instead of re-probing the (likely still
@@ -259,19 +266,34 @@ async def call_with_retry(
                 )
                 _mark_down(model_id)
                 break
-            # Busy / overloaded / 10-min-TTFT stall → fail over to the NEXT
-            # model in the chain now; retrying the same endpoint would just
-            # re-queue behind the same overloaded provider.
+            # Busy / overloaded / 429 / 10-min-TTFT stall = CAPACITY. Retry the
+            # SAME model a few times first (the OpenRouter client round-robins
+            # keys, so a retry can land on a fresh account, and a momentary pool
+            # 429 often clears in seconds) — only THEN cool it down and fail over.
+            # This stops the chain cascading to glm-5.1 on the first :free 429.
             if _is_failover_now_error(e):
                 _gw = _is_transient_gateway_error(e)
+                _is_stall = bool(re.search(r'stream idle|server stalled|no first token', str(e), re.I))
+                # Retry-same applies to 429 / overload (momentary capacity, where
+                # an OR key-rotation retry helps). NOT a gateway 5xx blip (keep its
+                # proven immediate-failover + 20s re-probe) and NOT a 10-min stall
+                # (won't clear by re-queueing the same endpoint).
+                if not _gw and not _is_stall and capacity_attempt < _CAPACITY_RETRIES:
+                    capacity_attempt += 1
+                    wait = 3 * capacity_attempt
+                    warn(f"  ⚠️  {model_id}: {last_error} — capacity retry "
+                         f"{capacity_attempt}/{_CAPACITY_RETRIES} in {wait}s (same model, fresh key)")
+                    await asyncio.sleep(wait)
+                    continue
                 warn(
                     f"  {model_id}: {last_error} — "
-                    + ("transient gateway 5xx, brief cooldown (retried soon)"
-                       if _gw else "busy/stalled")
-                    + ", failing over to next in chain (no re-queue)"
+                    + ("transient gateway 5xx" if _gw else
+                       "stalled" if _is_stall else "capacity retries spent")
+                    + ", failing over to next in chain (short cooldown)"
                 )
                 _mark_down(model_id,
-                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else _COOLDOWN_SEC)
+                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else
+                           _COOLDOWN_SEC if _is_stall else _CAPACITY_COOLDOWN_SEC)
                 break
             error_attempt += 1
             if error_attempt >= max_retries:
@@ -350,6 +372,7 @@ async def call_with_retry_stream(
     last_error = None
     error_attempt = 0
     timeout_attempt = 0
+    capacity_attempt = 0
 
     # Continue, not restart: if a fallback recently served this primary and is
     # still usable, go straight to it instead of re-probing the (likely still
@@ -406,19 +429,34 @@ async def call_with_retry_stream(
                 )
                 _mark_down(model_id)
                 break
-            # Busy / overloaded / 10-min-TTFT stall → fail over to the NEXT
-            # model in the chain now; retrying the same endpoint would just
-            # re-queue behind the same overloaded provider.
+            # Busy / overloaded / 429 / 10-min-TTFT stall = CAPACITY. Retry the
+            # SAME model a few times first (the OpenRouter client round-robins
+            # keys, so a retry can land on a fresh account, and a momentary pool
+            # 429 often clears in seconds) — only THEN cool it down and fail over.
+            # This stops the chain cascading to glm-5.1 on the first :free 429.
             if _is_failover_now_error(e):
                 _gw = _is_transient_gateway_error(e)
+                _is_stall = bool(re.search(r'stream idle|server stalled|no first token', str(e), re.I))
+                # Retry-same applies to 429 / overload (momentary capacity, where
+                # an OR key-rotation retry helps). NOT a gateway 5xx blip (keep its
+                # proven immediate-failover + 20s re-probe) and NOT a 10-min stall
+                # (won't clear by re-queueing the same endpoint).
+                if not _gw and not _is_stall and capacity_attempt < _CAPACITY_RETRIES:
+                    capacity_attempt += 1
+                    wait = 3 * capacity_attempt
+                    warn(f"  ⚠️  {model_id}: {last_error} — capacity retry "
+                         f"{capacity_attempt}/{_CAPACITY_RETRIES} in {wait}s (same model, fresh key)")
+                    await asyncio.sleep(wait)
+                    continue
                 warn(
                     f"  {model_id}: {last_error} — "
-                    + ("transient gateway 5xx, brief cooldown (retried soon)"
-                       if _gw else "busy/stalled")
-                    + ", failing over to next in chain (no re-queue)"
+                    + ("transient gateway 5xx" if _gw else
+                       "stalled" if _is_stall else "capacity retries spent")
+                    + ", failing over to next in chain (short cooldown)"
                 )
                 _mark_down(model_id,
-                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else _COOLDOWN_SEC)
+                           _GATEWAY_5XX_COOLDOWN_SEC if _gw else
+                           _COOLDOWN_SEC if _is_stall else _CAPACITY_COOLDOWN_SEC)
                 break
             error_attempt += 1
             if error_attempt >= max_retries:
