@@ -76,6 +76,35 @@ def imported_modules(test_source: str) -> set:
     return mods
 
 
+# Generic stems that, as substrings, match nearly every test path — using them
+# to rank tests destroys the ranking (this silently buried the real gold test
+# past the cap on big repos like pylint, whose scope routinely includes
+# __init__/main). A meaningful stem is ≥4 chars and not a catch-all.
+_NOISE_STEMS = frozenset({"__init__", "main", "base", "test", "tests",
+                          "conftest", "utils", "core", "api", "app", "init"})
+
+
+def rank_relevant_tests(test_files, scope_files, cap: int = 16) -> list:
+    """Order candidate test files so the ones most likely to exercise the plan's
+    scope come first, then return the first `cap`. Ranking is by BASENAME match
+    against the scope files' (meaningful) stems — NOT a whole-path substring,
+    which let generic stems like 'main' rank everything 0. The caller loads only
+    the returned files (a cap to bound I/O), so a good ranking is what surfaces a
+    test that pins a not-yet-scoped sibling (e.g. pyreverse/utils.py)."""
+    import os
+    stems = {os.path.splitext(os.path.basename(s))[0] for s in (scope_files or [])}
+    stems = {st for st in stems if st and len(st) >= 4 and st not in _NOISE_STEMS}
+
+    def _rank(f):
+        bn = os.path.basename(f)
+        return 0 if any(st in bn for st in stems) else 1
+
+    tests = [f for f in (test_files or [])
+             if "test" in f.lower() and f.endswith(".py")]
+    tests.sort(key=_rank)
+    return tests[:cap]
+
+
 def modules_to_files(modules, project_files) -> list:
     """Map dotted modules (pkg.sub.mod) to existing project file paths
     (pkg/sub/mod.py), matching by exact path or path-suffix (project paths may

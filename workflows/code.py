@@ -8878,7 +8878,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # fully guarded so it can NEVER break planning.
     try:
         from core.plan_scope import (imported_modules, modules_to_files,
-            referenced_files_outside_scope, completeness_lint, format_plan_gaps)
+            referenced_files_outside_scope, completeness_lint, format_plan_gaps,
+            rank_relevant_tests)
         _proj_files = list(files or [])
         _scope = _extract_files_from_plan(best_plan, _proj_files)
         _scope_set = set(_scope)
@@ -8904,10 +8905,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             _add_req(fp)
         # (b) #2 test-derived: a test importing a scope module pins symbols/files
         # the fix must satisfy → its SIBLING project files are in scope.
-        _stems = {os.path.splitext(os.path.basename(s))[0] for s in _scope}
-        _tests = [f for f in _proj_files if "test" in f.lower() and f.endswith(".py")]
-        _tests.sort(key=lambda f: 0 if any(st and st in f for st in _stems) else 1)
-        for _tf in _tests[:12]:
+        # Rank candidate tests by BASENAME match against meaningful scope stems
+        # (see plan_scope.rank_relevant_tests — generic stems like main/__init__
+        # used to bury the real gold test past the cap on big repos like pylint).
+        for _tf in rank_relevant_tests(_proj_files, _scope, cap=16):
             try:
                 _src = sandbox.load_file(_tf) if sandbox else None
                 if not _src:

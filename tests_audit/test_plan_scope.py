@@ -3,7 +3,40 @@ from core.plan_scope import (
     union_file_scopes, majority_files, format_candidate_block,
     imported_modules, modules_to_files,
     referenced_files_outside_scope, completeness_lint, format_plan_gaps,
+    rank_relevant_tests,
 )
+
+
+# ── test ranking (the pylint utils.py regression) ──────────────────────────────
+def test_rank_surfaces_gold_test_past_noise_stems():
+    """Regression: pylint scope includes __init__/main; those generic stems used
+    to (as whole-path substrings) rank nearly every test 0, burying the real gold
+    test (unittest_pyreverse_writer.py) past the cap so its import of
+    pyreverse.utils was never seen. Ranking by basename against MEANINGFUL stems
+    must surface it within the cap."""
+    scope = [
+        "pylint/pyreverse/__init__.py", "pylint/pyreverse/main.py",
+        "pylint/pyreverse/inspector.py", "pylint/pyreverse/writer.py",
+        "pylint/pyreverse/diagrams.py",
+    ]
+    # 20 noise tests whose paths contain 'main'/'init' (so the OLD substring rule
+    # ranked them 0) sort alphabetically ahead of the gold test.
+    noise = [f"tests/functional/a_main_case_{i:02d}_test.py" for i in range(20)]
+    gold = "tests/unittest_pyreverse_writer.py"
+    ranked = rank_relevant_tests(noise + [gold], scope, cap=16)
+    assert gold in ranked, "gold test buried past the cap by generic-stem noise"
+    assert ranked[0] == gold  # writer/inspector/diagrams match → ranked first
+
+
+def test_rank_ignores_non_test_and_non_py():
+    out = rank_relevant_tests(
+        ["test_a.py", "src/widget.py", "tests/data.txt", "test_b.py"], ["widget.py"])
+    assert out == ["test_a.py", "test_b.py"]
+
+
+def test_rank_respects_cap():
+    files = [f"test_{i:03d}.py" for i in range(50)]
+    assert len(rank_relevant_tests(files, [], cap=16)) == 16
 
 
 # ── union / votes ─────────────────────────────────────────────────────────────
