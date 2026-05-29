@@ -8790,27 +8790,41 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     if ((not has_plan_block and not has_step_header)
             or len(_merger_body) < MIN_PLAN_CHARS):
         try:
-            # Lead with the POSITIVE directive (write the plan), not the
-            # prohibition — a weak model (glm-5.1 fallback) burned its one round
-            # ruminating on "do NOT use tools" instead of writing. State the
-            # output shape first; mention tools only once, at the end.
+            # CLEAN, TOOL-FREE, raw completion — the key lesson from pylint-4551.
+            # The earlier attempt appended "do not request files" onto the
+            # tool-using MERGER prompt, which CONTRADICTED the merger role:
+            # glm-5.1 (capable!) burned its ENTIRE token budget deliberating
+            # "may I use tools or not? let me re-read the instructions…" and got
+            # truncated right before writing the plan — even though it had ALREADY
+            # reasoned out the correct fix (inspector.py / link_attribute / astroid
+            # annotation). Fix: a raw call (no tool scaffold to agonize over) with
+            # ONLY the task + candidate plans + a generous token budget, so the
+            # model synthesizes from what it already has instead of trying to
+            # investigate. The mistral/large→glm-5.1 fallback chain still applies.
+            from core.retry import call_with_retry as _raw_call
+            _drafts = "\n\n".join(
+                f"--- CANDIDATE PLAN {i + 1} ({p.get('model', '?')}) ---\n"
+                + (_strip_think(p.get("answer") or "")[:4000])
+                for i, p in enumerate(plans))
             _force_prompt = (
-                merge_prompt
-                + "\n\n## WRITE THE FINAL PLAN NOW\n"
-                "Using the analyses above, write the complete implementation plan "
-                "as:\n`=== PLAN ===`\n`### STEP 1` — <file path>: <exact change>\n"
-                "`### STEP 2` — …\n`=== END PLAN ===`\n"
-                "Name the exact file and concrete change in every STEP. Decide any "
-                "unclear detail yourself and state your choice — a concrete plan "
-                "is the goal. This is your last turn, so do not request files.")
-            _forced = await _call_with_tools(
-                "mistral/large", _force_prompt, project_root,
-                detailed_map=detailed_map, purpose_map=purpose_map,
-                research_cache=research_cache,
-                log_label="merging plans (forced commit)",
-                max_rounds=1, stop_on_tool_block=True,
-                cache_file_reads=True, read_only_role=True, allow_run=False)
-            _fb = _actionable(_forced.get("answer") or "")
+                f"## TASK\n{task}\n\n"
+                f"## CANDIDATE PLANS (independent attempts — synthesize the best)\n"
+                f"{_drafts}\n\n"
+                "## YOUR JOB\n"
+                "You have everything you need above. Synthesize the candidates into "
+                "ONE final implementation plan. Write it now as:\n"
+                "=== PLAN ===\n### STEP 1 — <file path>: <exact change>\n"
+                "### STEP 2 — …\n=== END PLAN ===\n"
+                "Name the exact file and concrete change in every STEP. Where the "
+                "candidates disagree, choose the best approach and state your "
+                "choice. Output ONLY the plan — no preamble, no investigation.")
+            _forced_raw = await _raw_call(
+                "mistral/large", _force_prompt,
+                system="You are a senior engineer writing a precise, minimal "
+                       "implementation plan. You already have all the context you "
+                       "need — do not ask for more, decide and write the plan.",
+                max_tokens=32768, log_label="merging plans (forced commit)")
+            _fb = _actionable(_forced_raw or "")
             _fb_ok = (("=== PLAN ===" in _fb)
                       or bool(re.search(r"###\s*STEP\s*\d+", _fb, re.IGNORECASE)))
             if _fb_ok and len(_fb) >= MIN_PLAN_CHARS and len(_fb) > len(_merger_body):
@@ -8818,7 +8832,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                      f"({len(_fb):,} chars) — using it.")
                 _wlog.phase_warn("merger forced-commit produced a structured plan",
                                  chars=len(_fb))
-                best_plan = _forced["answer"]
+                # Drop the <think> block (the raw call returns it) so the coder
+                # gets the plan prose, not the reasoning dump. Token neutralization
+                # still happens via _sanitize_plan below.
+                best_plan = _strip_think(_forced_raw)
                 _merger_body = _fb
                 has_plan_block = "=== PLAN ===" in best_plan
                 has_step_header = bool(
