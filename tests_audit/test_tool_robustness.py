@@ -343,3 +343,37 @@ def test_noop_edit_reported_as_no_change_all_three_callbacks():
     # the guard string + its three uses (one per callback) must be present
     assert src.count("⚠ NO CHANGE") >= 3, "a no-op apply callback still lacks the guard"
     assert src.count("old == content") >= 3
+
+
+# ── MEDIUM (deferred): path-traversal containment on CODE/VIEW/KEEP ────────────
+
+def test_path_traversal_is_refused_reads_stay_in_project():
+    import asyncio, tempfile, os
+    import core.tool_call as TC
+    root = tempfile.mkdtemp(prefix="travtest_")
+    os.makedirs(os.path.join(root, ".jarvis_sandbox"), exist_ok=True)
+    os.makedirs(os.path.join(root, "pkg"), exist_ok=True)
+    open(os.path.join(root, "pkg", "mod.py"), "w").write("def f():\n    return 1\n")
+    sd = tempfile.mkdtemp(prefix="travsecret_")
+    open(os.path.join(sd, "passwd"), "w").write("ROOT_SECRET=hunter2\n")
+    rel = os.path.relpath(os.path.join(sd, "passwd"), root)   # ../travsecret_*/passwd
+
+    # CODE: relative traversal + absolute both refused, no leak
+    for arg in (rel, os.path.join(sd, "passwd")):
+        out = asyncio.run(TC._run_code_reads([arg], root))
+        assert "OUTSIDE" in out and "ROOT_SECRET" not in out, f"leaked via {arg}"
+    # VIEW + KEEP refused
+    assert "ROOT_SECRET" not in asyncio.run(TC._run_view([f"{rel} 1-2"], root, {}))
+    assert "ROOT_SECRET" not in asyncio.run(TC._run_keep([f"{rel} 1-2"], root, {}, None))
+    # legit in-project reads still work
+    assert "def f" in asyncio.run(TC._run_code_reads(["pkg/mod.py"], root))
+    assert "def f" in asyncio.run(TC._run_view(["pkg/mod.py 1-2"], root, {}))
+
+
+def test_path_escapes_root_helper():
+    from core.tool_call import _path_escapes_root
+    assert _path_escapes_root("../etc/passwd", "/proj")
+    assert _path_escapes_root("a/../../etc/passwd", "/proj")
+    assert _path_escapes_root("/etc/passwd", "/proj")
+    assert not _path_escapes_root("pkg/mod.py", "/proj")
+    assert not _path_escapes_root("a/b/../c.py", "/proj")   # stays inside

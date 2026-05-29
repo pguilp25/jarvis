@@ -1322,6 +1322,25 @@ def _is_binary_path(path: str) -> "tuple[bool, str]":
     return False, ""
 
 
+def _path_escapes_root(filepath: str, project_root: str) -> bool:
+    """True if `filepath` resolves OUTSIDE project_root — a `../../etc/passwd`
+    traversal or an absolute path to somewhere else on the host. The read tools
+    (CODE/VIEW/KEEP) join the model's path onto project_root and open it with no
+    containment, so a confused/poisoned model could pull arbitrary host files
+    into context. Reject those with a clear message instead. Lexical for relative
+    paths (no symlink surprises for legit in-repo files); realpath for absolute.
+    """
+    try:
+        if os.path.isabs(filepath):
+            rp_root = os.path.realpath(project_root)
+            rp = os.path.realpath(filepath)
+            return rp != rp_root and not rp.startswith(rp_root + os.sep)
+        norm = os.path.normpath(filepath)
+        return norm == ".." or norm.startswith(".." + os.sep)
+    except Exception:
+        return False  # never break a read on a path-check error
+
+
 async def _run_code_reads(
     filepaths: list[str], project_root: str,
     viewed_versions: "dict[str, str] | None" = None,
@@ -1363,6 +1382,12 @@ async def _run_code_reads(
         # Parse optional line ranges from the argument
         fpath, line_ranges = _parse_code_arg(raw_fpath)
         fpath = norm_path(fpath.strip())
+        if _path_escapes_root(fpath, project_root):
+            output_parts.append(
+                f"=== CODE: '{fpath}' is OUTSIDE the project — refused. ===\n"
+                f"Only files inside the project can be read. Use a project-relative "
+                f"path (no leading '../' or absolute paths).")
+            continue
         if line_ranges:
             range_str = ", ".join(f"{a}-{b}" for a, b in line_ranges)
             status(f"    Reading code: {fpath} (lines {range_str})")
@@ -1864,6 +1889,13 @@ async def _run_keep(
             filepath = arg_no_label[:range_match.start()].strip()
             ranges_text = arg_no_label[range_match.start():]
         filepath = norm_path(filepath)
+        if _path_escapes_root(filepath, project_root):
+            _msg = (f"=== KEEP: '{filepath}' is OUTSIDE the project — refused. ===\n"
+                    f"Only files inside the project can be pinned. Use a project-relative "
+                    f"path (no leading '../' or absolute paths).")
+            output_parts.append(_msg)
+            _persist_keep_failure(arg, _msg, file_key=filepath)
+            continue
 
         status(f"    KEEP: {filepath}")
 
@@ -2271,6 +2303,13 @@ async def _run_view(
             spec = arg_no_label[digit_match.start():].strip()
 
         filepath = norm_path(filepath)
+        if _path_escapes_root(filepath, project_root):
+            _msg = (f"=== VIEW: '{filepath}' is OUTSIDE the project — refused. ===\n"
+                    f"Only files inside the project can be read. Use a project-relative "
+                    f"path (no leading '../' or absolute paths).")
+            output_parts.append(_msg)
+            _persist_view_failure(arg, _msg, file_key=filepath)
+            continue
 
         # If parsing failed and we already emitted the invalid-format
         # rejection above, ensure it's also persisted so the model sees
