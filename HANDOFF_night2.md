@@ -4,11 +4,11 @@ Branch `overnight-stability`, local commits only. Suite 15,559 green throughout.
 Goal: make JARVIS (weak FREE models) perform near frontier via prompts; test on
 SWE-bench AND real app-building (anti-overfit); iterate.
 
-## Headline result
-On the 3 hard instances (django-14053, matplotlib-25332, pylint-4551):
-- **ckpt-26 baseline (regression reverted + Mistral-Large merger): 0/3 resolved.**
-- **ckpt-27 (lean prompt pass): 2/3 resolved** (django + matplotlib). A real,
-  measured improvement from prompt engineering alone.
+## Headline result (read the ⚠ CORRECTION at the bottom — it supersedes this)
+On the 3 hard instances the FULL-PIPELINE number SWINGS with planner luck (0/3 to
+2/3 on the SAME code across runs) — it is NOT a stable metric. The real, PROVEN,
+stable win is the CODER under isolation: django-on-gold-plan 60%→100% (plan-
+adherence self-check). The bottleneck is PLANNER SCOPE CONSISTENCY. See bottom.
 
 ## What landed
 - **ckpt-26**: reverted the merger-prompt overhaul that caused the django/pylint
@@ -28,15 +28,12 @@ On the 3 hard instances (django-14053, matplotlib-25332, pylint-4551):
     file-scope → iterate planner/merger prompt against the SCOPE metric, no coder.
 
 ## The diagnosis (hard evidence, this is the valuable part)
-TWO real, separable levers — proven by isolation, not guessed:
-1. **Planning scope/correctness.** django + matplotlib scoped the right file →
-   resolved. **pylint mis-scopes** (hits __init__/main or wrong utils path, never
-   the 4 pyreverse logic files) → fails, every run. The planner is the limiter here.
-2. **Coder detail-consistency on very-subtle fixes.** Given the GOLD plan:
-   matplotlib resolves reliably; **django resolves ~50%** (1 of 2 isolation runs) —
-   the exact yield-ordering structure is hard, and the coder sometimes deviates
-   from the plan's nuance ("collect ALL" vs "collect only adjustable"). The
-   ungated self-check fired but didn't reliably catch it.
+THE bottleneck is PLANNER SCOPE CONSISTENCY — the planner names the right files
+INCONSISTENTLY run-to-run (matplotlib scoped cbook.py in one run, figure.py in
+another; pylint hits __init__/main or 2-of-4 pyreverse files). When the plan is
+right the rest of the pipeline resolves; when it's mis-scoped, it fails. The coder
+(given a correct plan) is now reliable (see CORRECTION). So end-to-end resolve is
+gated — and made noisy — by planner scope.
 
 ## App-building (anti-overfit)
 The app LOGIC is built correctly; the GENERATED TESTS are buggy/inconsistent:
