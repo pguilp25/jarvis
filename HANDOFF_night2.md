@@ -64,3 +64,29 @@ The app LOGIC is built correctly; the GENERATED TESTS are buggy/inconsistent:
 - Eval (Docker): `REQUESTS_CA_BUNDLE=$(certifi)`, `run_evaluation --dataset_name
   princeton-nlp/SWE-bench_Verified --clean False --max_workers 2`.
 - Reviewer stays OFF (JARVIS_ENABLE_REVIEW unset).
+
+## ⚠ CORRECTION / honest final read (after full-trio re-measures)
+The full-pipeline resolve number on these 3 instances is DOMINATED BY PLANNER
+VARIANCE, not a stable improvement. Same code scored 2/3 (ckpt-27) and 0/3
+(ckpt-30) on different runs — the swing is the planner inconsistently scoping
+(ckpt-30: matplotlib scoped lib/matplotlib/figure.py, the WRONG file; gold is
+cbook.py, which ckpt-27 scoped correctly). So do NOT read "0/3→2/3" as a fixed win.
+
+WHAT IS PROVEN AND STABLE (measured under ISOLATION, which is why isolation was
+built — the full pipeline is too noisy to measure a change):
+- The CODER, given a correct plan, is now RELIABLE: django-on-gold-plan went
+  60% (3/5) → 100% (4/4) after the plan-adherence self-check (ckpt-30). Validated
+  A/B; matplotlib within its noise. The coder executes a correct plan correctly.
+- THE BOTTLENECK IS PLANNER SCOPE CONSISTENCY. It names the right files
+  inconsistently (matplotlib cbook.py vs figure.py; pylint 2/4 vs wrong). The
+  coder cannot rescue a wrong/mis-scoped plan.
+
+NEXT LEVER (clear, but do it carefully): planner/merger SCOPE CONSISTENCY. Use the
+JARVIS_PLAN_ONLY harness to measure "does the plan name the gold files?" across N
+runs per instance, iterate the planner prompt against THAT metric (not the noisy
+end-to-end resolve), and A/B it. CAUTION: planner/merger prompt changes caused
+tonight's regression — keep them lean, validate via PLAN_ONLY before trusting.
+
+DURABLE DELIVERABLE: the component-isolation methodology (coder via
+JARVIS_PLAN_CACHE + gold plans; planner via JARVIS_PLAN_ONLY). It lets you measure
+and improve ONE component at a time even when the end-to-end metric is noise.
