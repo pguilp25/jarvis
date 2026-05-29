@@ -10500,33 +10500,10 @@ async def _implement_one_step(
             + _aln(c, display_mode="prefix")
             for fp, c in _nat_targets.items()
         ) or "(call read_file on the file(s) named in the step)"
+        # Native coder system prompt is the maintained IMPLEMENT_NATIVE_PROMPT (its
+        # tool list stays in lockstep with CODER_TOOLS); append per-step feedback.
         _nat_system = (
-            "You are the CODER in a multi-step coding agent. A separate planner "
-            "already did the analysis — your ONLY job is to EXECUTE this one step by "
-            "editing files. You have the SAME tools as any JARVIS coder, as native "
-            "functions:\n"
-            "  • read_file(path[, start_line, end_line]) — file content as "
-            "`LINENO:INDENT|code` (INDENT=leading-space count). Huge "
-            "files return a skeleton; pass a range to expand.\n"
-            "  • find_refs(symbol) — where a name is used (cheap, first lookup).\n"
-            "  • find_callers(tag) — type-resolved callers for an `|appears N (#tag)` "
-            "symbol (blast-radius).\n"
-            "  • search_text(pattern) — ripgrep the project for a string/regex.\n"
-            "  • file_purpose(path) — a file's docstring + def gists, no bodies (triage).\n"
-            "  • semantic_search(query) — rank files by concept when you don't know where.\n"
-            "  • symbol_detail(symbol) — deep dive on one def/class.\n"
-            "  • create_file(path, content) — make a NEW file (new module/script/"
-            "test, or greenfield). For files that don't exist yet; refuses to "
-            "clobber an existing one.\n"
-            "  • replace_lines(path, start_line, end_line, new_content) — your EDIT. "
-            "new_content lines are `INDENT|code` (copy the INDENT count from the view; "
-            "for a new line, count the spaces it needs), no LINENO. Result says "
-            "✓applied / ✗rejected; a rejection shows the actual current line — fix and "
-            "retry.\n"
-            "  • finish(summary) — call when the step is done AND verified.\n"
-            "Reach for a lookup tool BEFORE editing whenever you're unsure who uses a "
-            "symbol or where code lives — guessing causes rejects. Keep the change "
-            "MINIMAL — implement only this step. Do not re-plan."
+            IMPLEMENT_NATIVE_PROMPT
             + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
         )
         _create_note = (
@@ -12930,6 +12907,7 @@ from core.prompts_v8 import (
     PLAN_COT_NEW_V8,
     PLAN_PROMPT_V8,
     IMPLEMENT_PROMPT_V8,
+    IMPLEMENT_NATIVE_PROMPT_V8,
     MERGE_PROMPT_TEMPLATE_V8,
     REVIEW_PROMPT_TEMPLATE_V8,
     REVIEW_ROUTE_PROMPT_V8,
@@ -12942,6 +12920,7 @@ PLAN_COT_EXISTING = PLAN_COT_EXISTING_V8
 PLAN_COT_NEW = PLAN_COT_NEW_V8
 PLAN_PROMPT = PLAN_PROMPT_V8
 IMPLEMENT_PROMPT = IMPLEMENT_PROMPT_V8
+IMPLEMENT_NATIVE_PROMPT = IMPLEMENT_NATIVE_PROMPT_V8
 MERGE_PROMPT_TEMPLATE = MERGE_PROMPT_TEMPLATE_V8
 REVIEW_PROMPT_TEMPLATE = REVIEW_PROMPT_TEMPLATE_V8
 REVIEW_ROUTE_PROMPT = REVIEW_ROUTE_PROMPT_V8

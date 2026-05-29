@@ -454,3 +454,24 @@ def test_extract_message_malformed_shapes_raise_clearly():
     # choice without a message
     with _p.raises(RuntimeError, match="no message"):
         _extract_tool_message(_j.dumps({"choices": [{"finish_reason": "stop"}]}), "m")
+
+
+# ── native coder PROMPT ⇄ schema lockstep (overhaul: two coder prompts) ────────
+def test_native_prompt_tools_match_schema():
+    """The native coder prompt (IMPLEMENT_NATIVE_PROMPT) must name EXACTLY the
+    functions in CODER_TOOLS — no stale tool (e.g. the cut symbol_detail), no
+    missing tool (e.g. depends_on). Drift here silently mis-teaches the primary
+    coder."""
+    import re
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    named = set(re.findall(r'•\s*(\w+)\(', IMPLEMENT_NATIVE_PROMPT))
+    schema = {t["function"]["name"] for t in CODER_TOOLS}
+    assert named == schema, f"native prompt vs schema drift: only-in-prompt={named-schema}, only-in-schema={schema-named}"
+
+
+def test_native_prompt_has_no_text_edit_format():
+    """The native coder uses function calls — it must NOT carry the text
+    [edit]/=== EDIT: protocol (that's the TEXT coder's IMPLEMENT_PROMPT)."""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    for tok in ("=== EDIT:", "[edit:", "[REPLACE LINES", "[STOP][CONFIRM_STOP]"):
+        assert tok not in IMPLEMENT_NATIVE_PROMPT, f"native prompt leaks text-protocol token {tok!r}"
