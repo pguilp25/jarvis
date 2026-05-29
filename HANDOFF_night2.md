@@ -87,3 +87,25 @@ tonight's regression — keep them lean, validate via PLAN_ONLY before trusting.
 DURABLE DELIVERABLE: the component-isolation methodology (coder via
 JARVIS_PLAN_CACHE + gold plans; planner via JARVIS_PLAN_ONLY). It lets you measure
 and improve ONE component at a time even when the end-to-end metric is noise.
+
+## Precise planner scope-hit (JARVIS_PLAN_ONLY, 2 runs/instance) — sharper diagnosis
+gold: django=storage.py | matplotlib=cbook.py | pylint=diagrams+inspector+utils+writer
+- django 2/2: always names storage.py (+ css/test NOISE). Scope FINE → its failures
+  are plan STRUCTURE (merger "collect-all") + coder, not scope.
+- matplotlib 2/2: cbook.py present both runs. Scope mostly fine; ckpt-30's
+  figure.py-only was an unlucky drop.
+- pylint 2/2 hits 3/4 (diagrams+inspector+writer) but ALWAYS MISSES utils.py
+  (+ noise: __init__/diadefslib/main).
+
+=> Refined: the planner's SCOPE is fairly consistent (gold file usually present).
+   End-to-end noise is more plan-STRUCTURE + coder than scope roulette.
+
+ACTIONABLE: pylint's utils.py miss is specific — utils.py holds NEW functions that
+don't exist yet, so the planner can't REFS/find them; exploration never surfaces
+the file. The TEST references utils.get_annotation, so test-derived scope (#2 in
+core/plan_scope.py) SHOULD flag it — BUT the ckpt-24 sibling-filter (test-referenced
+file must be SAME-DIR as a scope file) likely SUPPRESSES it: pylint's test is in
+tests/ while utils.py is in pylint/pyreverse/. FIX TO TRY (low-risk, validate via
+PLAN_ONLY): for a file referenced by a test that ALSO imports a current scope
+module, allow it even cross-dir (relax the sibling rule for test-derived files),
+and consider promoting a strongly-test-referenced file from a NOTE to actual scope.
