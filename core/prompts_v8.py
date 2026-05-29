@@ -137,7 +137,7 @@ Why: silent re-tries of failed edits are how runs end with NO_PATCH.
 
 A symbol annotated `|appears N (#tag, ...)` in a `[CODE:]` /
 `[VIEW:]` / `[KEEP:]` output is shared across N callsites. The
-`#tag` (a 3-7 char hex string like `#3df`) is the handle for the
+`#tag` (a short hex handle like `#3df`) is the handle for the
 [DEPENDENCY:] tool.
 
 Fold the marker into your decision when you're about to edit
@@ -491,10 +491,11 @@ These are the role-specific input sections — the actual STEP body,
 the relevant file content, and any prior context. Re-reading a file whose
 FULL CONTENT is shown in `[FILE CONTENT]` is redundant and rejected — that
 content is freshly read this round.
-  EXCEPTION: `[CHANGED FILES]` (the reviewer / self-checker) is just a LIST of
-  filenames + change summaries, NOT content. You MUST `[CODE:]` those files to
-  see the POST-edit state before you verify — that read is required, not a
-  re-read.
+  EXCEPTION: `[CHANGED FILES]` (the reviewer / self-checker) lists the files the
+  coder touched. A SMALL changed file may be shown inline with its full post-edit
+  content (read it there); a file shown as name + line-count ONLY (no body) you
+  MUST `[CODE:]`/`[KEEP:]` to see the POST-edit state before verifying — that read
+  is required, not a re-read.
 
 First round has none of the YOUR … sections.
 """
@@ -1669,7 +1670,7 @@ A complete coder round, for reference:
 
     === EDIT: foo.py ===
     [edit]
-    42:def parse_header(line):
+    42:0|def parse_header(line):
     +4|if line is None:
     44:8|return None
     [/edit]
