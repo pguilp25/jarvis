@@ -60,9 +60,9 @@ is inert; both tokens are required, on adjacent lines.
 Pick one:
 
     [STOP][CONFIRM_STOP]              run pending tool calls
-    [DONE][CONFIRM_DONE]              finished (coder: ≥1 edit landed)
-    [FORCE DONE][CONFIRM_FORCE_DONE]  finished with no edits needed
-    [PLAN DONE][CONFIRM_PLAN_DONE]    final plan ready (planner/merger)
+    [DONE][CONFIRM_DONE]              coder: finished (≥1 edit landed)
+    [FORCE DONE][CONFIRM_FORCE_DONE]  coder: finished, no edits needed
+    [PLAN DONE][CONFIRM_PLAN_DONE]    findings/plan ready (understand/planner/merger)
     [CONTINUE][CONFIRM_CONTINUE]      more to write, no tools yet
 
 What the runtime actually does on failure (so you know the
@@ -94,8 +94,6 @@ here. Right workflow:
     2. Drop into [think] to verify.
     3. If wrong, revise:
          `[continue from: -N]`  erases the last N visible lines.
-         `=== REVISE EDIT === path … === END REVISE ===`
-                                 retracts a pending edit before [STOP].
          `[REVERT FILE: path]`   undoes an edit that already landed.
     4. Continue.
 
@@ -177,6 +175,8 @@ is the most reliable way to break unrelated tests / breakage.
     [KEEP: path L1-R1, L2-R2]   pin sub-ranges; the rest of the file
                                 is dropped from your context
     [SEARCH: pattern]           text search across the project
+    [KNOWLEDGE: topic]          look up a stored fact/convention about this
+                                project (returns nothing if none recorded)
     [WEBSEARCH: query]          external doc lookup, last resort
     [RUN: command]              (PLANNER & REVIEWER only) run a shell command
                                 to OBSERVE behaviour — start the app, call a
@@ -327,8 +327,6 @@ Notes:
 
 ### Tool format notes
 
-- `[SEARCH:]` is text search across the project, NOT the
-  edit-block `[SEARCH]` tag inside `=== EDIT ===`.
 - Result labels: prefix any call with `#label = ` to name the
   result; later `[DISCARD: #label]` removes it from context.
 
@@ -1166,6 +1164,15 @@ The intended rhythm:
 THE ONE FATAL MISTAKE: doing the whole plan inside native `<think>` and
 emitting a thin/empty visible plan. That plan is GONE — discarded, and the
 run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
+
+⚠ INVESTIGATION BUDGET — COMMIT, DON'T OVER-EXPLORE ⚠
+You MAY fire a few read tools ([REFS]/[CODE]/[SEMANTIC]/[DEPENDENCY]/[DEPENDSON],
+wrapped in [tool use] … [STOP][CONFIRM_STOP]) to verify ONE uncertain detail — but
+the three drafts already did the exploration. Your job is to SYNTHESIZE, not to
+re-investigate from scratch. HARD RULE: by your THIRD round, STOP reading and WRITE
+the `=== PLAN ===`, marking any still-open point in `## CONFIDENCE`. A committed
+plan with a noted gap is FAR better than spending every round investigating and
+emitting no plan — if you never write one, the run falls back to a weaker draft.
 
 Do all of this in ONE pass:
   1. PICK the strongest baseline plan (the one closest to a correct,
