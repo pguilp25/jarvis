@@ -10743,7 +10743,18 @@ async def _implement_one_step(
                         _stop_applied[fp] = content
                         post = content.count('\n') + 1
                         pre = old.count('\n') + 1 if old else 0
-                        if pre == 0:
+                        if old is not None and old != "" and old == content:
+                            # No-op: the edit matched but the result is byte-identical.
+                            # Reporting "✓ MODIFIED" would tell the model it changed
+                            # something it didn't (it'd [DONE] on a phantom fix). Mirror
+                            # the native replace_lines guard (core/native_tools.py).
+                            feedback_lines.append(
+                                f"  ⚠ NO CHANGE {fp}: edit matched but the result is "
+                                f"byte-identical — nothing was modified. If you meant to "
+                                f"change it, re-check the edit body; if it's already "
+                                f"correct, don't re-edit."
+                            )
+                        elif pre == 0:
                             feedback_lines.append(
                                 f"  ✓ CREATED  {fp}  ({post} lines written)"
                             )
@@ -11479,7 +11490,15 @@ async def _implement_one_step(
                             _sc_stop_applied[fp] = content
                             post = content.count('\n') + 1
                             pre = old.count('\n') + 1 if old else 0
-                            if pre == post:
+                            if old is not None and old != "" and old == content:
+                                # No-op fix: byte-identical result. The self-check has
+                                # NO batch-level no-op backstop, so an unreported no-op
+                                # here lets it sign off on a phantom fix.
+                                feedback_lines.append(
+                                    f"  ⚠ NO CHANGE {fp}: your fix matched but the result is "
+                                    f"byte-identical — nothing changed. Re-check the edit, or "
+                                    f"if the code is already correct, don't re-edit.")
+                            elif pre == post:
                                 feedback_lines.append(f"  ✓ FIX APPLIED {fp} (still {post} lines)")
                             else:
                                 feedback_lines.append(f"  ✓ FIX APPLIED {fp} ({pre} → {post} lines)")
@@ -12125,7 +12144,15 @@ async def phase_review(
                     _rev_stop_applied[fp] = content
                     post = content.count('\n') + 1
                     pre = old.count('\n') + 1 if old else 0
-                    if pre == post:
+                    if old is not None and old != "" and old == content:
+                        # No-op fix: byte-identical. The reviewer is the LAST safety
+                        # net with NO batch no-op check — silently reporting a no-op as
+                        # "✓ FIX APPLIED" lets it APPROVE having shipped nothing.
+                        feedback_lines.append(
+                            f"  ⚠ NO CHANGE {fp}: your fix matched but the result is "
+                            f"byte-identical — nothing changed. Re-check the edit, or if "
+                            f"the code is already correct, don't re-edit.")
+                    elif pre == post:
                         feedback_lines.append(f"  ✓ FIX APPLIED {fp} (still {post} lines)")
                     else:
                         feedback_lines.append(f"  ✓ FIX APPLIED {fp} ({pre} → {post} lines)")

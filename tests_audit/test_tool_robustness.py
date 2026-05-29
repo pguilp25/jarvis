@@ -316,3 +316,30 @@ def test_embeddings_cosine_is_finite():
     import math
     assert cosine_similarity([0, 0], [1, 1]) == 0.0
     assert math.isfinite(cosine_similarity([1, 2, 3], [4, 5, 6]))
+
+
+# ── 3rd-pass audit: unbalanced `[` in an arg must not swallow a following tag ───
+
+def test_unbalanced_bracket_does_not_swallow_following_tag():
+    """A stray unbalanced `[` in a SEARCH arg must not consume a following tag —
+    the next tag (here a missing-colon REFS) must still be surfaced."""
+    d = TagDetector("[tool use][SEARCH: arr[i\n[REFS sym][/tool use]")
+    assert any(t.tag_type == "REFS" and t.rejection_reason == "missing-colon"
+               for t in d.all_tags), "following REFS tag was swallowed"
+    # and a well-formed tag after a stray `[` is unaffected
+    d2 = TagDetector("[tool use][SEARCH: foo[bar\n[CODE: a.py][/tool use]")
+    assert any(t.tag_type == "CODE" and t.valid and t.clean_arg == "a.py"
+               for t in d2.valid_tags())
+
+
+# ── 3rd-pass audit: no-op edits are reported as NO CHANGE, not ✓ APPLIED ───────
+
+def test_noop_edit_reported_as_no_change_all_three_callbacks():
+    """The coder / self-check / reviewer mid-stream apply callbacks must report a
+    byte-identical (no-op) edit as 'NO CHANGE', never '✓ MODIFIED/FIX APPLIED'."""
+    import inspect
+    import workflows.code as C
+    src = inspect.getsource(C)
+    # the guard string + its three uses (one per callback) must be present
+    assert src.count("⚠ NO CHANGE") >= 3, "a no-op apply callback still lacks the guard"
+    assert src.count("old == content") >= 3

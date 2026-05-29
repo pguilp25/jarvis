@@ -444,10 +444,19 @@ class TagDetector:
             # find the matching ']' — bracket-BALANCED so a `]` inside the arg
             # (e.g. a regex char-class `[0-9]` in a SEARCH query) doesn't truncate
             # the call into a garbage query. Falls back to first-`]` if unbalanced.
+            # BOUNDED: the close can't cross the `[/tool use]` closer or a newline-
+            # led tag opener (`\n[`) — these single-line tool args never span those,
+            # and without the bound an UNBALANCED `[` in the arg would run forward
+            # and SWALLOW a following tag (over-capture).
+            boundary = n
+            for _b in (self.text.find('[/tool use', arg_start),
+                       self.text.find('\n[', arg_start)):
+                if _b != -1:
+                    boundary = min(boundary, _b)
             close = -1
             depth = 0
             p = arg_start
-            while p < n:
+            while p < boundary:
                 ch = self.text[p]
                 if ch == '[':
                     depth += 1
@@ -458,7 +467,9 @@ class TagDetector:
                     depth -= 1
                 p += 1
             if close < 0:
-                close = self.text.find(']', arg_start)
+                _f = self.text.find(']', arg_start)
+                if _f != -1 and _f < boundary:
+                    close = _f
             if close < 0:
                 i = br + 1
                 continue
