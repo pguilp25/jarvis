@@ -8884,15 +8884,28 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         _proj_files = list(files or [])
         _scope = _extract_files_from_plan(best_plan, _proj_files)
         _scope_set = set(_scope)
+        # Sibling test/dependency signals only count when they live in the SAME
+        # package (directory) as a scope file. This keeps the strong case (a
+        # sibling module the change must touch, e.g. pyreverse/utils.py next to
+        # inspector.py) and DROPS the noise (a test's incidental cross-package
+        # import, or an external caller) that false-flagged a clean single-file
+        # FIX like django storage.py. Majority-vote (≥2 drafts) is strong on its
+        # own and stays unconditional.
+        _scope_dirs = {os.path.dirname(s) for s in _scope}
+        def _same_pkg(fp):
+            return os.path.dirname(fp) in _scope_dirs
         _required: list = []
-        def _add_req(fp):
-            if fp and fp not in _scope_set and fp not in _required:
-                _required.append(fp)
-        # (a) #1 majority vote across drafts
+        def _add_req(fp, *, require_sibling=False):
+            if not fp or fp in _scope_set or fp in _required:
+                return
+            if require_sibling and not _same_pkg(fp):
+                return
+            _required.append(fp)
+        # (a) #1 majority vote across drafts (strong signal — unconditional)
         for fp in majority_files(_scope_votes, len(plans)):
             _add_req(fp)
         # (b) #2 test-derived: a test importing a scope module pins symbols/files
-        # the fix must satisfy → its other imported project files are in scope.
+        # the fix must satisfy → its SIBLING project files are in scope.
         _stems = {os.path.splitext(os.path.basename(s))[0] for s in _scope}
         _tests = [f for f in _proj_files if "test" in f.lower() and f.endswith(".py")]
         _tests.sort(key=lambda f: 0 if any(st and st in f for st in _stems) else 1)
@@ -8905,15 +8918,15 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 if any(h in _scope_set for h in _hit):   # test exercises our scope
                     for h in _hit:
                         if "test" not in h.lower():
-                            _add_req(h)
+                            _add_req(h, require_sibling=True)
             except Exception:
                 continue
-        # (c) #3 callers the planners' REFS/DEPENDENCY already surfaced
+        # (c) #3 callers the planners' REFS/DEPENDENCY already surfaced (siblings)
         _dep_text = "\n".join(str(v) for k, v in research_cache.items()
                               if re.search(r'refs|dependency', str(k), re.I))
         if _dep_text:
             for fp in referenced_files_outside_scope(_dep_text, _scope, _proj_files):
-                _add_req(fp)
+                _add_req(fp, require_sibling=True)
         # (d) #4 lint + attach gaps (cap so the note stays readable)
         _gaps = completeness_lint(best_plan, _scope, _required)[:6]
         # (e) #5 ground-in-real-reads: an EXISTING scope file the planners never
