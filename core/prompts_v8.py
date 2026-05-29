@@ -71,7 +71,7 @@ learning signal exists — no silent hang):
     • Bare half ([STOP] without [CONFIRM_STOP], or vice versa)
       → runtime injects a one-shot [SYSTEM NOTE] reminder and
         gives you the next round to correct.
-    • Unterminated edit block ([SEARCH] or === EDIT: without
+    • Unterminated edit block (`[edit]` or `=== EDIT:` without
       its closer) → runtime surfaces an explicit "N unterminated
       block(s)" warning before applying anything.
     • No signal AND no tool tags
@@ -508,17 +508,18 @@ First round has none of the YOUR … sections.
 """
 
 
-# ── CORE / EDIT_MECHANICS split (prompt-audit overhaul) ───────────────────────
-# SYSTEM_KNOWLEDGE_V8 stays byte-identical (the coder/self-check use it whole).
-# CORE_V8 = the shared block WITHOUT the coder edit tutorial — given to the
-# read-only / planning / standalone roles so they no longer carry ~140 lines of
-# edit mechanics they never use. EDIT_MECHANICS_V8 = the excised edit tutorial.
+# ── CORE = SYSTEM_KNOWLEDGE minus the coder edit tutorial ─────────────────────
+# SYSTEM_KNOWLEDGE_V8 stays byte-identical and is used WHOLE by the roles that
+# EDIT files (text coder, self-check, reviewer). CORE_V8 is the same block with
+# the edit tutorial excised — given to the roles that DON'T edit (understand,
+# planner, merger, review-route) so they no longer carry ~140 lines of edit
+# mechanics they never use. (Editors get the tutorial in natural order via the
+# full block, so no separate EDIT_MECHANICS constant is needed.)
 _EDIT_START = "### Runtime feedback after edits"
 _EDIT_END = "## ESCAPING TAGS IN PROSE"
 assert SYSTEM_KNOWLEDGE_V8.count(_EDIT_START) == 1 and SYSTEM_KNOWLEDGE_V8.count(_EDIT_END) == 1
 _es = SYSTEM_KNOWLEDGE_V8.index(_EDIT_START)
 _ee = SYSTEM_KNOWLEDGE_V8.index(_EDIT_END)
-EDIT_MECHANICS_V8 = SYSTEM_KNOWLEDGE_V8[_es:_ee].rstrip() + "\n\n"
 CORE_V8 = SYSTEM_KNOWLEDGE_V8[:_es] + SYSTEM_KNOWLEDGE_V8[_ee:]
 
 
@@ -1350,7 +1351,7 @@ TASK: {task}
 {verify_block}
 
 ══════════════════════════════════════════════════════════════════════
-[INPUT PLANS] — {n_plans} Layer-2 plans to merge
+[INPUT PLANS] — {n_plans} draft plans to merge
 ══════════════════════════════════════════════════════════════════════
 {all_plans_text}
 
@@ -1563,9 +1564,11 @@ shipping.
         `path`. Use after `[STOP]` when the next round's read
         shows the edit went wrong.
 
-    `=== REVISE EDIT === path … === END REVISE ===` — retracts
+    `=== REVISE EDIT: path === … === END REVISE EDIT ===` — retracts
         a pending edit BEFORE `[STOP]`. The most recent
-        `=== EDIT: <path> ===` in this round is replaced.
+        `=== EDIT: <path> ===` in this round is replaced. The path goes
+        AFTER the colon and INSIDE the fence; the closer is
+        `=== END REVISE EDIT ===` (the word EDIT is required in both).
 
         Example: you wrote an EDIT, then in [think] realized your
         anchors were weak/ambiguous. Don't ship it. Instead:
@@ -1581,13 +1584,13 @@ shipping.
             [think] My top anchor `if not line:` repeats in this file —
             risky. Re-anchor on the unique def line above. [/think]
 
-            === REVISE EDIT === foo.py
+            === REVISE EDIT: foo.py ===
             [edit:1]
             42:def parse_header(line):
             +4|if line is None:
             44:8|return None
             [/edit]
-            === END REVISE ===
+            === END REVISE EDIT ===
 
             [STOP][CONFIRM_STOP]
 
@@ -1772,7 +1775,7 @@ HOW TO WORK:
 # REVIEW_PROMPT_TEMPLATE_V8  —  Phase 3.5 final reviewer
 # ════════════════════════════════════════════════════════════════════════
 
-REVIEW_PROMPT_TEMPLATE_V8 = CORE_V8 + """
+REVIEW_PROMPT_TEMPLATE_V8 = SYSTEM_KNOWLEDGE_V8 + """
 
 [SYSTEM] You are the final reviewer. The coder has finished. The
 patch sitting in front of you is what ships unless you fix it.
@@ -1801,8 +1804,8 @@ finding gaps. APPROVING is a commitment.
 
 You can re-edit, just like the coder. Same authority. Same
 responsibility: don't break anything. The same surgical-edit
-rules apply (see the IMPLEMENT prompt's "edit envelope" section
-for the full grammar; you follow it identically).
+rules apply — the `[edit]`/`=== EDIT:` grammar is in the
+edit-mechanics section above; you follow it identically.
 
 What you fix: data flow gaps, signature wiring, missing imports,
 off-by-one, indent corruption, missing round-trip path, missed
@@ -1967,7 +1970,7 @@ If after 3 rounds you still can't land a clean fix →
                             scenario traces.
     `[REVERT FILE: path]`   when your edit went wrong, or you
                             decide not to apply the change.
-    `=== REVISE EDIT === … === END REVISE ===`
+    `=== REVISE EDIT: path === … === END REVISE EDIT ===`
                             retract a pending edit pre-STOP.
     `[continue from: -N]`   retract a premature verdict in the
                             same round.
