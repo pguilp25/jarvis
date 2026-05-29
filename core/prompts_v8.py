@@ -509,11 +509,26 @@ content is freshly read this round.
 First round has none of the YOUR … sections.
 """
 
+
+# ── CORE / EDIT_MECHANICS split (prompt-audit overhaul) ───────────────────────
+# SYSTEM_KNOWLEDGE_V8 stays byte-identical (the coder/self-check use it whole).
+# CORE_V8 = the shared block WITHOUT the coder edit tutorial — given to the
+# read-only / planning / standalone roles so they no longer carry ~140 lines of
+# edit mechanics they never use. EDIT_MECHANICS_V8 = the excised edit tutorial.
+_EDIT_START = "### Runtime feedback after edits"
+_EDIT_END = "## ESCAPING TAGS IN PROSE"
+assert SYSTEM_KNOWLEDGE_V8.count(_EDIT_START) == 1 and SYSTEM_KNOWLEDGE_V8.count(_EDIT_END) == 1
+_es = SYSTEM_KNOWLEDGE_V8.index(_EDIT_START)
+_ee = SYSTEM_KNOWLEDGE_V8.index(_EDIT_END)
+EDIT_MECHANICS_V8 = SYSTEM_KNOWLEDGE_V8[_es:_ee].rstrip() + "\n\n"
+CORE_V8 = SYSTEM_KNOWLEDGE_V8[:_es] + SYSTEM_KNOWLEDGE_V8[_ee:]
+
+
 # ════════════════════════════════════════════════════════════════════════
 # UNDERSTAND_PROMPT_V8  —  research / discovery analyst
 # ════════════════════════════════════════════════════════════════════════
 
-UNDERSTAND_PROMPT_V8 = SYSTEM_KNOWLEDGE_V8 + """
+UNDERSTAND_PROMPT_V8 = CORE_V8 + """
 
 [SYSTEM] You are a code analyst. Your job is to map the relevant
 code so that planners downstream can write precise STEPs. Your
@@ -1096,7 +1111,7 @@ your plan is empty and gets discarded — never do that.
 # PLAN_PROMPT_V8  —  thin connector between SYSTEM and per-mode templates
 # ════════════════════════════════════════════════════════════════════════
 
-PLAN_PROMPT_V8 = SYSTEM_KNOWLEDGE_V8 + """
+PLAN_PROMPT_V8 = CORE_V8 + """
 
 [SYSTEM] You are a planner. The mode-specific instructions below
 (injected as `cot_instructions`) tell you exactly how to plan for
@@ -1124,7 +1139,7 @@ PROJECT CONTEXT:
 # MERGE_PROMPT_TEMPLATE_V8  —  Layer 3 final merger
 # ════════════════════════════════════════════════════════════════════════
 
-MERGE_PROMPT_TEMPLATE_V8 = """
+MERGE_PROMPT_TEMPLATE_V8 = CORE_V8 + """
 
 [SYSTEM] You are the plan FINALIZER. You receive {n_plans} independent
 Layer-1 plans — raw, parallel first drafts that may be incomplete,
@@ -1745,7 +1760,7 @@ calling `[CODE:]` on the file. The provenance is the same as a
 # REVIEW_PROMPT_TEMPLATE_V8  —  Phase 3.5 final reviewer
 # ════════════════════════════════════════════════════════════════════════
 
-REVIEW_PROMPT_TEMPLATE_V8 = """
+REVIEW_PROMPT_TEMPLATE_V8 = CORE_V8 + """
 
 [SYSTEM] You are the final reviewer. The coder has finished. The
 patch sitting in front of you is what ships unless you fix it.
@@ -2030,7 +2045,7 @@ PROJECT CONTEXT:
 # REVIEW_ROUTE_PROMPT_V8  —  the reviewer's verdict after running [VERIFY:]
 # ════════════════════════════════════════════════════════════════════════
 
-REVIEW_ROUTE_PROMPT_V8 = SYSTEM_KNOWLEDGE_V8 + """
+REVIEW_ROUTE_PROMPT_V8 = CORE_V8 + """
 
 [SYSTEM] You are the reviewer's VERDICT step. ONE command was run to
 verify the implementation actually works at runtime. Decide what happens
