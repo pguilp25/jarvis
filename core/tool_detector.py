@@ -57,7 +57,7 @@ from typing import Iterable
 KNOWN_TAG_TYPES = (
     "CODE", "VIEW", "KEEP", "REFS", "SEARCH", "WEBSEARCH",
     "DETAIL", "PURPOSE", "SEMANTIC", "LSP", "KNOWLEDGE", "DISCARD",
-    "DEPENDENCY",
+    "DEPENDENCY", "DEPENDSON",
 )
 
 # Common WRONG tool names a model reaches for out of habit from other
@@ -197,7 +197,7 @@ def _validate_arg(tag_type: str, clean_arg: str) -> "str | None":
     if tag_type == "WEBSEARCH":
         # web queries can be long, free-form. No real validation.
         return None
-    if tag_type in ("DETAIL", "PURPOSE", "SEMANTIC", "KNOWLEDGE"):
+    if tag_type in ("DETAIL", "PURPOSE", "SEMANTIC", "KNOWLEDGE", "DEPENDSON"):
         # Free-form names but reject sentence-shaped args
         if (len(clean_arg.split()) >= 6
                 and _RE_LONG_PROSE.search(clean_arg)):

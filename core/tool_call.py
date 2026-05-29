@@ -31,6 +31,8 @@ CODE_TAG = re.compile(r'\[CODE:\s*(.+?)\]', re.IGNORECASE)
 REFS_TAG = re.compile(r'\[REFS:\s*(.+?)\]', re.IGNORECASE)
 PURPOSE_TAG = re.compile(r'\[PURPOSE:\s*(.+?)\]', re.IGNORECASE)
 SEMANTIC_TAG = re.compile(r'\[SEMANTIC:\s*(.+?)\]', re.IGNORECASE)
+# DEPENDSON: what a symbol depends ON (its callees) — reverse of DEPENDENCY.
+DEPENDSON_TAG = re.compile(r'\[DEPENDSON:\s*(.+?)\]', re.IGNORECASE)
 LSP_TAG = re.compile(r'\[LSP:\s*(.+?)\]', re.IGNORECASE)
 KNOWLEDGE_TAG = re.compile(r'\[KNOWLEDGE:\s*(.+?)\]', re.IGNORECASE)
 # KEEP strips a previously-loaded [CODE:] result to only the specified line
@@ -996,7 +998,7 @@ def has_tool_tags(text: str) -> bool:
     return bool(SEARCH_TAG.search(masked) or WEBSEARCH_TAG.search(masked)
                 or DETAIL_TAG.search(masked) or CODE_TAG.search(masked)
                 or REFS_TAG.search(masked) or PURPOSE_TAG.search(masked)
-                or SEMANTIC_TAG.search(masked)
+                or SEMANTIC_TAG.search(masked) or DEPENDSON_TAG.search(masked)
                 or LSP_TAG.search(masked) or KNOWLEDGE_TAG.search(masked)
                 or KEEP_TAG.search(masked) or VIEW_TAG.search(masked)
                 or DISCARD_TAG.search(masked))
@@ -2844,14 +2846,15 @@ async def call_with_tools(
              would have its V0-relative line numbers applied to the post-STOP
              file (which has different line numbers).
 
-    Tool tags:
-      [SEARCH: pattern]       → code search
+    Tool tags (each a DISTINCT retrieval axis — no overlap):
+      [SEARCH: pattern]       → exact/regex text search (ripgrep)
+      [SEMANTIC: description] → conceptual search over the CODE (embeddings) → top file:line units; use when you don't know the name
+      [REFS: name]            → all definitions/imports/usages of a symbol (fast)
+      [DEPENDENCY: #tag]      → what depends ON this symbol (precise callers; #tag comes from |appears N (#tag) on a CODE/VIEW read)
+      [DEPENDSON: symbol]     → what this symbol depends on (its callees/used symbols)
+      [CODE: path/to/file]    → read a full source file
+      [PURPOSE: path/to/file] → file outline — module docstring + each public symbol's signature/docstring (no bodies)
       [WEBSEARCH: query]      → web search
-      [DETAIL: section name]  → detailed code map lookup
-      [CODE: path/to/file]    → read actual source code file
-      [REFS: name]            → find all definitions, imports, usages
-      [PURPOSE: category]     → all code serving a purpose (exact/fuzzy category name)
-      [SEMANTIC: description] → vector-embedding search over the CODE (functions/classes), returns the top 10 matching `file:line` units
       [DISCARD: #label]       → remove a labeled result from context
 
     research_cache: shared dict that accumulates all lookup results across
@@ -3514,14 +3517,21 @@ async def call_with_tools(
         _detector = TagDetector(result)
         code_tags     = _detector.valid_args("SEARCH")    if enable_code_search else []
         web_tags      = _detector.valid_args("WEBSEARCH") if enable_web_search else []
-        detail_tags   = _detector.valid_args("DETAIL")    if detailed_map else []
+        # DETAIL cut (redundant): it returned a symbol's def + callers — exactly
+        # REFS (locate) + CODE (read) + DEPENDENCY (callers) combined. Use those.
+        detail_tags   = []
         file_tags     = _detector.valid_args("CODE")      if project_root else []
         refs_tags     = _detector.valid_args("REFS")      if project_root else []
-        purpose_tags  = _detector.valid_args("PURPOSE")   if purpose_map else []
+        # PURPOSE works map-free (AST file-gist fallback) — gate on project_root.
+        purpose_tags  = _detector.valid_args("PURPOSE")   if project_root else []
         # SEMANTIC now indexes the CODE itself (AST chunks) — it no longer needs
         # a purpose map, so it's a first-class tool gated only on project_root.
         semantic_tags = _detector.valid_args("SEMANTIC")  if project_root else []
-        lsp_tags      = _detector.valid_args("LSP")       if project_root else []
+        # DEPENDSON: what a symbol depends ON (its callees) — AST-resolved.
+        dependson_tags = _detector.valid_args("DEPENDSON") if project_root else []
+        # LSP standalone tag cut (dead redirect) — its precision lives inside
+        # DEPENDENCY now, which is the canonical "who depends on this" tool.
+        lsp_tags      = []
         knowledge_tags = _detector.valid_args("KNOWLEDGE")
         # RUN is extracted OUTSIDE the detector (bracket-balanced) — its free-form
         # shell command routinely contains `]` and needs no [tool use] wrapper.
@@ -3543,8 +3553,8 @@ async def call_with_tools(
         # primary intent is kept) until the sum fits MAX_TAGS_PER_ROUND.
         _all_tag_lists = [
             code_tags, web_tags, detail_tags, file_tags, refs_tags,
-            purpose_tags, semantic_tags, lsp_tags, knowledge_tags,
-            keep_tags, view_tags, dependency_tags, run_tags,
+            purpose_tags, semantic_tags, dependson_tags, lsp_tags,
+            knowledge_tags, keep_tags, view_tags, dependency_tags, run_tags,
         ]
         _total_tags = sum(len(lst) for lst in _all_tag_lists)
         if _total_tags > MAX_TAGS_PER_ROUND:
@@ -3564,7 +3574,7 @@ async def call_with_tools(
         has_tags = bool(code_tags or web_tags or detail_tags or file_tags
                         or refs_tags or purpose_tags or semantic_tags or lsp_tags
                         or knowledge_tags or keep_tags or view_tags
-                        or dependency_tags or discard_tags)
+                        or dependency_tags or dependson_tags or discard_tags)
         _dbg(f"has_tags={has_tags} has_stop={has_stop} "
              f"purpose={len(purpose_tags)} file={len(file_tags)} code={len(code_tags)} "
              f"refs={len(refs_tags)} view={len(view_tags)} detail={len(detail_tags)} "
@@ -4434,6 +4444,9 @@ async def call_with_tools(
             return await semantic_retrieve(
                 tag, project_root, maps_dir, file_hash, top_n=10
             )
+        def _run_dependson(tag):
+            from core.exploration_tools import extract_dependencies
+            return extract_dependencies(tag, project_root)
         def _run_lsp(tag):
             return (
                 f"=== LSP for '{tag}': folded into REFS / DEPENDENCY ===\n"
@@ -4457,7 +4470,7 @@ async def call_with_tools(
                 r = await _locked_lookup("WEBSEARCH", t, _run_web)
                 round_output += r
 
-        if detail_tags and detailed_map:
+        if detail_tags and project_root:
             new_tags, cached = _cached_or_run("DETAIL", detail_tags)
             round_output += cached
             for t in new_tags:
@@ -4478,7 +4491,7 @@ async def call_with_tools(
                 r = await _locked_lookup("REFS", t, _run_refs)
                 round_output += r
 
-        if purpose_tags and purpose_map and project_root:
+        if purpose_tags and project_root:
             new_tags, cached = _cached_or_run("PURPOSE", purpose_tags)
             round_output += cached
             for t in new_tags:
@@ -4490,6 +4503,13 @@ async def call_with_tools(
             round_output += cached
             for t in new_tags:
                 r = await _locked_lookup("SEMANTIC", t, _run_semantic)
+                round_output += r
+
+        if dependson_tags and project_root:
+            new_tags, cached = _cached_or_run("DEPENDSON", dependson_tags)
+            round_output += cached
+            for t in new_tags:
+                r = await _locked_lookup("DEPENDSON", t, _run_dependson)
                 round_output += r
 
         if lsp_tags and project_root:

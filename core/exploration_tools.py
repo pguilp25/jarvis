@@ -822,6 +822,120 @@ def extract_detail(symbol: str, project_root: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+import builtins as _builtins
+import keyword as _keyword
+# Names that are NEVER a project dependency even if some file happens to define
+# a function with the same name — builtins (`list`, `set`, `len`, `print`…),
+# keywords, and the implicit method receivers. Excluding these is what keeps
+# DEPENDSON precise: without it, a `list()` call resolved to a random project
+# function named `list`.
+_DEPENDSON_STOPWORDS = (
+    set(dir(_builtins)) | set(_keyword.kwlist)
+    | {"self", "cls", "args", "kwargs", "_"}
+    # Ubiquitous builtin-TYPE methods (str/list/dict/set/file/re). These are
+    # attribute calls like `x.get()`/`items.append()` whose receiver is almost
+    # never a project type — resolving them by bare name to a same-named project
+    # def is a false positive. Precision > recall here (a rare real project
+    # method with one of these names is still reachable via REFS/CODE).
+    | {"get", "set", "add", "pop", "append", "extend", "insert", "remove",
+       "update", "setdefault", "keys", "values", "items", "copy", "clear",
+       "sort", "reverse", "join", "split", "rsplit", "strip", "lstrip",
+       "rstrip", "replace", "format", "startswith", "endswith", "lower",
+       "upper", "title", "count", "find", "index", "encode", "decode",
+       "read", "write", "close", "open", "flush", "seek", "readline",
+       "readlines", "writelines", "group", "groups", "match", "search",
+       "sub", "findall", "finditer", "splitlines", "discard", "popitem"})
+
+
+def _build_def_name_index(project_root: str) -> dict:
+    """name → sorted list of (relpath, lineno) for every def/class/method in the
+    project. Built once per [DEPENDSON:] call and used to resolve a symbol's
+    outgoing references to their definition sites — project-internal ONLY, so
+    builtins/stdlib/third-party names (not defined here) are naturally excluded."""
+    index: dict[str, list] = {}
+    for full_path in _iter_source_files(project_root):
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                tree = ast.parse(f.read())
+        except Exception:
+            continue
+        rel = os.path.relpath(full_path, project_root)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                index.setdefault(node.name, []).append((rel, node.lineno))
+    for name in index:
+        index[name] = sorted(set(index[name]))
+    return index
+
+
+def extract_dependencies(symbol: str, project_root: str) -> str:
+    """What `symbol` depends ON: the project-defined functions/classes it calls
+    or references, each with its definition site(s). This is the REVERSE of the
+    caller lookup ([DEPENDENCY:] = what depends on the symbol). AST-walks the
+    symbol's body to collect referenced names, then resolves them against a
+    project def index (builtins/stdlib drop out — they aren't defined here).
+
+    `symbol` accepts a bare identifier or a `Parent.member` dotted form (the
+    dotted form scopes to methods of `class Parent`)."""
+    if not symbol or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_.]*$", symbol):
+        return f"=== DEPENDSON: '{symbol}' — not a valid identifier ==="
+
+    parts = symbol.split(".")
+    base_name = parts[-1]
+    parent_class = parts[-2] if len(parts) > 1 else None
+
+    matches = _find_definitions(base_name, project_root, parent_class=parent_class)
+    if not matches:
+        return (
+            f"=== DEPENDSON: '{symbol}' ===\n"
+            f"No `def {base_name}` or `class {base_name}` found in the project.\n"
+            f"Try [REFS: {symbol}] to find usage sites, or [SEARCH: pattern]."
+        )
+
+    index = _build_def_name_index(project_root)
+    out = [f"=== DEPENDSON: {symbol} — what it depends on ==="]
+    for m in matches:
+        node = m["node"]
+        used: set[str] = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call):
+                fn = n.func
+                if isinstance(fn, ast.Name):
+                    used.add(fn.id)
+                elif isinstance(fn, ast.Attribute):
+                    used.add(fn.attr)
+            elif isinstance(n, ast.Attribute):
+                used.add(n.attr)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                used.add(n.id)
+
+        deps = []
+        for name in sorted(used):
+            if name == base_name or name in _DEPENDSON_STOPWORDS:
+                continue                       # skip self/recursion + builtins
+            sites = index.get(name)
+            if sites:
+                deps.append((name, sites))
+
+        if not deps:
+            out.append(
+                f"\n{m['file']}:{m['line']} {base_name} — no project-internal "
+                f"dependencies (only builtins / stdlib / parameters)."
+            )
+            continue
+        out.append(
+            f"\n{m['file']}:{m['line']} {base_name} depends on "
+            f"{len(deps)} project symbol(s):"
+        )
+        for name, sites in deps[:40]:
+            loc = ", ".join(f"{f}:{ln}" for f, ln in sites[:3])
+            more = f" (+{len(sites) - 3} more)" if len(sites) > 3 else ""
+            out.append(f"  • {name}  →  {loc}{more}")
+        if len(deps) > 40:
+            out.append(f"  … +{len(deps) - 40} more")
+    return "\n".join(out).rstrip() + "\n"
+
+
 def _find_definitions(name: str, project_root: str,
                        parent_class: str | None = None) -> list[dict]:
     """Return list of {file, line, node, source} dicts for every

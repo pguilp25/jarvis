@@ -16,9 +16,9 @@ exact executor so behaviour is identical:
     [REFS:]             find_refs          _run_refs_searches
     [DEPENDENCY: #tag]  find_callers       _run_dependency_lookup
     [SEARCH:]           search_text        _run_code_searches
-    [PURPOSE:]          file_purpose       _run_purpose_lookups
-    [SEMANTIC:]         semantic_search    _run_semantic_lookups
-    [DETAIL:]           symbol_detail      _run_detail_lookups
+    [PURPOSE:]          file_purpose       _run_purpose_lookups (file gist)
+    [SEMANTIC:]         semantic_search    embeddings.semantic_retrieve (over code)
+    [DEPENDSON:]        depends_on         exploration_tools.extract_dependencies
     [REPLACE LINES]     replace_lines      _extract/_apply_extracted_code
     [DONE]              finish             —
 
@@ -116,19 +116,19 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "semantic_search",
         "description": (
-            "Rank source files by how well their docstrings/comments match a concept "
-            "described in plain words. Use when you know WHAT behaviour you want but not "
-            "WHERE it lives. Not a substitute for search_text on an exact symbol."),
+            "Embedding search over the CODE itself (functions/classes) — returns the "
+            "top matching file:line units. Use when you know WHAT behaviour you want "
+            "but not WHERE it lives. Not a substitute for search_text on an exact symbol."),
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "concept in plain words"},
         }, "required": ["query"]},
     }},
     {"type": "function", "function": {
-        "name": "symbol_detail",
+        "name": "depends_on",
         "description": (
-            "Deep dive on ONE named def/class: its full source plus where it's defined "
-            "and used. Use to understand a single function/class precisely before "
-            "editing it."),
+            "What a symbol depends ON: the project functions/classes it calls or uses, "
+            "with their definition sites (builtins/stdlib excluded). The reverse of "
+            "dependents — use to learn what a function relies on before changing it."),
         "parameters": {"type": "object", "properties": {
             "symbol": {"type": "string", "description": "a def/class name, e.g. MyClass.method"},
         }, "required": ["symbol"]},
@@ -360,22 +360,27 @@ def _do_purpose(args: dict, ctx: dict) -> str:
                                 ctx.get("project_root", ""))
 
 
-def _do_semantic(args: dict, ctx: dict) -> str:
-    from core.tool_call import _run_semantic_lookups
+async def _do_semantic(args: dict, ctx: dict) -> str:
+    # Embedding search over the CODE (same path as the text loop) — no purpose map.
+    from tools.code_index import _maps_dir, _load_all_code
+    from tools.embeddings import semantic_retrieve
     q = args.get("query", "")
     if not q:
         return "✗ semantic_search needs a query."
-    return _run_semantic_lookups([q], ctx.get("project_root", ""),
-                                 purpose_map=ctx.get("purpose_map"))
+    project_root = ctx.get("project_root", "")
+    if not project_root:
+        return "✗ semantic_search needs a project_root."
+    maps_dir = _maps_dir(project_root)
+    _, file_hash = _load_all_code(project_root)
+    return await semantic_retrieve(q, project_root, maps_dir, file_hash, top_n=10)
 
 
-def _do_detail(args: dict, ctx: dict) -> str:
-    from core.tool_call import _run_detail_lookups
+def _do_dependson(args: dict, ctx: dict) -> str:
+    from core.exploration_tools import extract_dependencies
     sym = args.get("symbol", "")
     if not sym:
-        return "✗ symbol_detail needs a symbol name."
-    return _run_detail_lookups([sym], ctx.get("detailed_map") or "",
-                               ctx.get("project_root", ""))
+        return "✗ depends_on needs a symbol name."
+    return extract_dependencies(sym, ctx.get("project_root", ""))
 
 
 async def _dispatch(name: str, args: dict, ctx: dict):
@@ -394,13 +399,13 @@ async def _dispatch(name: str, args: dict, ctx: dict):
     if name == "file_purpose":
         return _do_purpose(args, ctx)
     if name == "semantic_search":
-        return _do_semantic(args, ctx)
-    if name == "symbol_detail":
-        return _do_detail(args, ctx)
+        return await _do_semantic(args, ctx)
+    if name == "depends_on":
+        return _do_dependson(args, ctx)
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
     return (f"✗ Unknown tool '{name}'. Available: read_file, find_refs, find_callers, "
-            f"search_text, file_purpose, semantic_search, symbol_detail, create_file, "
+            f"search_text, file_purpose, semantic_search, depends_on, create_file, "
             f"replace_lines, finish.")
 
 

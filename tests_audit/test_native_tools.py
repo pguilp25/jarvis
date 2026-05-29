@@ -69,7 +69,7 @@ def _disp(name, args, ctx):
 def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     assert names == {"read_file", "find_refs", "find_callers", "search_text",
-                     "file_purpose", "semantic_search", "symbol_detail",
+                     "file_purpose", "semantic_search", "depends_on",
                      "create_file", "replace_lines", "finish"}
 
 
@@ -374,10 +374,10 @@ def test_semantic_search():
         _cleanup(root)
 
 
-def test_symbol_detail():
+def test_depends_on():
     ctx, rel, root = _mk_ctx()
     try:
-        out = _disp("symbol_detail", {"symbol": "Counter"}, ctx)
+        out = _disp("depends_on", {"symbol": "Counter"}, ctx)
         assert isinstance(out, str) and len(out) > 0
     finally:
         _cleanup(root)
@@ -396,7 +396,7 @@ def test_lookup_tools_empty_arg_no_crash():
     ctx, rel, root = _mk_ctx()
     try:
         for name in ("find_refs", "find_callers", "search_text",
-                     "file_purpose", "semantic_search", "symbol_detail"):
+                     "file_purpose", "semantic_search", "depends_on"):
             out = _disp(name, {}, ctx)
             assert isinstance(out, str) and out.startswith("✗"), (name, out)
     finally:

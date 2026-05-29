@@ -401,6 +401,28 @@ async def generate_maps(project_root: str, force: bool = False) -> dict:
     """
     step("Code Indexer")
 
+    # MAP-FREE BY DEFAULT (2026-05-29): the LLM-generated code maps were lossy
+    # summaries, slow to build, and failed silently — JARVIS now explores
+    # on-demand with precise, grounded tools instead (SEARCH/REFS/SEMANTIC/CODE/
+    # VIEW/DEPENDENCY). Return a lightweight pointer so the indexing pass, its
+    # latency, and its failure surface all disappear. SEMANTIC indexes the code
+    # itself (AST chunks, see tools/embeddings.py), so it needs no purpose map.
+    # Set JARVIS_BUILD_MAPS=1 to restore the old LLM indexing.
+    if not os.environ.get("JARVIS_BUILD_MAPS"):
+        name = Path(project_root).name
+        general = (
+            f"## {name}\n"
+            "## No pre-built code map — discover the code on demand with the\n"
+            "## precise tools (read before you plan/edit):\n"
+            "##   [SEARCH: pattern]        — ripgrep across the repo\n"
+            "##   [REFS: name]             — definitions / imports / usages of a symbol\n"
+            "##   [SEMANTIC: description]  — embedding search over the CODE → file:line matches\n"
+            "##   [CODE: path]             — read a file (shows |appears N (#tag) dependency markers)\n"
+            "##   [VIEW: path start end]   — read a line range\n"
+            "##   [DEPENDENCY: #tag]       — exact callers/dependents of a symbol\n"
+        )
+        return {"general": general, "detailed": "", "purpose": ""}
+
     # Load all code
     all_code, file_hash = _load_all_code(project_root)
 

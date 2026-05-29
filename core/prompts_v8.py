@@ -198,21 +198,21 @@ is the most reliable way to break unrelated tests / breakage.
                                 Use BEFORE [CODE:] when you don't yet
                                 know what a file does. Example:
                                   [PURPOSE: core/dependency_lsp.py]
-    [SEMANTIC: query]           rank source files by docstring/comment
-                                overlap with a natural-language phrase.
-                                Use when you can describe a behavior
-                                but don't know the symbol name.
-                                NOT a substitute for [SEARCH:] when you
-                                already know the exact pattern. Example:
+    [SEMANTIC: query]           embedding search over the CODE itself
+                                (functions/classes) — returns the top
+                                matching file:line units. Use when you
+                                can describe a behavior but don't know
+                                the symbol name. NOT a substitute for
+                                [SEARCH:] when you know the exact pattern.
+                                Example:
                                   [SEMANTIC: where does retry decide
                                    whether to use the fallback model?]
-    [DETAIL: symbol]            deep dive on one named def/class:
-                                signature, full docstring, outgoing
-                                calls, and live caller list with one
-                                line of context each. Use when you have
-                                a symbol and want its full surface in
-                                one shot. Example:
-                                  [DETAIL: DependencyIndex.refresh]
+    [DEPENDSON: symbol]         what this symbol depends ON — the
+                                functions/classes it calls or uses, with
+                                their definition sites. The reverse of
+                                [DEPENDENCY:] (which gives what depends on
+                                it). Example:
+                                  [DEPENDSON: DependencyIndex.refresh]
                                 Dotted names target the inner symbol.
 
 ### Tool output formats — what you'll see

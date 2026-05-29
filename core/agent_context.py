@@ -63,12 +63,12 @@ WHY THIS MATTERS: Your plan/code will be READ by other AIs in later phases.
 If your plan is vague, the coder will guess wrong. If your code has subtle bugs,
 the reviewer might miss them. Be precise. Be explicit.
 
-YOUR TOOLS — use in this order, escalate only if you need more:
+YOUR TOOLS — each is a DISTINCT retrieval axis; use in this order, escalate only if you need more:
 - [REFS: name] — find all definitions, imports, usages of a name (fast, always works)
-- [DEPENDENCY: #tag] — type-resolved callers (LSP-precise, follows aliases)
-  (only if REFS missed sites due to import aliases or type indirection)
-- [DETAIL: section name] — organized code map for a feature
-- [PURPOSE: category] — all code snippets serving a specific purpose
+- [DEPENDENCY: #tag] — what depends ON this symbol: precise callers (LSP + AST, follows aliases). #tag comes from the |appears N (#tag) markers on a CODE/VIEW read.
+- [DEPENDSON: symbol] — the reverse: what this symbol depends on (the symbols it calls/uses)
+- [SEMANTIC: description] — embedding search over the CODE; returns the top matching file:line units (great when you don't know the symbol name)
+- [PURPOSE: path/to/file] — file outline: module docstring + each public symbol's signature/docstring (no bodies)
 - [CODE: path/to/file] — read actual source code (last resort)
 - [SEARCH: pattern] — ripgrep search across all files
 - [WEBSEARCH: query] — web search for API docs, libraries
