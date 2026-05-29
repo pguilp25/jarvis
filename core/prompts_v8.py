@@ -656,14 +656,18 @@ file exists, go find it — don't assume. Cheap lookups
 (`[SEARCH:]` / `[REFS:]` / `[CODE:]`) are far cheaper than a
 patch that fails review or ships a regression.
 
-    - TEST FILE (almost always exists for a bug fix). Even when
-      the task names no test, search for one:
-      `[SEARCH: def test_<feature>]`, the `[SEARCH: <ClassName>]`
-      under tests/, or `[SEARCH: <error message>]`. The function
-      you're fixing has a test that pins its exact contract. Read
-      it FULLY — every parametrization, every assertion, every
-      fixture — and make your plan cover ALL of them, not just the
-      case named in the task.
+    - TEST FILE (almost always exists for a bug fix — and if the task
+      describes a behavior, an error, or names a function, that's the
+      vibe: a test pins it. Go find it BEFORE you plan). Even when the
+      task names no test, search for one: `[SEARCH: def test_<feature>]`,
+      `[SEARCH: <ClassName>]` under tests/, or `[SEARCH: <error message>]`.
+      Read it FULLY — every parametrization, every assertion, every
+      fixture, AND every IMPORT. An import of a symbol that DOESN'T
+      EXIST YET (e.g. `from pkg.utils import new_helper`) is the test
+      handing you the EXACT interface to CREATE: that symbol, in that
+      module, with that name and signature, becomes a REQUIRED STEP —
+      not optional, not "maybe." Cover ALL the test's cases, not just
+      the one named in the task.
 
     - THE NEIGHBORS YOU MIGHT BREAK. A passing patch must not break
       OTHER tests. Ask: what existing tests exercise this function /
@@ -730,10 +734,12 @@ Classify the task before investigating. The shape drives everything.
                calls, a caller of the changed symbol, the test's own
                imports. Minimal ≠ fewest files; omitting a required
                file is a broken fix, not a small one.
-    ADD-EX     Add a feature to existing code. Build it fully; where
-               the feature opens a real chance to add value (an edge,
-               a helper, a test), take it. Respect existing
-               conventions; integrate, don't rewrite adjacent code.
+    ADD-EX     Add a feature to existing code. Build the REQUESTED
+               feature fully — its edges, the helper/test it needs.
+               "Fully" is bounded by the CONTRACT (what the user states,
+               what a test pins): don't invent adjacent capability nobody
+               asked for. Respect existing conventions; integrate, don't
+               rewrite adjacent code.
     REFACTOR   Surgical like FIX. The reorganization asked for
                is in scope; nothing else.
     (NEW is handled by PLAN_COT_NEW for greenfield projects.
@@ -1206,10 +1212,12 @@ Do all of this in ONE pass:
          those is PART of the fix, not extra scope. Dropping a file the change
          depends on is as wrong as adding an unrelated one. "Minimal" means no
          GRATUITOUS scope; it never means fewest files.
-       • ADD-EX / NEW (a feature): build it FULLY. Where the feature opens a
-         real chance to add value — an edge worth covering, a helper worth
-         extracting, a test worth writing — TAKE it. Under-building the feature
-         is the failure mode here.
+       • ADD-EX / NEW (a feature): build the REQUESTED feature FULLY — cover its
+         edges, extract the helper it needs, write its test. "Fully" is bounded
+         by the CONTRACT (what the user states, what a test pins) — don't invent
+         adjacent capability nobody asked for. Two opposite failures: under-
+         building the asked-for feature, AND gold-plating it into something the
+         test won't expect. Ground "fully" in the test, not in ambition.
      In every shape: drop wrong or ungrounded steps; pull the better parts of
      the other drafts; KEEP every file the change genuinely requires.
   3. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
@@ -1255,8 +1263,9 @@ style:
               code import/call it, or does the test? If yes it's
               required; keep it. A narrower-looking plan that omits
               a required file is broken, not minimal.
-    ADD-EX    Build the feature fully; seize real opportunities to
-              add value on its path. Strip only cross-cutting
+    ADD-EX    Build the REQUESTED feature fully (edges, helper, test);
+              "fully" is bounded by the contract/test — don't invent
+              adjacent capability nobody asked for. Strip cross-cutting
               refactors unrelated to the feature.
     REFACTOR  Surgical: the reorganization asked for, nothing else.
     NEW       Thorough greenfield; reject shortcuts that skip
@@ -1800,14 +1809,14 @@ YOUR TOOLS (native functions):
   • file_purpose(path) — a file's docstring + def signatures, no bodies (fast triage of where a change goes).
   • semantic_search(query) — find code by what it DOES when you don't know the symbol name.
   • create_file(path, content) — make a NEW file (refuses to clobber one that exists).
-  • replace_lines(path, start_line, end_line, new_content) — your EDIT. `new_content` lines are `INDENT|code` (copy the INDENT count from the read view; for a brand-new line, count the spaces it needs) — NO `LINENO:`. The result reports ✓applied / ✗rejected; a rejection shows the file's ACTUAL current line, so fix the range or content and retry — never repeat the identical call.
+  • replace_lines(path, start_line, end_line, new_content) — your EDIT. `new_content` lines are `INDENT|code` (copy the INDENT count from the read view; for a brand-new line, count the spaces it needs) — NO `LINENO:`. The result reports ✓applied / ✗rejected; a rejection shows the file's ACTUAL current line, so fix the range or content and retry — never repeat the identical call. INSERTING (adding a new method/function NEXT TO existing code) is where this goes wrong: replace_lines REPLACES the whole range, so if your range covers a neighbor's `def`/`class` header you DELETE it. To insert, re-emit any anchor line you're not removing VERBATIM in new_content (e.g. to add a method above `def foo(...):`, include `def foo(...):` again right after your new method). Replacing a `def foo(...):` line with new code orphans foo's body — it dangles under the wrong function and breaks at runtime, silently.
   • finish(summary) — call ONLY when the step is fully done AND you have verified it.
 
 HOW TO WORK:
   1. PLAN-ADHERENCE FIRST. Re-read the step and do EXACTLY what it says — no more, no less. If the step treats two cases DIFFERENTLY (e.g. "yield group A immediately, but COLLECT group B and yield it at the end"), your code MUST branch that way; a simpler shape that collapses the distinction is WRONG.
   2. LOOK BEFORE YOU LEAP. Unsure who uses a symbol or where code lives? Call a lookup tool (find_refs / find_callers / search_text / semantic_search) BEFORE editing — guessing causes rejects. Before changing a high-fanout symbol, find_callers it and either preserve its contract or fix the callers in this step.
   3. EDIT MINIMALLY. Touch only what THIS step requires. Match the file's existing style; copy the INDENT count from the read view — never type leading spaces.
-  4. VERIFY, THEN finish. After an edit applies, confirm the new code actually does what the step asks (re-read the changed region and trace one realistic input through it). Only then call finish(summary). An edit that "applied" can still be wrong."""
+  4. VERIFY, THEN finish. After an edit applies, re-read the WHOLE changed region and confirm: (a) the new code does what the step asks (trace one realistic input through it), and (b) you didn't delete or split an ADJACENT definition — every function/class near your edit must still have its header AND body contiguous and intact (a stray `return …`/body line with no matching `def` above it is the tell-tale of an orphaned method). Only then call finish(summary). An edit that "applied" can still be wrong."""
 
 
 # ════════════════════════════════════════════════════════════════════════
