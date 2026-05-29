@@ -105,3 +105,48 @@ def test_empty_arg_does_not_fire_bogus_query():
     # a real query still fires
     d = TagDetector("[tool use][SEARCH: def foo][/tool use]")
     assert any(x.tag_type == "SEARCH" and x.clean_arg == "def foo" for x in d.valid_tags())
+
+
+# ── CRITICAL #1: tool-executor exceptions reach the model, then clear ──────────
+
+def test_tool_exception_is_visible_then_ephemeral(monkeypatch):
+    """A tool that RAISES must surface a ✗ error in the NEXT round's prompt (so the
+    model is told, not handed a blank to hallucinate from) — and that error must be
+    GONE the round after (ephemeral, no bloat)."""
+    import asyncio, tempfile, os
+    import core.tool_call as TC
+    import tools.codebase as CB
+
+    root = tempfile.mkdtemp(prefix="toolerr_")
+    open(os.path.join(root, "real.py"), "w").write("def ok():\n    return 1\n")
+
+    # SEARCH executor raises; CODE works normally.
+    def _boom(*a, **k):
+        raise RuntimeError("ripgrep exploded")
+    monkeypatch.setattr(CB, "search_code", _boom)
+
+    prompts = []          # current_prompt seen by the model each round
+    responses = [
+        "[tool use]\n[SEARCH: needle]\n[/tool use]\n[STOP][CONFIRM_STOP]",  # R1: crash
+        "[tool use]\n[CODE: real.py]\n[/tool use]\n[STOP][CONFIRM_STOP]",   # R2: clean
+        "[PLAN DONE][CONFIRM_PLAN_DONE]",                                    # R3: end
+    ]
+    call_n = {"i": 0}
+
+    async def _fake_retry(model, prompt, **kw):
+        prompts.append(prompt)
+        i = call_n["i"]; call_n["i"] += 1
+        return responses[i] if i < len(responses) else "[PLAN DONE][CONFIRM_PLAN_DONE]"
+    monkeypatch.setattr(TC, "call_with_retry", _fake_retry)
+
+    asyncio.run(TC.call_with_tools("test/model", "[SYSTEM] do work", project_root=root,
+                                   max_rounds=4, enable_web_search=False))
+
+    # prompts[0] = R1 (initial, no error yet). prompts[1] = R2 (must show the SEARCH crash).
+    assert len(prompts) >= 2, f"only {len(prompts)} rounds ran"
+    assert "SEARCH" in prompts[1] and ("✗" in prompts[1] or "failed" in prompts[1]), \
+        "round-2 prompt did not surface the SEARCH executor crash (silent failure!)"
+    # prompts[2] = R3 — the crash error must be GONE (ephemeral, cleared next round).
+    if len(prompts) >= 3:
+        assert "ripgrep exploded" not in prompts[2], \
+            "the tool error persisted into a later round (not ephemeral / bloats context)"
