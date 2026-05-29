@@ -43,6 +43,7 @@ Public:
 from __future__ import annotations
 import asyncio
 import json
+import re
 
 from core.cli import status, warn
 
@@ -513,34 +514,66 @@ async def _dispatch(name: str, args: dict, ctx: dict):
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────
-async def _call_tools_with_retry(model_id, messages, tools, max_tokens):
-    """Call the model's tool API with a few retries on transient 429/5xx
-    (OR :free rate-limits). Raises if it can't get a response."""
+# gpt-oss-120b is hosted on multiple providers. We exhaust ALL of them (retrying
+# each on transient errors) BEFORE the workflow gives up and switches to a
+# DIFFERENT model — "try a different gpt endpoint before changing the model"
+# (user, 2026-05-29). OpenRouter first (the forced :free route, fast), then
+# NVIDIA NIM (no TPM cap, 128K window — the real alternate for big coder prompts).
+# Groq is excluded: its gpt-oss free tier throttles >8K-context to ~nothing and
+# our coder prompts are always >8K.
+_GPT_OSS_PROVIDERS = ("openrouter", "nvidia")
+_PERM = re.compile(r'HTTP\s*(?:400|401|403|404|410)\b', re.IGNORECASE)
+
+
+def _is_transient(e) -> bool:
+    """A transient error is worth retrying the SAME endpoint (rate-limit, gateway
+    5xx, network blip). A permanent one (4xx auth/not-found/bad-request) is not —
+    move to the next endpoint immediately. (user: 'retry the same ai when the
+    error is not permanent.')"""
+    s = str(e).lower(); tname = type(e).__name__.lower()
+    if _PERM.search(str(e)):
+        return False
+    return (
+        isinstance(e, asyncio.TimeoutError)
+        or any(c in s for c in ("429", "500", "502", "503", "504", "overloaded",
+                                "rate limit", "rate-limit", "timed out", "timeout",
+                                "connection", "temporarily", "capacity", "provider returned"))
+        or any(c in tname for c in ("timeout", "clienterror", "connector",
+                                    "serverdisconnected", "connectionreset"))
+    )
+
+
+async def _call_tools_with_retry(model_id, messages, tools, max_tokens,
+                                 per_provider_retries: int = 4):
+    """Call the model's native tool API, cycling its gpt-oss endpoints. For each
+    provider: retry the SAME endpoint on transient errors, skip to the next
+    provider on a permanent error. Only raises once EVERY provider is exhausted —
+    so the workflow switches to a different MODEL only after gpt-oss has had every
+    endpoint. Non-gpt-oss models keep the single-endpoint behavior."""
     from clients.nvidia import call_nvidia_tools
+    short = model_id.split('/')[-1]
+    providers = list(_GPT_OSS_PROVIDERS) if "gpt-oss" in short else [""]
     last = None
-    for attempt in range(4):
-        try:
-            return await call_nvidia_tools(model_id, messages, tools, max_tokens=max_tokens)
-        except Exception as e:
-            last = e
-            s = str(e).lower()
-            tname = type(e).__name__.lower()
-            # Treat gateway 5xx / 429 / overload AND network blips (timeouts,
-            # connection resets) as transient — a dropped socket should retry,
-            # not end the coder's step. (Audit #5/#6.)
-            transient = (
-                isinstance(e, asyncio.TimeoutError)
-                or any(c in s for c in ("429", "502", "503", "504", "overloaded",
-                                        "rate limit", "rate-limit", "timed out",
-                                        "timeout", "connection", "temporarily"))
-                or any(c in tname for c in ("timeout", "clienterror", "connector",
-                                            "serverdisconnected", "connectionreset"))
-            )
-            if not transient or attempt == 3:
-                raise
-            wait = 3 * (attempt + 1)
-            warn(f"  [native:{model_id.split('/')[-1]}] {str(e)[:80]} — retry {attempt+1}/3 in {wait}s")
-            await asyncio.sleep(wait)
+    for pi, provider in enumerate(providers):
+        for attempt in range(per_provider_retries):
+            try:
+                return await call_nvidia_tools(model_id, messages, tools,
+                                               max_tokens=max_tokens,
+                                               force_provider=provider)
+            except Exception as e:
+                last = e
+                where = f"{short}@{provider or 'auto'}"
+                if not _is_transient(e):
+                    warn(f"  [native:{where}] permanent ({str(e)[:70]}) — "
+                         + ("next endpoint" if pi < len(providers) - 1 else "out of endpoints"))
+                    break  # permanent on this endpoint → try the next provider
+                if attempt == per_provider_retries - 1:
+                    warn(f"  [native:{where}] transient, retries spent — "
+                         + ("next endpoint" if pi < len(providers) - 1 else "out of endpoints"))
+                    break
+                wait = 3 * (attempt + 1)
+                warn(f"  [native:{where}] {str(e)[:70]} — retry {attempt+1}/{per_provider_retries} in {wait}s")
+                await asyncio.sleep(wait)
     raise last
 
 
@@ -602,8 +635,8 @@ _VERIFY_NUDGE = (
 
 
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
-                                 ctx: dict, max_rounds: int = 16,
-                                 max_tokens: int = 8192,
+                                 ctx: dict, max_rounds: int = 40,
+                                 max_tokens: int = 32000,
                                  max_history_chars: int = 400_000) -> dict:
     """Run a structured tool-use coding loop. `ctx` carries the mutable state the
     tools act on: {file_contents, sandbox, project_root, viewed_versions,

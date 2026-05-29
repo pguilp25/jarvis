@@ -96,6 +96,23 @@ def _next_openrouter_key() -> str:
     return k
 
 
+def _route_provider(model_id: str, provider: str) -> "tuple[str, str, str] | None":
+    """Force a SPECIFIC provider's endpoint for `model_id` (used to cycle a model
+    like gpt-oss-120b across OpenRouter → NVIDIA NIM before the fallback chain
+    switches to a DIFFERENT model). Returns (url, key, slug) or None if that
+    provider can't serve it (no key / not mapped)."""
+    base = model_id.split("/", 1)[-1]
+    if provider == "openrouter":
+        k = _next_openrouter_key()
+        if k and base in OPENROUTER_MODELS:
+            return OPENROUTER_API_URL, k, OPENROUTER_MODELS[base]
+    elif provider == "nvidia":
+        k = os.environ.get("NVIDIA_API_KEY", "")
+        if k:
+            return NVIDIA_API_URL, k, NVIDIA_MODEL_IDS.get(model_id, base)
+    return None
+
+
 def _route(model_id: str) -> tuple[str, str, str]:
     """Pick endpoint, auth key, and provider-specific model slug.
 
@@ -244,6 +261,7 @@ async def call_nvidia_tools(
     temperature: float = 0.2,
     max_tokens: int = 8192,
     tool_choice: str = "auto",
+    force_provider: str = "",
 ) -> dict:
     """NATIVE tool-calling call (2026-05-27). Unlike call_nvidia (text in/out),
     this takes a full `messages` list + OpenAI `tools` schemas and returns the
@@ -255,7 +273,15 @@ async def call_nvidia_tools(
     the caller can retry / fall over (same error strings retry.py classifies)."""
     await nvidia_limiter.acquire()
     thinking(model_id)
-    url, key, api_model = _route(model_id)
+    if force_provider:
+        _forced = _route_provider(model_id, force_provider)
+        if _forced is None:
+            raise RuntimeError(
+                f"{model_id} not serviceable on provider '{force_provider}' "
+                f"(no key / not mapped)")
+        url, key, api_model = _forced
+    else:
+        url, key, api_model = _route(model_id)
     payload = {
         "model": api_model,
         "messages": messages,
