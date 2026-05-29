@@ -99,6 +99,8 @@ def test_loop_read_edit_finish():
                                  start_line=2, end_line=2,
                                  new_content='4|return "hi " + name')]),
             _msg(tool_calls=[_tc("3", "finish", summary="changed greeting")]),
+            # finish-with-edits triggers ONE self-check pass → finish again
+            _msg(tool_calls=[_tc("3b", "finish", summary="verified")]),
         ]
         res, model = _run(script, ctx)
         assert res["done"] is True
@@ -122,6 +124,7 @@ def test_loop_edit_before_read_recovers():
                                  start_line=2, end_line=2,
                                  new_content='4|return "hi " + name')]),
             _msg(tool_calls=[_tc("4", "finish")]),
+            _msg(tool_calls=[_tc("4b", "finish")]),   # self-check pass → finish again
         ]
         res, model = _run(script, ctx)
         assert res["done"] is True
@@ -289,6 +292,38 @@ def test_loop_breaker_escalates_repeated_failing_edit():
         flat = [m for conv in model.seen_messages for m in conv]
         tool_results = [m["content"] for m in flat if m.get("role") == "tool"]
         assert any("EXACT" in r and "rejected" in r for r in tool_results), tool_results
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_verify_nudge_fires_once_before_finish():
+    # coder edits then finishes → must be nudged for ONE self-check pass before
+    # the finish is accepted, then finish again is honored.
+    ctx, rel, root = _mk_ctx()
+    try:
+        ctx["viewed_versions"][rel] = ctx["file_contents"][rel]
+        edit = _tc("e", "replace_lines", path=rel, start_line=2, end_line=2,
+                   new_content='4|return "hi " + name')
+        script = [_msg(tool_calls=[edit]),
+                  _msg(tool_calls=[_tc("f1", "finish")]),   # 1st finish → nudged
+                  _msg(tool_calls=[_tc("f2", "finish")])]   # 2nd finish → accepted
+        res, model = _run(script, ctx)
+        assert res["done"] is True
+        assert model.calls == 3   # the nudge forced the extra round
+        flat = [m for conv in model.seen_messages for m in conv]
+        assert any("SELF-CHECK before you finish" in str(m.get("content"))
+                   for m in flat if m.get("role") == "user")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_verify_nudge_skipped_when_no_edits():
+    # finishing with ZERO edits must NOT be nudged (nothing to self-check).
+    ctx, rel, root = _mk_ctx()
+    try:
+        res, model = _run([_msg(tool_calls=[_tc("f", "finish")])], ctx)
+        assert res["done"] is True
+        assert model.calls == 1   # no extra round
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

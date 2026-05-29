@@ -466,6 +466,28 @@ def _trim_history(messages: list, max_chars: int, model_id: str) -> list:
     return head + [m for g in groups for m in g]
 
 
+# Forced self-check before the native coder is allowed to finish. The native
+# coder repeatedly got the APPROACH and FILE right but botched a DETAIL and then
+# exited without ever re-checking (django-14053: correct dict-collect idea, wrong
+# yield ORDER → failed; matplotlib: used self._mapping before __init__ set it).
+# The text coder has a SCENARIO TRACE self-check; the native path skipped it.
+# This injects one trace pass before finish. Fired AT MOST once per step.
+_VERIFY_NUDGE = (
+    "⚠ SELF-CHECK before you finish — you edited: {files}.\n"
+    "Re-read your edited code (read_file) and trace the step's requirement (the "
+    "failing scenario / expected behaviour) through it, line by line. Check the "
+    "details that are easy to get wrong:\n"
+    "  • execution ORDER — does each statement run when it should? (e.g. yield/"
+    "return placement, a pass that overwrites an earlier one)\n"
+    "  • a name used BEFORE it's assigned (e.g. an attribute that __init__ would "
+    "set but isn't set on this path)\n"
+    "  • off-by-one / wrong boundary / wrong comparison\n"
+    "  • the exact TYPE or shape returned, and every case the requirement names\n"
+    "If you find a CONCRETE problem, fix it with replace_lines now. If the code is "
+    "correct as written, call finish — do NOT change it just to change something."
+)
+
+
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 16,
                                  max_tokens: int = 8192,
@@ -484,6 +506,12 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     reason = "budget-exhausted"
     rnd = 0
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
+    _verify_nudged = False    # one forced self-check before finishing (per step)
+
+    def _verify_nudge_msg():
+        return {"role": "user",
+                "content": _VERIFY_NUDGE.format(
+                    files=", ".join(sorted(ctx.get("files_changed", set()))) or "(none)")}
     for rnd in range(1, max_rounds + 1):
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
@@ -506,6 +534,14 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         tcs = msg.get("tool_calls") or []
         if not tcs:
             final = msg.get("content") or ""
+            # Stopped WITH edits but never verified → force one self-check pass
+            # before accepting the stop (catches the detail-level bugs).
+            if ctx.get("files_changed") and not _verify_nudged:
+                _verify_nudged = True
+                messages.append(_verify_nudge_msg())
+                status(f"  [native:{short}] round {rnd}: stopped with edits — "
+                       f"one self-check pass before finishing")
+                continue
             # An empty assistant turn (no tool calls, no content) is a STALL, not
             # a finish — distinguish so the workflow can tell "model did nothing"
             # from a deliberate stop. (Audit #11/#45.)
@@ -563,6 +599,16 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
         if done:
+            # Force ONE self-check pass before accepting finish, if the coder
+            # made edits and hasn't verified yet. It may fix a detail bug, or
+            # re-finish unchanged. (The native analog of the text SCENARIO TRACE.)
+            if ctx.get("files_changed") and not _verify_nudged:
+                _verify_nudged = True
+                done = False
+                messages.append(_verify_nudge_msg())
+                status(f"  [native:{short}] round {rnd}: finish requested — "
+                       f"one self-check pass first")
+                continue
             break
     files = sorted(ctx.get("files_changed", set()))
     # Make a step that produced NOTHING visible (audit #44/#48): a clean finish
