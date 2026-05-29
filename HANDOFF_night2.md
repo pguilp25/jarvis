@@ -158,12 +158,34 @@ touches the healthy django/matplotlib path. Prompt leads with the POSITIVE
 directive after observing the glm-5.1 fallback RUMINATE on "do NOT use tools"
 instead of writing.
 
-HONEST VALIDATION: the forced-commit fired + gated correctly, but did NOT rescue
-pylint-4551 — mistral/large was rate-limited so the call fell to glm-5.1, which
-can't one-shot this hard instance (it looped on the meta-instruction). So ckpt-34
-is a SOUND, GENERAL, gated robustness fix (helps when the model just needs a commit
-nudge and mistral/large is up) — NOT a proven pylint win. pylint-4551 needs a
-stronger planner model, not more prompt surgery.
+⚠ ckpt-34's "capability ceiling" read was WRONG — see ckpt 35 below (the user
+doubted it; they were right).
+
+## ckpt 35 — pylint-4551 PLAN FIXED (glm-5.1 was capable all along)
+The ckpt-34 forced-commit fell to glm-5.1 (mistral/large rate-limited) and produced
+a 201-char non-plan — I wrongly called it a model-capability ceiling. Reading the
+RAW log overturned that: glm-5.1 had ALREADY reasoned out the CORRECT fix
+(inspector.py / link_attribute / astroid `arg.annotation`) but burned its ENTIRE
+16K-token budget DELIBERATING "may I use tools or not? let me re-read the
+instructions…" and got truncated right before writing the plan. ROOT CAUSE: ckpt-34
+appended "do NOT request files" onto the tool-USING merger prompt — a
+self-contradiction the model couldn't resolve. Plus max_rounds=1 + 16K tokens left
+no room.
+
+FIX (ckpt 35): the forced-commit is now a RAW `call_with_retry` (NO tool scaffold
+to agonize over), given ONLY the task + the candidate plans + a 32K-token budget,
+asked to synthesize. Strip <think> so the coder gets prose.
+VALIDATED via PLAN_ONLY (still glm-5.1): pylint-4551 now yields a STRUCTURED
+4,286-char plan, 2 STEPs, scoping inspector.py + diagrams.py + **utils.py**
+(surfaced for the first time), with a `_resolve_annotation` helper over astroid
+Name/Attribute/Subscript/Const nodes — the correct direction. vs the old 978-char
+0-STEP preamble. Gated on the unusable test → never touches healthy plans.
+
+LESSON (general, important): when a "weak" model fails, SUSPECT THE HARNESS FIRST —
+prompt contradiction, token starvation, round budget — before concluding the model
+is incapable. glm-5.1 is strong; we were starving/contradicting it. This likely
+applies to other "the model couldn't do X" calls in the pipeline — audit them for
+contradictory instructions appended onto role prompts + tight token/round budgets.
 
 RANKED NEXT LEVERS (post-ckpt-34):
 1. django merger plan STRUCTURE (collect-all vs collect-adjustable) — coder-isolation
