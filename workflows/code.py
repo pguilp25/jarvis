@@ -8953,6 +8953,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # discovery never depends on a model typing the path. (Covers test_*/
         # *_test/unittest_*/conftest and anything under a tests|test dir.)
         _disk_tests: list = []
+        _disk_files: list = []   # ALL .py — the resolution pool for imports
         try:
             import os as _os
             _SKIP = {".git", ".jarvis_sandbox", "venv", ".venv", "node_modules",
@@ -8964,14 +8965,20 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 for _f in _fs:
                     if not _f.endswith(".py"):
                         continue
+                    _relpath = (_os.path.join(_rel, _f).lstrip("./") if _rel != "." else _f)
+                    _disk_files.append(_relpath)
                     bn = _f.lower()
                     if (_in_testdir or bn.startswith(("test_", "unittest_"))
                             or bn.endswith("_test.py") or bn == "conftest.py"):
-                        _disk_tests.append(_os.path.join(_rel, _f).lstrip("./")
-                                           if _rel != "." else _f)
+                        _disk_tests.append(_relpath)
         except Exception:
             pass
         _test_pool = sorted(set(_proj_files) | set(_disk_tests))
+        # Module resolution must hit the REAL filesystem, not the prose-scraped
+        # _proj_files — else a module a test imports but no model mentioned (e.g.
+        # pylint/pyreverse/utils.py) can't be resolved, so its missing-symbol
+        # contract is never detected. (The ckpt-53 miss: utils.py absent here.)
+        _resolve_pool = sorted(set(_proj_files) | set(_disk_files))
         _scope = _extract_files_from_plan(best_plan, _proj_files)
         _scope_set = set(_scope)
         # Sibling test/dependency signals only count when they live in the SAME
@@ -9020,7 +9027,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 # (the exact pylint-4551 failure: utils.get_annotation/infer_node/
                 # get_annotation_label imported by the test, absent in utils.py).
                 for _mod, _syms in imported_symbols(_src).items():
-                    _mf = modules_to_files([_mod], _proj_files)
+                    _mf = modules_to_files([_mod], _resolve_pool)
                     if not _mf:
                         continue   # 3rd-party / stdlib — not ours to create
                     _modfile = _mf[0]
