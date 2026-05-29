@@ -388,9 +388,19 @@ class TagDetector:
             k = j
             while k < n and self.text[k].isalpha():
                 k += 1
-            name = self.text[j:k].upper()
+            orig_name = self.text[j:k]
+            name = orig_name.upper()
+            # Collect: known tags, common wrong-habit names (READ/GREP), AND any
+            # ALL-CAPS `[NAME:` the model wrote — an arbitrary unknown/misspelled
+            # tool (VEIW, SERACH, FOO). _classify surfaces the last group as
+            # 'unknown-tag-type' (with a "did you mean" hint) ONLY inside a
+            # [tool use] block, so a garbled tool call is never silently dropped
+            # (else the model sees no result and hallucinates one) while prose
+            # brackets outside tool-use are left alone.
+            _looks_like_tool = orig_name.isupper() and 2 <= len(orig_name) <= 16
             if not name or (name not in known_types_upper
-                            and name not in COMMON_WRONG_TOOLS):
+                            and name not in COMMON_WRONG_TOOLS
+                            and not _looks_like_tool):
                 i = br + 1
                 continue
             # require ':'
@@ -428,11 +438,21 @@ class TagDetector:
         mask = self._mask_reason_at(t.start)
         if mask is not None:
             return f"masked-by-{mask}"
-        # 2b. Unknown tool name (e.g. a habit name like READ/GREP). Reject
-        # regardless of placement so it surfaces with a corrective hint
-        # rather than firing or vanishing.
+        # 2b. Unknown tool name. A common WRONG-habit name (READ/GREP) surfaces
+        # regardless of placement (it's a recognisable mistake). An ARBITRARY
+        # unknown (a misspelling like VEIW, or a prose bracket like [NOTE:]) is
+        # surfaced as 'unknown-tag-type' ONLY when it's inside a [tool use] block
+        # (or there are no tool-use blocks at all) — so the model is told it wrote
+        # a bad tool call, but prose brackets outside tool-use aren't flagged.
         if t.tag_type not in KNOWN_TAG_TYPES:
-            return "unknown-tag-type"
+            if t.tag_type in COMMON_WRONG_TOOLS:
+                return "unknown-tag-type"
+            if (not any_tool_use) or self._in_tool_use(t.start):
+                return "unknown-tag-type"
+            # An arbitrary ALL-CAPS bracket OUTSIDE [tool use] is almost always
+            # prose (e.g. "[NOTE: …]"), not a tool attempt — use a non-surfaced
+            # reason so it isn't reported as a dropped/malformed call.
+            return "unknown-outside-tool-use"
         # 3. Tool-use enforcement
         if any_tool_use:
             if not self._in_tool_use(t.start):

@@ -17,7 +17,10 @@ from core.cli import status
 
 # ─── Knowledge Base ───────────────────────────────────────────────────────
 
-KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
+# The .md topic files live directly in this package dir (knowledge/). The old
+# `… / "knowledge"` pointed at a nonexistent knowledge/knowledge/, so the KB never
+# loaded and every [KNOWLEDGE:] lookup wrongly reported an empty base.
+KNOWLEDGE_DIR = Path(__file__).parent
 
 # topic_id → {name, keywords, content}
 _knowledge: dict[str, dict] = {}
@@ -127,7 +130,11 @@ def get_knowledge(topic: str) -> str:
                 return f"=== KNOWLEDGE: {data['name']} ===\n{data['content']}"
 
     available = list_knowledge()
-    return f"(no knowledge matching '{topic}')\nAvailable: {', '.join(available)}"
+    if not available:
+        return ("(no stored knowledge base for this project — proceed with "
+                "[SEARCH]/[CODE]/[REFS] instead of [KNOWLEDGE:])")
+    return (f"(no knowledge matching '{topic}'). Available topics: "
+            f"{', '.join(available)}")
 
 
 def get_auto_inject(task: str) -> str:

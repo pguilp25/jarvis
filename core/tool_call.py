@@ -2899,6 +2899,14 @@ async def call_with_tools(
     # set of tag-keys requested per round.
     _last_round_keys: set[str] = set()
     _stall_rounds: int = 0
+    # EPHEMERAL tool-error channel: tool-executor EXCEPTIONS this round, keyed by
+    # tag-key. Rendered into the NEXT round's prompt (so the model is told WHAT
+    # failed + WHY, instead of seeing a blank and hallucinating), then cleared at
+    # the top of the round AFTER — so errors never accumulate / bloat the context.
+    # _crash_counts persists across rounds so repeated identical crashes trip the
+    # stall guard (the except path used to be invisible to it).
+    _tool_errors: dict[str, str] = {}
+    _crash_counts: dict[str, int] = {}
 
     # ── Context manifest — tracks what this model has actually received ──────
     # {key: {"round": int, "tag_type": str, "arg": str}}
@@ -3005,6 +3013,10 @@ async def call_with_tools(
     _empty_streak = 0
     _dead_tool_nudges = 0   # bounded rescues for unrecognized/disabled tool calls
     for round_num in range(1, max_rounds + 1):
+        # Ephemeral: last round's tool-error block was already rendered into the
+        # prompt this round's model is responding to; clear it so it shows ONCE
+        # and never bloats subsequent rounds. (_crash_counts persists for stall.)
+        _tool_errors.clear()
         # ── Dump the exact prompt sent to this model this round ──────────
         # Diagnostic only — writes `{session_dir}/prompts/{model}__{label}__R{N}.md`
         # so a debugger can read EXACTLY what the model saw for any round.
@@ -4209,14 +4221,22 @@ async def call_with_tools(
                         result = await result
                 except Exception as e:
                     # A tool executor blowing up must degrade to a VISIBLE error
-                    # in the round output, never abort the whole run (stability
-                    # audit #5). The model sees it and can try another approach.
-                    # Not stored, so a transient failure can be retried next round
-                    # (the stall detector guards against endless repeats).
+                    # the model actually SEES next round, never abort the run
+                    # (stability audit #5) and never vanish silently (tool-robustness
+                    # audit: the returned string used to land only in the dead
+                    # `round_output`, so the model saw a blank and hallucinated).
+                    # Record it in the EPHEMERAL `_tool_errors` channel (rendered
+                    # into next round's prompt, cleared the round after — see 5400)
+                    # and count it so repeated identical crashes trip the stall guard.
+                    # NOT _store'd, so a transient failure is retryable.
+                    _msg = (f"✗ {tag_type}: {clean_tag} failed — {str(e)[:160]}. "
+                            f"This is a runtime error, not your data — try a different "
+                            f"lookup, a narrower input, or proceed with what you have.")
                     warn(f"  [{tag_type}: {clean_tag[:60]}] tool error: {str(e)[:120]}")
-                    return (f"\n✗ {tag_type}: {clean_tag} failed — {str(e)[:160]}. "
-                            f"Try a different lookup, a narrower input, or proceed "
-                            f"with what you have.\n")
+                    _tool_errors[key] = _msg
+                    _crash_counts[key] = _crash_counts.get(key, 0) + 1
+                    return "\n" + _msg + "\n"
+                _crash_counts.pop(key, None)   # success clears a prior transient crash
                 _store(tag_type, tag, result)
                 return result
 
@@ -4335,6 +4355,12 @@ async def call_with_tools(
         else:
             _stall_rounds = 0
         _last_round_keys = round_keys
+
+        # A tool-executor that raises on the SAME key twice is its own stall — the
+        # triggers above key on cached/repeated SUCCESSFUL lookups and miss the
+        # exception path. Force a stall so the loop breaks instead of re-crashing.
+        if any(c >= 2 for c in _crash_counts.values()):
+            _stall_rounds = max(_stall_rounds, 2)
 
         # ── Per-round diagnostic log to workflow.log ─────────────────────
         # One line per (model, round). Captures what the model wrote,
@@ -5148,6 +5174,17 @@ async def call_with_tools(
                     return "expects a #hex tag from a `|appears N (#tag)` annotation, e.g. [DEPENDENCY: #3df] — not a name. Use [REFS: name] to find usages."
                 if ttu in ("SEARCH", "SEMANTIC"):
                     return f"empty/invalid query. Use [{ttu}: your query here]."
+                # Genuinely-unknown tool name (a misspelling like VEIW/SERACH, or a
+                # tool that doesn't exist) — tell the model so it KNOWS it wrote the
+                # call wrong (not that the tool is broken), and point at the right one.
+                from core.tool_detector import KNOWN_TAG_TYPES as _KTT
+                if ttu not in _KTT:
+                    import difflib
+                    _near = difflib.get_close_matches(ttu, list(_KTT), n=1, cutoff=0.6)
+                    if _near:
+                        return f"no such tool [{tt}] — did you mean [{_near[0]}: {arg or '...'}]?"
+                    return ("no such tool [" + tt + "]. Real tools: "
+                            + ", ".join(f"[{x}:]" for x in _KTT) + ".")
                 return "malformed — check the tool syntax in the TOOL TABLE above."
             _bad_lines = [f"  ✗ [{tt}: {arg}] — {_bad_hint(tt, arg)}" for tt, arg, _ in bad_tags]
             bad_block = (
@@ -5161,6 +5198,23 @@ async def call_with_tools(
             )
         else:
             bad_block = ""
+
+        # ── Build the EPHEMERAL "tool errors this round" block ────────────
+        # Tool-executor exceptions (recorded in _tool_errors by _locked_lookup)
+        # MUST reach the model — otherwise it sees a blank result and hallucinates.
+        # Shown this round only; cleared at the top of the next (no bloat).
+        if _tool_errors:
+            _tool_errors_block = (
+                "══════════════════════════════════════════════════════════════════════\n"
+                "[TOOL ERRORS THIS ROUND] — these calls FAILED and returned NO result\n"
+                "══════════════════════════════════════════════════════════════════════\n"
+                + "\n".join(_tool_errors.values())
+                + "\nThese are runtime failures, NOT your data. Do NOT assume a result "
+                  "for them — fix the cause, use a different tool, or proceed with what "
+                  "you already have.\n\n"
+            )
+        else:
+            _tool_errors_block = ""
 
         # ── Build the "edit application results" block ────────────────
         # The dominant cause of multi-round edit loops is the model
@@ -5399,7 +5453,7 @@ async def call_with_tools(
             )
         current_prompt = f"""{prompt}
 
-{unterminated_block}{_budget_drop_block}{dropped_block}{bad_block}{edit_results_block}══════════════════════════════════════════════════════════════════════
+{unterminated_block}{_budget_drop_block}{dropped_block}{bad_block}{_tool_errors_block}{edit_results_block}══════════════════════════════════════════════════════════════════════
 [YOUR TOOL INDEX] — every tool call you've made so far
 ══════════════════════════════════════════════════════════════════════
 {manifest_str}
