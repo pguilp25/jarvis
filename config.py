@@ -215,9 +215,13 @@ NVIDIA_FALLBACKS = {
         "nvidia/minimax-m2.5", "mistral/codestral",
     ),
     "nvidia/gpt-oss-120b": (
-        # coder primary routes OR :free (see OPENROUTER_FORCED); when OR 429s,
-        # fall to the proven coder glm-5.1 (NIM) + reliable codestral, then weaker.
-        "nvidia/glm-5.1", "mistral/codestral", "nvidia/minimax-m2.5", "zai/glm-4.7-flash",
+        # Coder flow (user-chosen 2026-05-29): gpt-oss (native, multi-endpoint
+        # OR→NIM) FIRST, then the TEXT CODER CHAIN — qwen3-coder → mistral/large
+        # → glm-5.1. mistral/large (flagship, 128K, no 8K throttle) sits BEFORE
+        # glm-5.1. (The native loop hands off to qwen3-coder in code; this chain
+        # is the same order for any text-path call of gpt-oss.)
+        "nvidia/qwen3-coder", "mistral/large", "nvidia/glm-5.1",
+        "mistral/codestral", "zai/glm-4.7-flash",
     ),
 
     # ── reliable-provider primaries' onward chains ──
