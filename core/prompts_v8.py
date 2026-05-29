@@ -1578,7 +1578,7 @@ shipping.
 
             === REVISE EDIT: foo.py ===
             [edit:1]
-            42:def parse_header(line):
+            42:0|def parse_header(line):
             +4|if line is None:
             44:8|return None
             [/edit]
@@ -1898,47 +1898,18 @@ If you see any of these in the diff, fix them:
 
 ═══ Anti-orphan rule when re-editing the coder's range ═══
 
-When your edit overlaps a range the coder already modified, the
-risk is structural corruption — duplicated blocks, orphaned
-bodies, mis-indented logic. To avoid it:
+Re-editing a range the coder just touched risks structural corruption —
+duplicated/orphaned blocks, mis-indented logic (this has broken whole files in
+production). So:
 
-  1. `[CODE:]` the file THIS round. The file is in its
-     post-coder state; don't work from a pre-coder snapshot.
-
-  2. Your kept-line anchors must include enough enclosing structural
-     context that the replacement stays sound. When you edit a line
-     that is the BODY of a block (a `for`/`if`/`try`/`with`/`def`...),
-     make sure the OWNING header line is one of your kept-line anchors above
-     — the `[edit]` "2 unchanged lines above" rule usually covers it, but
-     for a deeply-nested body, extend the top anchor UP to the header
-     that owns the block (stop at the enclosing `def`/`class` or column 0).
-     This keeps the edited body parented to its loop/branch and avoids
-     orphaning it.
-
-     For an if/elif/else chain, anchor back to the opening `if` (the
-     elif/else are bound to it). If a body is too long to bracket with a
-     small window, make a smaller, more local edit, or `[REVERT FILE:
-     path]` and redo from clean state.
-
-  3. After `[STOP]` and the runtime's report comes back, `[CODE:]`
-     the post-edit file and verify the structure:
-
-     - No orphan blocks (a body line with no header at the right
-       indent above it).
-     - No duplicate logic (two `if X:` blocks at the same indent
-       doing the same thing).
-     - No dangling indent (a block at i12 whose enclosing
-       function is at i0 with a missing `def`).
-     - The file still parses (no IndentationError /
-       SyntaxError).
-
-  4. If unsure → `[REVERT FILE: path]`. A reverted patch with
-     the coder's edit intact is strictly better than a corrupted
-     patch that fails import.
-
-Why: re-edits at the coder's anchor have, in production runs,
-duplicated loops and orphaned bodies — breaking import and
-failing every test in the file.
+  1. `[CODE:]` the file THIS round — work from the POST-coder state, not a stale view.
+  2. Anchor to the OWNING header: when you edit a block BODY, extend your top
+     kept-line anchor UP to the `def`/`class`/`if`/`for`/`try` that owns it (for an
+     if/elif/else chain, back to the opening `if`) so the body stays parented. If a
+     body is too long to bracket cleanly, make a smaller edit or `[REVERT FILE: path]`.
+  3. After the diff returns, `[CODE:]` again and confirm: no orphan block (a body
+     with no header above it), no duplicated logic, no dangling indent, file parses.
+  4. Unsure → `[REVERT FILE: path]`. The coder's edit intact beats a corrupted patch.
 
 
 ## How many rounds
