@@ -205,6 +205,15 @@ NVIDIA_FALLBACKS = {
     "nvidia/nemotron-super": (
         "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
     ),
+    # MERGER model (2026-05-28): mistral/large is now the merger primary — it's a
+    # flagship (128K ctx, no 8K throttle) that holds a structured plan better than
+    # glm-5.1 did under load (glm degraded to empty/salvaged plans on the heavier
+    # merger prompt → django/pylint regressions). glm-5.1 is the fallback, then
+    # the off-NIM coders. (User-chosen 2026-05-28.)
+    "mistral/large": (
+        "nvidia/glm-5.1", "zai/glm-4.7-flash", "nvidia/deepseek-v4-flash",
+        "nvidia/minimax-m2.5", "mistral/codestral",
+    ),
     "nvidia/gpt-oss-120b": (
         # coder primary routes OR :free (see OPENROUTER_FORCED); when OR 429s,
         # fall to the proven coder glm-5.1 (NIM) + reliable codestral, then weaker.

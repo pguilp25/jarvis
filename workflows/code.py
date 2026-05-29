@@ -8683,17 +8683,16 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             "Write tags, wait, then proceed.\n"
         )
 
-    # #1 UNION scope across drafts: hand the merger the FULL candidate file set
-    # (vs picking one draft's narrower view) so it accounts for every file the
-    # drafts found instead of silently dropping a file another draft identified.
-    from core.plan_scope import (union_file_scopes, majority_files,
-                                 format_candidate_block)
+    # Per-draft file votes feed the DETERMINISTIC post-plan scope backstop below
+    # (union/majority). We deliberately do NOT inject a scope block into the
+    # merger prompt: that (ckpt-22/23) made the prompt too heavy and degraded
+    # glm-5.1's structured-plan emission → empty plans → bad salvage path →
+    # django/pylint regressions. Keep the merger prompt LEAN; surface scope via
+    # the lightweight post-plan note instead.
+    from core.plan_scope import union_file_scopes, majority_files
     _per_draft = [_extract_files_from_plan(p.get("answer", ""), files or [])
                   for p in plans]
     _scope_union, _scope_votes = union_file_scopes(_per_draft)
-    _candidate_block = (format_candidate_block(_scope_union, _scope_votes, len(plans))
-                        or "(the drafts named no concrete files — derive scope "
-                           "from the task and the code you read.)")
 
     merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
         n_plans=len(plans),
@@ -8701,11 +8700,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         context=context[:12000],
         verify_block=verify_block,
         all_plans_text=all_plans_text[:30000],
-        candidate_files=_candidate_block,
         preloaded_research=preloaded_research,
     )
     merger_result = await _call_with_tools(
-        "nvidia/glm-5.1", merge_prompt, project_root,
+        "mistral/large", merge_prompt, project_root,
         detailed_map=detailed_map, purpose_map=purpose_map,
         research_cache=research_cache,
         log_label="merging plans (final)",

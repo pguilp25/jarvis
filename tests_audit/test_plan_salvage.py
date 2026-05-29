@@ -44,3 +44,12 @@ def test_strip_then_salvage_complementary():
     # but salvage recovers the real plan
     salvaged = _salvage_plan_from_think(txt)
     assert "STEP 1" in salvaged and "inspector.py" in salvaged
+
+
+def test_salvage_caps_overlong_think_dump():
+    # a 70K-char think dump must NOT come back as a giant "plan" (pylint-4551)
+    from core.tool_call import _salvage_plan_from_think, _SALVAGE_MAX_CHARS
+    huge = "<think>" + ("blah reasoning words " * 5000) + "</think>"
+    out = _salvage_plan_from_think(huge)
+    assert len(out) <= _SALVAGE_MAX_CHARS + 100   # capped (+ small note)
+    assert "tail kept" in out

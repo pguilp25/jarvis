@@ -1356,37 +1356,20 @@ emitting a thin/empty visible plan. That plan is GONE — discarded, and the
 run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
 
 Do all of this in ONE pass:
-  1. ESTABLISH THE FULL SCOPE — do NOT just pick one draft's view. Take the
-     UNION of the files/areas every input plan identified (you'll get a
-     CANDIDATE FILES list below). For a COMPLETE change you must account for EACH
-     candidate: cover it in a STEP, or state in one line why it needs NO change.
-     Never silently drop a file that ≥2 drafts agreed on — dropping a needed file
-     is the #1 cause of an incomplete change. Where the drafts disagree on scope,
-     the UNION is your starting point, not the smallest draft.
-  2. TRACE THE WORK TO COMPLETION — find EVERY place that must change for the
-     task to be done and the codebase to stay consistent, not just the first
-     obvious file. What "complete" means depends on the task:
-       • bug fix → the place the wrong/missing behaviour is PRODUCED (often one
-         hop UPSTREAM of where the symptom shows), plus callers whose contract
-         changes.
-       • feature → every layer it touches (data/model, logic, wiring/entry
-         point, and its tests).
-       • refactor / rename → the symbol AND every call site / importer.
-       • new module → every file it needs to actually run, plus tests.
-     If a test or spec pins the behaviour, the symbols and files it references
-     ARE in scope. A change that compiles but leaves a caller, layer, or call
-     site unupdated is incomplete.
-  3. IMPROVE, gated by TASK SHAPE — minimize the CHANGES, never the AWARENESS:
-       • FIX (a bug): include every file the fix genuinely needs (the producer,
-         its callers, a helper), but make each STEP the smallest correct change.
-         No features/refactors/"while we're here" steps — yet DO cover every file
-         required for the fix to be complete.
-       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs that
-         no draft covered; prefer the thorough path (layout, tests, docs).
-       • REFACTOR: surgical, but update EVERY call site the change touches.
+  1. PICK the strongest baseline plan (the one closest to a correct,
+     minimal fix — not the longest).
+  2. IMPROVE it — but the improvement is GATED BY TASK SHAPE (see below):
+       • FIX (a bug): keep it MINIMAL. "Improve" means make the EXISTING
+         fix correct and complete — right location/anchor, a guard the bug
+         actually needs, a missing step a draft dropped. DO NOT add extra
+         features, refactors, cleanups, or "while we're here" steps. If the
+         bug needs one line changed, the plan is one step. Adding scope to a
+         FIX is the #1 way these plans go wrong.
+       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs
+         that no draft covered; prefer the thorough path (layout, tests, docs).
      In every shape: drop wrong or ungrounded steps, and pull the better
      parts of the other plans where they beat the baseline.
-  4. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
+  3. WRITE one clean, structured final plan — `## TASK SHAPE: …` then
      `### STEP N: …` steps, each with a `FILES:` line and plain-English
      WHAT-TO-DO. No code bodies. At least one `### STEP`.
 
@@ -1424,12 +1407,10 @@ Read TASK SHAPE from the inputs. If the input plans disagree on
 the shape, decide and explain in [think]. The shape drives merge
 style:
 
-    FIX       Minimal CHANGES, full AWARENESS. Strip "thoughtful
-              improvements"/refactors, but KEEP every file the fix
-              genuinely needs (producer + callers + helper). If a
-              draft says "also touch X" because the contract there
-              changes, keep X; only drop X if it's an unrelated
-              cleanup, not a part of the fix.
+    FIX       Prefer the MINIMAL plan. Strip "thoughtful
+              improvements" from richer plans. If 3 plans say
+              "also fix X" and 1 says "X is unrelated", trust
+              the 1 unless evidence says otherwise.
     ADD-EX    Prefer the THOROUGH plan for the NEW path. Strip
               cross-cutting refactors that aren't part of the
               feature request.
@@ -1556,13 +1537,9 @@ TASK: {task}
 {verify_block}
 
 ══════════════════════════════════════════════════════════════════════
-[INPUT PLANS] — {n_plans} Layer-1 drafts to merge
+[INPUT PLANS] — {n_plans} Layer-2 plans to merge
 ══════════════════════════════════════════════════════════════════════
 {all_plans_text}
-
-══════════════════════════════════════════════════════════════════════
-{candidate_files}
-══════════════════════════════════════════════════════════════════════
 
 {preloaded_research}
 """

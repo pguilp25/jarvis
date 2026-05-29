@@ -336,3 +336,18 @@ def test_loop_reason_empty_turn():
         assert res["done"] is False
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_loop_hard_stops_on_repeated_identical_reject():
+    # same rejected edit 3x → hard-stop (fall over) instead of burning the budget
+    ctx, rel, root = _mk_ctx()
+    try:
+        bad = _tc("x", "replace_lines", path=rel, start_line=2, end_line=2,
+                  new_content='4|return "hi " + name')  # no prior read → rejected
+        script = [_msg(tool_calls=[bad]) for _ in range(10)]   # would spin forever
+        res, model = _run(script, ctx, max_rounds=16)
+        assert res["reason"] == "stuck-repeating"
+        assert res["rounds"] < 16   # stopped early, didn't burn the budget
+        assert model.calls <= 4
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

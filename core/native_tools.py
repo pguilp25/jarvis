@@ -507,6 +507,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     rnd = 0
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
     _verify_nudged = False    # one forced self-check before finishing (per step)
+    _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
 
     def _verify_nudge_msg():
         return {"role": "user",
@@ -587,17 +588,28 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             if isinstance(result_str, str) and result_str.startswith("✗"):
                 _sig = (name, raw_args)
                 _fail_counts[_sig] = _fail_counts.get(_sig, 0) + 1
-                if _fail_counts[_sig] >= 2:
+                if _fail_counts[_sig] == 2:
                     result_str += (f"\n⚠ You have now sent this EXACT {name or 'tool'} "
                                    f"call {_fail_counts[_sig]}× and it was rejected each "
                                    f"time. STOP repeating it — change the arguments, "
                                    f"read_file to get the CURRENT line numbers, try a "
                                    f"different approach, or call finish if the file is "
                                    f"already correct.")
+                # HARD STOP: a model that re-sends the SAME rejected call ≥3× is
+                # stuck (pylint-4551: 13 identical rejected edits burned the whole
+                # budget). Break out so the workflow falls over to another coder
+                # instead of spinning. (Strengthens the audit-#46 nag.)
+                if _fail_counts[_sig] >= 3:
+                    warn(f"  [native:{short}] same {name or 'tool'} call rejected "
+                         f"{_fail_counts[_sig]}× — stuck; stopping for fallover")
+                    _stuck = True
             else:
                 _fail_counts.pop((name, raw_args), None)   # success clears the streak
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
+        if _stuck:
+            reason = "stuck-repeating"
+            break
         if done:
             # Force ONE self-check pass before accepting finish, if the coder
             # made edits and hasn't verified yet. It may fix a detail bug, or

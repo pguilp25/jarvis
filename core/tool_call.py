@@ -167,6 +167,11 @@ def _strip_think(text: str) -> str:
     return _THINK_BLOCK.sub('', text)
 
 
+# A real plan is a few KB; a salvaged `<think>` dump beyond this is not a plan
+# and must never win plan-selection on length (pylint-4551: a 71,104-char think
+# blob became "the richest plan" and pointed at the wrong file).
+_SALVAGE_MAX_CHARS = 8000
+
 # Markers that signal "the plan starts here" inside otherwise-prose text.
 _PLAN_BODY_MARKER = re.compile(
     r'(===\s*PLAN\s*===|##\s*TASK\s*SHAPE|##\s*GOAL|###?\s*STEP\s*\d)',
@@ -194,7 +199,14 @@ def _salvage_plan_from_think(text: str) -> str:
     if not reasoning:
         return ""
     m = _PLAN_BODY_MARKER.search(reasoning)
-    return (reasoning[m.start():].strip() if m else reasoning)
+    out = reasoning[m.start():].strip() if m else reasoning
+    # CAP: a 70K think-dump is not a plan. Keep the TAIL (a model's conclusion
+    # sits at the end of its reasoning), so an over-long salvage can't win
+    # plan-selection on raw length nor flood the coder.
+    if len(out) > _SALVAGE_MAX_CHARS:
+        out = ("(salvaged from an over-long reasoning dump — tail kept)\n...\n"
+               + out[-_SALVAGE_MAX_CHARS:])
+    return out
 
 
 def _apply_plan_edits(current_plan: str, edit_body: str) -> tuple[str, list[str]]:
