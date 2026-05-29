@@ -8778,6 +8778,54 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     _merger_body = _actionable(best_plan)
     has_plan_block = "=== PLAN ===" in best_plan
     has_step_header = bool(re.search(r"###\s*STEP\s*\d+", best_plan, re.IGNORECASE))
+
+    # FORCED COMMIT (pylint-4551): on a hard instance the merger can burn ALL its
+    # tool rounds investigating and never emit the plan — its final round was
+    # "I need to understand … before I can merge. Let me investigate the key
+    # files. [tool use][PURPOSE: inspector.py][/tool use][STOP]" → max_rounds hit
+    # → output was a 978-char deferral. The drafts were equally thin, so the
+    # substance fallback below had nothing good to pick. Give the merger ONE
+    # forced, NO-TOOLS turn to commit the plan it kept deferring, BEFORE falling
+    # back. Gated on the same "unusable" test, so it only fires on that rare path.
+    if ((not has_plan_block and not has_step_header)
+            or len(_merger_body) < MIN_PLAN_CHARS):
+        try:
+            # Lead with the POSITIVE directive (write the plan), not the
+            # prohibition — a weak model (glm-5.1 fallback) burned its one round
+            # ruminating on "do NOT use tools" instead of writing. State the
+            # output shape first; mention tools only once, at the end.
+            _force_prompt = (
+                merge_prompt
+                + "\n\n## WRITE THE FINAL PLAN NOW\n"
+                "Using the analyses above, write the complete implementation plan "
+                "as:\n`=== PLAN ===`\n`### STEP 1` — <file path>: <exact change>\n"
+                "`### STEP 2` — …\n`=== END PLAN ===`\n"
+                "Name the exact file and concrete change in every STEP. Decide any "
+                "unclear detail yourself and state your choice — a concrete plan "
+                "is the goal. This is your last turn, so do not request files.")
+            _forced = await _call_with_tools(
+                "mistral/large", _force_prompt, project_root,
+                detailed_map=detailed_map, purpose_map=purpose_map,
+                research_cache=research_cache,
+                log_label="merging plans (forced commit)",
+                max_rounds=1, stop_on_tool_block=True,
+                cache_file_reads=True, read_only_role=True, allow_run=False)
+            _fb = _actionable(_forced.get("answer") or "")
+            _fb_ok = (("=== PLAN ===" in _fb)
+                      or bool(re.search(r"###\s*STEP\s*\d+", _fb, re.IGNORECASE)))
+            if _fb_ok and len(_fb) >= MIN_PLAN_CHARS and len(_fb) > len(_merger_body):
+                warn(f"  Forced-commit merger produced a structured plan "
+                     f"({len(_fb):,} chars) — using it.")
+                _wlog.phase_warn("merger forced-commit produced a structured plan",
+                                 chars=len(_fb))
+                best_plan = _forced["answer"]
+                _merger_body = _fb
+                has_plan_block = "=== PLAN ===" in best_plan
+                has_step_header = bool(
+                    re.search(r"###\s*STEP\s*\d+", best_plan, re.IGNORECASE))
+        except Exception as _e:
+            warn(f"  forced-commit merger call failed (continuing to fallback): {_e}")
+
     # Fall back when the merger gave us thinking-with-no-plan OR a structurally-
     # present but THIN stub (astropy-8872: a 174-char "### STEP" plan starved
     # the coder, which then reasoned in circles and emitted no [edit] at all).
