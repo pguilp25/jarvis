@@ -12534,6 +12534,27 @@ async def code_agent(state: AgentState) -> AgentState:
         status(f"Files to modify: {', '.join(files_to_modify) or '(new files)'}")
         status(f"Sharing {len(research_cache)} cached lookups with coders + reviewers")
 
+        # PLAN-ISOLATION (test harness): JARVIS_PLAN_ONLY=<dir> stops after planning
+        # and writes the plan + its extracted file-scope to <dir>/<proj>.planout, so
+        # planner/merger prompt changes can be iterated against the SCOPE metric
+        # fast (no coder). Returns without coding.
+        _plan_only_dir = os.environ.get("JARVIS_PLAN_ONLY", "")
+        if _plan_only_dir:
+            try:
+                os.makedirs(_plan_only_dir, exist_ok=True)
+                _po = os.path.join(_plan_only_dir,
+                                   os.path.basename(project_root.rstrip("/")) + ".planout")
+                open(_po, "w", encoding="utf-8").write(
+                    f"FILES_SCOPE: {', '.join(files_to_modify)}\n"
+                    f"PLAN_CHARS: {len(plan)}\n"
+                    f"{'='*60}\n{plan}\n")
+                success(f"PLAN-ONLY: wrote plan + scope -> {_po}")
+            except Exception as _e:
+                warn(f"  plan-only write failed: {_e}")
+            state["final_answer"] = "PLAN-ONLY mode — planning captured, coder skipped."
+            state["pending_sandbox"] = sandbox
+            return state
+
         # ── Phase 3: IMPLEMENT (parallel coders, shared research) ────────
         final_plan, sandbox = await phase_implement(
             task, plan, context, sandbox, project_root, files_to_modify, detailed_map,

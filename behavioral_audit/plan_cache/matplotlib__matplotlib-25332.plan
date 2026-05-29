@@ -1,0 +1,40 @@
+=== PLAN ===
+## TASK SHAPE: FIX — pickling a figure after align_labels() fails because cbook.Grouper stores weakref.ref in _mapping, which pickle cannot serialize.
+
+## GOAL
+Make matplotlib.cbook.Grouper picklable by adding __getstate__/__setstate__ that
+convert the weakref-keyed/valued _mapping to STRONG references on save and back to
+weakrefs on restore — round-tripping (pickle.dumps THEN pickle.loads) without error
+and preserving the grouping.
+
+## REQUIREMENTS
+- __getstate__: return a dict copy of the instance state where _mapping is rebuilt
+  with the referents dereferenced — keys k -> k(), values [v() for v in vs] — so no
+  weakref objects are pickled.
+- __setstate__: restore the instance dict, then rebuild _mapping by re-wrapping each
+  dereferenced object back into weakref.ref: weakref.ref(k) -> [weakref.ref(v) ...].
+- __setstate__ must NOT assume __init__ ran (it does not run during unpickling) — set
+  _mapping from the incoming state, do not call self._mapping before assigning it.
+- Edit ONLY the Grouper class in lib/matplotlib/cbook.py. Do not change anything else.
+
+## STEPS
+### STEP 1: Add __getstate__/__setstate__ to cbook.Grouper
+FILES: lib/matplotlib/cbook.py
+In class Grouper:
+- Add __getstate__ returning {**vars(self), "_mapping": {k(): [v() for v in vs] for
+  k, vs in self._mapping.items()}} (strong refs, no weakrefs).
+- Add __setstate__(state): vars(self).update(state); then
+  self._mapping = {weakref.ref(k): [*map(weakref.ref, vs)] for k, vs in
+  state["_mapping"].items()}.
+
+## EDGE CASES
+- A dead weakref during __getstate__: the gold ignores this (the mapping holds live
+  referents for an active figure); keep it simple — dereference directly.
+
+## VERIFICATION
+pickle.loads(pickle.dumps(fig)) succeeds after fig.align_labels()/align_ylabels(),
+and the unpickled figure renders equal to the original.
+
+## CONFIDENCE
+CORRECTNESS 9, PRECISION 9, RISK 2 — localized two-method addition to one class.
+=== END PLAN ===

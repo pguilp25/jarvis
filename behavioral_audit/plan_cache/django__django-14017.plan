@@ -1,0 +1,27 @@
+## GOAL
+`Q() & Exists(...)` raises TypeError because `Q._combine` only accepts another
+`Q`. Make `Q._combine` accept a conditional expression (e.g. `Exists`, which has
+`conditional = True`) by wrapping it in a `Q` instead of raising.
+
+## REQUIREMENTS
+R1: combining a `Q` with a conditional expression must not raise TypeError.
+
+### STEP 1: Accept conditional expressions in Q._combine
+SATISFIES: R1
+DEPENDS ON: (none)
+FILES: django/db/models/query_utils.py (modify)
+WHAT TO DO:
+  django/db/models/query_utils.py:
+    - ACTION 1 (in `Q._combine`, the `raise TypeError(other)` line that sits
+      inside the `if not isinstance(other, Q):` guard): KEEP the
+      `if not isinstance(other, Q):` line exactly as it is — do NOT delete or
+      re-add it. Change ONLY its body: replace the single `raise TypeError(other)`
+      line with a small if/else —
+        when `getattr(other, 'conditional', False)` is True → `other = Q(other)`
+        otherwise → `raise TypeError(other)`
+      The `if not isinstance(other, Q):` is at 8 spaces; the new `if`/`else`
+      inside it go at 12 spaces and their bodies at 16 spaces. Anchor your edit
+      on two real code lines (the `if not isinstance...` line above and the
+      blank-free `# If the other Q() is empty...` comment / `if not other:` line
+      below) — never anchor on a blank line.
+      REASON: lets a non-`Q` conditional expression (Exists) combine with a Q (R1).

@@ -1,0 +1,47 @@
+=== PLAN ===
+## TASK SHAPE: FIX — post_process yields each adjustable file once per pass (duplicates); it must yield each file EXACTLY once.
+
+## GOAL
+Make HashedFilesMixin.post_process in django/contrib/staticfiles/storage.py yield
+every original filename EXACTLY ONCE: non-adjustable files (and any Exception
+result) immediately during the first pass, and each adjustable file ONCE at the
+END after all substitution passes complete, with its final hashed name.
+
+## REQUIREMENTS
+- Non-adjustable files: yield immediately in the first pass, exactly as today.
+- A result whose `processed` value is an Exception: yield immediately too.
+- Adjustable files: do NOT yield during the passes. Collect them in a dict keyed
+  by name (a later pass overwrites an earlier one, so the final hashed name wins),
+  then yield each once AFTER the passes.
+- Preserve the existing "All / Max post-process passes exceeded" RuntimeError yield.
+- Do NOT change _post_process or any other method.
+
+## STEPS
+### STEP 1: Defer adjustable-file yields to the end of post_process
+FILES: django/contrib/staticfiles/storage.py
+In post_process (HashedFilesMixin), after `adjustable_paths` is built:
+- Add a dict (e.g. `processed_adjustable_paths`) to collect adjustable results
+  keyed by name.
+- FIRST pass loop over `self._post_process(...)`: if the name is NOT in
+  adjustable_paths OR `processed` is an Exception, `yield name, hashed_name,
+  processed` immediately (unchanged behaviour); otherwise store the tuple in the
+  dict keyed by name (do not yield).
+- The `max_post_process_passes` loop: do NOT yield; store/overwrite each result in
+  the dict keyed by name (later pass has the newer hashed_name). Keep the
+  `substitutions`/`break` logic exactly as is.
+- After the loop — after the existing `if substitutions: yield 'All', ...` and the
+  `self.hashed_files.update(hashed_files)` line — `yield from` the dict's values
+  once.
+
+## EDGE CASES
+- An adjustable file whose result is an Exception is still yielded (the Exception
+  check in pass 1 covers it).
+- Non-adjustable files keep their original yield order; adjustable files come last.
+
+## VERIFICATION
+The collectstatic `post_processed` list contains no duplicates (each file once).
+assertPostCondition (in-memory hashed_files == on-disk manifest) must hold.
+
+## CONFIDENCE
+CORRECTNESS 9, PRECISION 9, RISK 2 — localized single-method change.
+=== END PLAN ===
