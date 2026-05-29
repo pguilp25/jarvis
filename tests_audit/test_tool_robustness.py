@@ -189,3 +189,130 @@ def test_semantic_unavailable_says_do_not_retry():
     import tools.embeddings as E
     src = inspect.getsource(E)
     assert "Do NOT retry" in src and "[SEARCH:" in src
+
+
+# ── 2nd-pass audit: parser silent-drops (missing/spaced colon, ] in arg) ───────
+
+def test_missing_colon_tool_is_surfaced_not_dropped():
+    """`[SEARCH foo]` (no colon) must be flagged, not silently vanish."""
+    for bad in ("[tool use]\n[SEARCH foo]\n[/tool use]",
+                "[tool use]\n[CODE foo.py]\n[/tool use]"):
+        d = TagDetector(bad)
+        assert d.valid_tags() == [], f"fired despite missing colon: {bad}"
+        assert any(t.rejection_reason == "missing-colon" for t in d.all_tags), \
+            f"missing colon not surfaced: {bad}"
+
+
+def test_space_before_colon_is_accepted():
+    d = TagDetector("[tool use]\n[SEARCH : my query]\n[/tool use]")
+    assert any(t.tag_type == "SEARCH" and t.clean_arg == "my query"
+               for t in d.valid_tags())
+
+
+def test_bracket_in_search_arg_fires_one_balanced_query():
+    """A regex char-class `]` inside a SEARCH arg must NOT truncate the query
+    nor produce a duplicate truncated tag — exactly one full query fires."""
+    d = TagDetector('[tool use]\n[SEARCH: re.match(r"[0-9]+")]\n[/tool use]')
+    vt = [t for t in d.valid_tags() if t.tag_type == "SEARCH"]
+    assert len(vt) == 1, f"expected 1 query, got {[t.clean_arg for t in vt]}"
+    assert vt[0].clean_arg == 're.match(r"[0-9]+")'
+
+
+def test_prose_missing_colon_outside_tooluse_not_flagged():
+    d = TagDetector("I will [NOTE check the cache] then continue.")
+    assert not any(t.rejection_reason == "missing-colon" for t in d.all_tags)
+
+
+# ── 2nd-pass audit: KEEP/VIEW failure paths persist (not blank to the model) ───
+
+def test_view_empty_file_persists_message():
+    import asyncio, tempfile, os
+    import core.tool_call as TC
+    root = tempfile.mkdtemp(prefix="viewempty_")
+    os.makedirs(os.path.join(root, ".jarvis_sandbox"), exist_ok=True)
+    open(os.path.join(root, "empty.py"), "w").write("")
+    pl = {}
+    out = asyncio.run(TC._run_view(["empty.py 1-5"], root, pl))
+    assert "EMPTY" in out
+    # persisted under a key so the next round sees it (not a silent blank)
+    assert any("EMPTY" in v for v in pl.values()), "empty-file VIEW not persisted"
+
+
+def test_view_executor_crash_does_not_escape_loop(monkeypatch):
+    """A raise inside _run_view must be caught and surfaced, never crash the loop."""
+    import asyncio, tempfile, os
+    import core.tool_call as TC
+    root = tempfile.mkdtemp(prefix="viewboom_")
+    open(os.path.join(root, "real.py"), "w").write("x=1\n")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("view exploded")
+    monkeypatch.setattr(TC, "_run_view", _boom)
+
+    prompts = []
+    responses = ["[tool use]\n[VIEW: real.py 1-3]\n[/tool use]\n[STOP][CONFIRM_STOP]",
+                 "[PLAN DONE][CONFIRM_PLAN_DONE]"]
+    n = {"i": 0}
+    async def _fake_retry(model, prompt, **kw):
+        prompts.append(prompt)
+        i = n["i"]; n["i"] += 1
+        return responses[i] if i < len(responses) else "[PLAN DONE][CONFIRM_PLAN_DONE]"
+    monkeypatch.setattr(TC, "call_with_retry", _fake_retry)
+
+    # Must not raise.
+    asyncio.run(TC.call_with_tools("test/model", "[SYSTEM] do work", project_root=root,
+                                   max_rounds=4, enable_web_search=False))
+    assert len(prompts) >= 2, "loop crashed on the VIEW exception"
+    assert "VIEW" in prompts[1] and ("✗" in prompts[1] or "failed" in prompts[1])
+
+
+# ── 2nd-pass audit: native read_file / create_file arg validation ──────────────
+
+def test_native_read_one_bound_is_rejected():
+    import asyncio
+    from core.native_tools import _do_read
+    ctx = {"project_root": "/tmp", "file_contents": {}}
+    out = asyncio.run(_do_read({"path": "x.py", "start_line": 50}, ctx))
+    assert out.startswith("✗") and "BOTH" in out
+
+
+def test_native_create_empty_content_is_rejected():
+    import asyncio, inspect
+    from core.native_tools import _do_create
+    ctx = {"file_contents": {}, "sandbox": None}
+    res = _do_create({"path": "new.py", "content": "   "}, ctx)
+    out = asyncio.run(res) if inspect.iscoroutine(res) else res
+    assert out.startswith("✗") and "content" in out.lower()
+
+
+# ── 2nd-pass audit: edit_block CRLF + keep/del-same-line ───────────────────────
+
+def test_edit_block_crlf_stays_uniform():
+    from core.edit_block import apply_edit_block
+    src = "def f():\r\n    x = 1\r\n    return x\r\n"
+    new, _info, _w = apply_edit_block(src, "[edit]\n2:-     x = 1\n2:+     x = 10\n[/edit]")
+    assert new is not None and "\n" not in new.replace("\r\n", ""), "mixed line endings"
+
+
+def test_edit_block_keep_and_delete_same_line_clear_message():
+    from core.edit_block import apply_edit_block
+    new, info, _ = apply_edit_block("a=1\nx=1\nb=2\n",
+                                    "[edit]\n2: x=1\n2:- x=1\n2:+ x=10\n[/edit]")
+    assert new is None and ("KEPT and DELETED" in info or "listed twice" in info)
+    assert "out of order" not in info
+
+
+# ── 2nd-pass audit: embeddings poisoned-cache guard ────────────────────────────
+
+def test_embeddings_poisoned_build_detected():
+    from tools.embeddings import _build_wholly_failed
+    assert _build_wholly_failed([{"vec": [0] * 8}, {"vec": [0] * 8}])
+    assert not _build_wholly_failed([{"vec": [0] * 8}, {"vec": [1, 2, 3, 4, 5]}])
+    assert not _build_wholly_failed([])
+
+
+def test_embeddings_cosine_is_finite():
+    from tools.embeddings import cosine_similarity
+    import math
+    assert cosine_similarity([0, 0], [1, 1]) == 0.0
+    assert math.isfinite(cosine_similarity([1, 2, 3], [4, 5, 6]))

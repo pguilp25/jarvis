@@ -53,16 +53,27 @@ async def embed_texts(texts: list[str], input_type: str = "passage") -> list[lis
                 body = await resp.text()
                 raise RuntimeError(f"Embed API HTTP {resp.status}: {body[:300]}")
             data = await resp.json()
-    # data["data"] is a list of {"embedding": [...], "index": N}
-    ordered = sorted(data["data"], key=lambda x: x["index"])
-    return [item["embedding"] for item in ordered]
+    # data["data"] is a list of {"embedding": [...], "index": N}. A gateway can
+    # return HTTP 200 with an error/moderation envelope (no "data") — raise a
+    # clear RuntimeError instead of a bare KeyError so callers surface a useful
+    # message and the build path doesn't silently zero-fill (see D#2).
+    try:
+        ordered = sorted(data["data"], key=lambda x: x["index"])
+        return [item["embedding"] for item in ordered]
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(
+            f"Embed API returned a 200 with an unexpected shape "
+            f"({e}): {str(data)[:300]}")
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     dot  = sum(x * y for x, y in zip(a, b))
     na   = math.sqrt(sum(x * x for x in a))
     nb   = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
+    if not (na and nb):
+        return 0.0
+    sim = dot / (na * nb)
+    return sim if math.isfinite(sim) else 0.0
 
 
 # ─── Cache helpers ────────────────────────────────────────────────────────────
@@ -89,6 +100,22 @@ def save_embed_cache(maps_dir: Path, file_hash: str, chunks: list[dict]):
         json.dumps({"hash": file_hash, "chunks": chunks}),
         encoding="utf-8",
     )
+
+
+def _vec_is_zero(vec) -> bool:
+    """A failed-batch fill is an all-zero vector; treat first-5 zeros as zero."""
+    return (not vec) or all(v == 0 for v in vec[:5])
+
+
+def _build_wholly_failed(chunks: list[dict]) -> bool:
+    """True if every chunk got a zero vector — i.e. the embedding endpoint was
+    down for the WHOLE build. Persisting that poisons the cache: future calls
+    see a hash-matching cache and never rebuild, returning a misleading
+    "(no results)" forever. Detect it so callers can skip the save + report
+    unavailable instead."""
+    if not chunks:
+        return False
+    return all(_vec_is_zero(c.get("vec")) for c in chunks)
 
 
 # ─── Purpose-map chunker ─────────────────────────────────────────────────────
@@ -298,6 +325,9 @@ async def build_embeddings(
     for chunk, vec in zip(chunks, all_vecs):
         chunk["vec"] = vec
 
+    if _build_wholly_failed(chunks):
+        warn("    Embedding build wholly failed (endpoint down) — NOT caching poisoned index.")
+        return chunks  # caller detects all-zero and reports unavailable
     save_embed_cache(maps_dir, file_hash, chunks)
     return chunks
 
@@ -325,6 +355,9 @@ async def build_code_embeddings(
             all_vecs.extend([[0.0] * 4096] * len(batch_texts))
     for chunk, vec in zip(chunks, all_vecs):
         chunk["vec"] = vec
+    if _build_wholly_failed(chunks):
+        warn("    Code-embedding build wholly failed (endpoint down) — NOT caching poisoned index.")
+        return chunks  # caller detects all-zero and reports unavailable
     maps_dir.mkdir(parents=True, exist_ok=True)
     save_embed_cache(maps_dir, file_hash, chunks)
     return chunks
@@ -356,6 +389,16 @@ async def semantic_retrieve(
 
     if not chunks:
         return "(no code to search)"
+
+    # Poisoned-index guard (D#2): if EVERY chunk vector is zero, indexing never
+    # actually succeeded (endpoint was down during the build / a stale poisoned
+    # cache from an older outage). Don't masquerade as "searched, no matches" —
+    # tell the model the tool is unavailable and to use lexical tools instead.
+    if _build_wholly_failed(chunks):
+        warn("    Semantic index is all-zero (build never succeeded) — reporting unavailable.")
+        return ("✗ semantic search unavailable: the code index could not be built "
+                "(embedding endpoint unreachable). Do NOT retry it this run — use "
+                "[SEARCH: text], [REFS: symbol], or [PURPOSE: path] instead.")
 
     try:
         query_vecs = await embed_texts([query], input_type="query")

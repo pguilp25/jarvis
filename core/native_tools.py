@@ -189,6 +189,12 @@ async def _do_read(args: dict, ctx: dict) -> str:
     if not path:
         return "✗ read_file needs a path."
     s = args.get("start_line"); e = args.get("end_line")
+    if (s is None) != (e is None):
+        # Exactly one bound given → the model asked for a region but the bound it
+        # dropped would be silently ignored (whole file returned). Tell it.
+        return ("✗ read_file: give BOTH start_line and end_line for a range, or "
+                "NEITHER to read the whole file (you provided only "
+                f"{'start_line' if s is not None else 'end_line'}).")
     if s is not None and e is not None:
         try:
             s_i, e_i = int(s), int(e)
@@ -340,6 +346,11 @@ def _do_create(args: dict, ctx: dict) -> str:
     content = args.get("content", "")
     if not path:
         return "✗ create_file needs a path."
+    if not str(content).strip():
+        # Empty/whitespace content would write a 0-byte file and report "✓ Created
+        # (1 lines)" — a silent no-op the model can't tell from real success.
+        return (f"✗ create_file: no content for {path}. Pass the full file body in "
+                f"`content` (the complete code for the new file).")
     existing = ctx["file_contents"].get(path)
     if existing is None and ctx.get("sandbox") is not None:
         existing = ctx["sandbox"].load_file(path)

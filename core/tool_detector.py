@@ -235,6 +235,7 @@ class DetectedTag:
     end: int
     rejection_reason: "str | None" = None
     discovered_by: tuple[str, ...] = field(default_factory=tuple)
+    missing_colon: bool = False   # scan saw `[TOOL arg]` with no `:` after the name
 
     @property
     def valid(self) -> bool:
@@ -345,7 +346,22 @@ class TagDetector:
                 else:
                     t.discovered_by = (method,)
                     merged[key] = t
-        out = sorted(merged.values(), key=lambda d: d.start)
+        # Collapse tags that share the same opening `[` (same `start`): the
+        # regex pass stops its `.+?` arg at the FIRST `]`, while the scan pass
+        # extracts a bracket-BALANCED arg — so a SEARCH whose query contains a
+        # `]` (regex char-class) yields a truncated regex tag AND a correct scan
+        # tag. Both have the same `start`; keep only the fullest extraction
+        # (largest `end`) so the model fires ONE correct query, not two.
+        by_start: dict[int, DetectedTag] = {}
+        for t in merged.values():
+            cur = by_start.get(t.start)
+            if cur is None or t.end > cur.end:
+                if cur is not None:
+                    t.discovered_by = tuple(sorted(set(t.discovered_by) | set(cur.discovered_by)))
+                by_start[t.start] = t
+            else:
+                cur.discovered_by = tuple(sorted(set(cur.discovered_by) | set(t.discovered_by)))
+        out = sorted(by_start.values(), key=lambda d: d.start)
         # Classify each (rejection reason). Done AFTER merge so the same
         # tag never gets two contradictory verdicts.
         any_tool_use = bool(self._tool_use_spans)
@@ -409,19 +425,44 @@ class TagDetector:
                             and not _looks_like_tool):
                 i = br + 1
                 continue
-            # require ':'
-            if k >= n or self.text[k] != ':':
-                i = br + 1
-                continue
-            # find the matching ']' — first one wins
-            close = self.text.find(']', k + 1)
+            # Locate the ':' — allow whitespace between the name and the colon
+            # so `[SEARCH : foo]` (space before colon) is accepted, not silently
+            # dropped. (Was: required text[k] == ':' immediately → space killed it.)
+            c = k
+            while c < n and self.text[c] in ' \t':
+                c += 1
+            _missing_colon = False
+            if c < n and self.text[c] == ':':
+                arg_start = c + 1
+            else:
+                # No ':' at all → `[SEARCH foo]`. A weak model that forgot the
+                # colon must be TOLD, not silently dropped (else it hallucinates
+                # a result). Emit the tag flagged so _classify surfaces it inside
+                # a [tool use] block; treat the run from the name's end as the arg.
+                _missing_colon = True
+                arg_start = k
+            # find the matching ']' — bracket-BALANCED so a `]` inside the arg
+            # (e.g. a regex char-class `[0-9]` in a SEARCH query) doesn't truncate
+            # the call into a garbage query. Falls back to first-`]` if unbalanced.
+            close = -1
+            depth = 0
+            p = arg_start
+            while p < n:
+                ch = self.text[p]
+                if ch == '[':
+                    depth += 1
+                elif ch == ']':
+                    if depth == 0:
+                        close = p
+                        break
+                    depth -= 1
+                p += 1
+            if close < 0:
+                close = self.text.find(']', arg_start)
             if close < 0:
                 i = br + 1
                 continue
-            # Skip if `]` is preceded by `]` in a tag like [SEARCH][/SEARCH]
-            # (those open-edit tags don't have a `:` after the name, so the
-            # name extraction above already excludes them — defensive only).
-            raw_arg = self.text[k + 1:close]
+            raw_arg = self.text[arg_start:close]
             stripped = raw_arg.strip()
             clean, label = _strip_label(stripped)
             out.append(DetectedTag(
@@ -431,6 +472,7 @@ class TagDetector:
                 label=label,
                 start=br,
                 end=close + 1,
+                missing_colon=_missing_colon,
             ))
             i = close + 1
         return out
@@ -450,6 +492,13 @@ class TagDetector:
         # surfaced as 'unknown-tag-type' ONLY when it's inside a [tool use] block
         # (or there are no tool-use blocks at all) — so the model is told it wrote
         # a bad tool call, but prose brackets outside tool-use aren't flagged.
+        # 2a. Missing colon: `[SEARCH foo]` / `[CODE foo.py]`. Surface it inside a
+        # [tool use] block (the model meant a tool call and dropped the ':'), but
+        # leave a prose bracket like `[NOTE the cache is cold]` alone outside one.
+        if t.missing_colon:
+            if t.tag_type in KNOWN_TAG_TYPES and ((not any_tool_use) or self._in_tool_use(t.start)):
+                return "missing-colon"
+            return "unknown-outside-tool-use"
         if t.tag_type not in KNOWN_TAG_TYPES:
             if t.tag_type in COMMON_WRONG_TOOLS:
                 return "unknown-tag-type"

@@ -119,6 +119,13 @@ def apply_edit_block(src, block_text):
     m = _BLOCK_RE.search(block_text)
     if not m:
         return None, "no [edit]...[/edit] block found", []
+    # CRLF safety (C#3): a CRLF file split on "\n" leaves "\r" on every kept
+    # line, while `+` lines are emitted verbatim (bare "\n") → the result mixes
+    # endings on edited lines. Normalize to "\n" for processing and restore the
+    # file's original CRLF on the way out so endings stay uniform.
+    _had_crlf = "\r\n" in src
+    if _had_crlf:
+        src = src.replace("\r\n", "\n")
     lines = src.split("\n")
 
     # ── 1. parse ───────────────────────────────────────────────────────────
@@ -245,6 +252,10 @@ def apply_edit_block(src, block_text):
     cursor = fp
     for o, r in zip(ops, resolved):
         if o[0] == "keep":
+            if r == cursor - 1:
+                return None, (f"line {r + 1} is listed twice — to CHANGE it use only "
+                              f"`{r + 1}:-`/`{r + 1}:+`, don't also keep it with "
+                              f"`{r + 1}:`."), []
             if r < cursor:
                 return None, ("edit lines are out of order — list them "
                               "top-to-bottom in the same order as the file."), []
@@ -252,6 +263,10 @@ def apply_edit_block(src, block_text):
             out.append(lines[r] if 0 <= r < len(lines) else o[2])
             cursor = r + 1
         elif o[0] == "del":
+            if r == cursor - 1:
+                return None, (f"line {r + 1} is both KEPT and DELETED — to change it "
+                              f"use only `{r + 1}:-` then `{r + 1}:+`, not a `{r + 1}:` "
+                              f"keep as well."), []
             if r < cursor:
                 return None, ("edit lines are out of order — list them "
                               "top-to-bottom in the same order as the file."), []
@@ -288,4 +303,7 @@ def apply_edit_block(src, block_text):
 
     lines[fp:lp + 1] = out
     info = f"matched original lines {fp + 1}-{lp + 1}, replaced with {len(out)} lines"
-    return "\n".join(lines), info, warnings
+    new_src = "\n".join(lines)
+    if _had_crlf:
+        new_src = new_src.replace("\n", "\r\n")
+    return new_src, info, warnings

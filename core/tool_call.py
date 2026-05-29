@@ -1803,14 +1803,23 @@ async def _run_keep(
 
     output_parts = []
 
-    def _persist_keep_failure(arg_raw: str, message: str) -> None:
+    def _persist_keep_failure(arg_raw: str, message: str,
+                              file_key: "str | None" = None) -> None:
         """Persist a KEEP failure into the next prompt (mirror of
         _persist_view_failure). Without this, KEEP error messages went to
         round_output, which is never rendered — so the model re-issued the
-        same bad KEEP every round with no way to learn why."""
+        same bad KEEP every round with no way to learn why.
+
+        `file_key` (a filepath) collapses FILE-LEVEL failures (not-found,
+        binary) onto one key regardless of line range — so a model varying the
+        range each round overwrites the single entry (no manifest leak) AND the
+        ⛔ RE-READ counter climbs so it's told to stop re-asking."""
         try:
-            stripped_arg, _lbl = _strip_label(arg_raw.strip())
-            key = _norm_key("KEEP", stripped_arg)
+            if file_key:
+                key = _norm_key("KEEP", file_key)
+            else:
+                stripped_arg, _lbl = _strip_label(arg_raw.strip())
+                key = _norm_key("KEEP", stripped_arg)
             persistent_lookups[key] = message
             if on_keep_seen is not None:
                 try:
@@ -1928,9 +1937,12 @@ async def _run_keep(
         _bin_target = sandbox_path if os.path.isfile(sandbox_path) else project_path
         _is_bin, _reason = _is_binary_path(_bin_target)
         if _is_bin:
-            output_parts.append(
-                f"=== KEEP: '{filepath}' — {_reason}. ==="
-            )
+            _msg = (f"=== KEEP: '{filepath}' — {_reason}. ===\n"
+                    f"Binary files have no text lines to pin. Use [SEARCH:]/[REFS:] "
+                    f"to work with the source files instead.")
+            output_parts.append(_msg)
+            _persist_keep_failure(arg, _msg, file_key=filepath)  # else this goes
+            # only to the dead round_output → model sees a blank, re-issues forever.
             continue
         if os.path.isfile(sandbox_path):
             try:
@@ -1958,7 +1970,7 @@ async def _run_keep(
             _msg = (f"⚠ KEEP: file not found '{filepath}'. Check the path/spelling, "
                     f"or [CODE: {filepath}] first to confirm it exists.")
             output_parts.append(_msg)
-            _persist_keep_failure(arg, _msg)
+            _persist_keep_failure(arg, _msg, file_key=filepath)
             continue
 
         # Parse KEEP ranges FIRST — before recording the file as "seen".
@@ -2198,7 +2210,8 @@ async def _run_view(
 
     output_parts = []
 
-    def _persist_view_failure(arg_raw: str, message: str) -> None:
+    def _persist_view_failure(arg_raw: str, message: str,
+                              file_key: "str | None" = None) -> None:
         """Store a VIEW failure under its canonical key + register in the
         manifest so the model sees the failure reason in TOOL RESULTS
         next round instead of silently re-issuing the same failing call.
@@ -2206,10 +2219,18 @@ async def _run_view(
         like deepseek-v4-pro R3-R8 in 20260512_165633 spent 5 rounds
         re-emitting the same VIEW with no way to learn why it wasn't
         working. Persisting closes that loop.
+
+        `file_key` (a filepath) collapses FILE-LEVEL failures (not-found,
+        binary, empty) onto a single range-independent key — so varying the
+        range each round overwrites one entry instead of leaking a new manifest
+        line per round, and the ⛔ RE-READ counter climbs to halt the loop.
         """
         try:
-            stripped_arg, _lbl = _strip_label(arg_raw.strip())
-            key = _norm_key("VIEW", stripped_arg)
+            if file_key:
+                key = _norm_key("VIEW", file_key)
+            else:
+                stripped_arg, _lbl = _strip_label(arg_raw.strip())
+                key = _norm_key("VIEW", stripped_arg)
             persistent_lookups[key] = message
             if on_view_seen is not None:
                 try:
@@ -2275,9 +2296,12 @@ async def _run_view(
         _bin_target = sandbox_path if os.path.isfile(sandbox_path) else project_path
         _is_bin, _reason = _is_binary_path(_bin_target)
         if _is_bin:
-            output_parts.append(
-                f"=== VIEW: '{filepath}' — {_reason}. ==="
-            )
+            _msg = (f"=== VIEW: '{filepath}' — {_reason}. ===\n"
+                    f"Binary files have no text lines to view. Use [SEARCH:]/[REFS:] "
+                    f"to work with the source files instead.")
+            output_parts.append(_msg)
+            _persist_view_failure(arg, _msg, file_key=filepath)  # else only the
+            # dead round_output sees it → blank to the model, re-issuable forever.
             continue
         if os.path.isfile(sandbox_path):
             try:
@@ -2306,15 +2330,16 @@ async def _run_view(
                     f"CONTEXT. If you don't know the path, [SEARCH: <name>] or "
                     f"[REFS: <symbol>] to find it first.")
             output_parts.append(_msg)
-            _persist_view_failure(arg, _msg)
+            _persist_view_failure(arg, _msg, file_key=filepath)
             continue
         # v8.15: empty-file case — give an honest message instead of
         # masquerading as not-found.
         if raw_content == "":
-            output_parts.append(
-                f"=== VIEW: '{filepath}' is EMPTY (0 bytes / 0 lines). "
-                f"No content to display. ==="
-            )
+            _msg = (f"=== VIEW: '{filepath}' is EMPTY (0 bytes / 0 lines). "
+                    f"No content to display. ===")
+            output_parts.append(_msg)
+            _persist_view_failure(arg, _msg, file_key=filepath)  # persist so the
+            # model isn't handed a blank (dead round_output) and made to re-issue.
             continue
 
         # ── Small-file gate REMOVED ────────────────────────────────────
@@ -2628,7 +2653,15 @@ def _run_purpose_lookups(categories: list[str], purpose_map: str, project_root: 
     output_parts = []
     for cat in categories:
         status(f"    Purpose lookup: {cat}")
-        if purpose_map:
+        # The tool is documented (text + native schema) as taking a FILE PATH.
+        # When maps are OFF (the map-free default since ckpt 36) purpose_map is
+        # empty → extract_purpose(path) is correct. But if maps were built, the
+        # old code routed a file path into get_purpose_snippets (a CATEGORY-name
+        # lookup) → a path never matches a category → misleading "(no category)".
+        # Detect a path-shaped arg and serve the file gist directly so the tool
+        # matches its contract regardless of whether maps are present.
+        _looks_like_path = ("/" in cat) or bool(re.search(r'\.\w{1,6}$', cat.strip()))
+        if purpose_map and not _looks_like_path:
             result = get_purpose_snippets(purpose_map, cat, project_root)
         else:
             result = extract_purpose(cat, project_root)
@@ -3655,12 +3688,12 @@ async def call_with_tools(
         _bad_seen: set[str] = set()
         for t in _detector.rejected_tags():
             _reason = t.rejection_reason or ""
-            if _reason.startswith("malformed-arg") or _reason == "unknown-tag-type":
+            if (_reason.startswith("malformed-arg") or _reason == "unknown-tag-type"
+                    or _reason == "missing-colon"):
                 bkey = _norm_key(t.tag_type, t.clean_arg)
                 if bkey not in _bad_seen:
                     _bad_seen.add(bkey)
-                    detail = _reason.split(":", 1)[1].strip() if ":" in _reason else _reason
-                    bad_tags.append((t.tag_type, t.clean_arg, detail))
+                    bad_tags.append((t.tag_type, t.clean_arg, _reason))
                 continue
             if t.rejection_reason not in _SURFACE_REJECTIONS:
                 continue
@@ -4684,13 +4717,26 @@ async def call_with_tools(
                     "tag_type": "KEEP",
                     "arg": raw_arg.strip(),
                 }
-            keep_result = await _run_keep(
-                keep_tags, project_root,
-                persistent_lookups, research_cache,
-                viewed_versions=viewed_versions,
-                on_keep_seen=_on_keep_seen,
-                display_mode=_display_mode,
-            )
+            # KEEP/VIEW run OUTSIDE _locked_lookup's safety net, so guard them
+            # here too — an unexpected raise (pathological AST, FS error in a
+            # callee) must surface as a ✗ in the ephemeral channel, never crash
+            # the whole loop. (mandate: tools never crash; failures self-explain.)
+            try:
+                keep_result = await _run_keep(
+                    keep_tags, project_root,
+                    persistent_lookups, research_cache,
+                    viewed_versions=viewed_versions,
+                    on_keep_seen=_on_keep_seen,
+                    display_mode=_display_mode,
+                )
+            except Exception as _e:
+                keep_result = ""
+                _msg = (f"✗ KEEP failed — {str(_e)[:160]}. This is a runtime error, "
+                        f"not your data; try [CODE:] for the whole file or proceed.")
+                for _t in keep_tags:
+                    _k = _norm_key("KEEP", _strip_label(_t.strip())[0])
+                    _tool_errors[_k] = _msg
+                    _crash_counts[_k] = _crash_counts.get(_k, 0) + 1
             round_output += keep_result
 
         # ── VIEW handler — read a slice of a large file by line number ──
@@ -4706,15 +4752,24 @@ async def call_with_tools(
                     "tag_type": "VIEW",
                     "arg": raw_arg.strip(),
                 }
-            view_result = await _run_view(
-                view_tags, project_root,
-                persistent_lookups,
-                model_id=model,
-                research_cache=research_cache,
-                viewed_versions=viewed_versions,
-                on_view_seen=_on_view_seen,
-                display_mode=_display_mode,
-            )
+            try:
+                view_result = await _run_view(
+                    view_tags, project_root,
+                    persistent_lookups,
+                    model_id=model,
+                    research_cache=research_cache,
+                    viewed_versions=viewed_versions,
+                    on_view_seen=_on_view_seen,
+                    display_mode=_display_mode,
+                )
+            except Exception as _e:
+                view_result = ""
+                _msg = (f"✗ VIEW failed — {str(_e)[:160]}. This is a runtime error, "
+                        f"not your data; try [CODE:] for the whole file or proceed.")
+                for _t in view_tags:
+                    _k = _norm_key("VIEW", _strip_label(_t.strip())[0])
+                    _tool_errors[_k] = _msg
+                    _crash_counts[_k] = _crash_counts.get(_k, 0) + 1
             round_output += view_result
 
         # `past_thinking` is built BELOW after the budget logic decides
@@ -5102,7 +5157,21 @@ async def call_with_tools(
 
         manifest_lines = ["[YOUR TOOL INDEX] — every tool call you've fired and what it returned:"]
         if _manifest:
-            for k, v in _manifest.items():
+            # Bound the rendered index: a flailing model that VARIES its arg each
+            # round (e.g. VIEW foo.py 1-40, 41-80, 81-120 …) creates a new key per
+            # round, and this block is rendered into EVERY prompt — uncapped, that
+            # leaks context without limit. Show the most-recent _MANIFEST_RENDER_CAP
+            # entries (by round) + a count of the rest.
+            _MANIFEST_RENDER_CAP = 80
+            _items = list(_manifest.items())
+            _omitted = 0
+            if len(_items) > _MANIFEST_RENDER_CAP:
+                _items.sort(key=lambda kv: kv[1].get("round", 0))
+                _omitted = len(_items) - _MANIFEST_RENDER_CAP
+                _items = _items[-_MANIFEST_RENDER_CAP:]
+            if _omitted:
+                manifest_lines.append(f"  (+{_omitted} earlier call(s) omitted — most recent shown)")
+            for k, v in _items:
                 base = _manifest_line(k, v)
                 rcount = _reread_count.get(k, 0)
                 if rcount >= 1:
@@ -5197,8 +5266,11 @@ async def call_with_tools(
                 "LS": "SEARCH", "LIST": "SEARCH", "GLOB": "SEARCH",
                 "WRITE": "=== FILE:", "EDIT": "=== EDIT:",
             }
-            def _bad_hint(tt: str, arg: str) -> str:
+            def _bad_hint(tt: str, arg: str, reason: str = "") -> str:
                 ttu = tt.upper()
+                if reason == "missing-colon":
+                    return (f"missing ':' after the tool name — write "
+                            f"[{ttu}: {arg or 'argument'}] (colon right after {ttu}).")
                 if ttu in _ALIAS:
                     return f"no such tool. Did you mean [{_ALIAS[ttu]} {arg or 'path'}]?"
                 if ttu in ("CODE", "VIEW", "KEEP", "PURPOSE", "DETAIL"):
@@ -5225,7 +5297,7 @@ async def call_with_tools(
                     return ("no such tool [" + tt + "]. Real tools: "
                             + ", ".join(f"[{x}:]" for x in _KTT) + ".")
                 return "malformed — check the tool syntax in the TOOL TABLE above."
-            _bad_lines = [f"  ✗ [{tt}: {arg}] — {_bad_hint(tt, arg)}" for tt, arg, _ in bad_tags]
+            _bad_lines = [f"  ✗ [{tt}: {arg}] — {_bad_hint(tt, arg, rsn)}" for tt, arg, rsn in bad_tags]
             bad_block = (
                 "══════════════════════════════════════════════════════════════════════\n"
                 "MALFORMED TOOL CALLS — these did NOT run\n"
