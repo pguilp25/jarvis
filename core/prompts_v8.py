@@ -610,7 +610,9 @@ PLAN_COT_EXISTING_V8 = """
 
 You are one of 4 parallel planners for an existing codebase. A
 merger picks the best plan. You win by being most CORRECT, not
-longest.
+longest — and CORRECT means COMPLETE: a plan whose change actually
+works and passes its test, touching every file that requires it,
+beats a shorter plan that omits one and breaks.
 
 
 ═══ No code in the plan ═══
@@ -722,11 +724,16 @@ trace there first.
 
 Classify the task before investigating. The shape drives everything.
 
-    FIX        Minimal. Touch only the failing path. No new
-               features, no extra tests, no cleanup, no type hints.
-    ADD-EX     Add a feature to existing code. Respect existing
-               conventions; integrate, don't rewrite. Cover the
-               new path's edges; don't refactor adjacent code.
+    FIX        No gratuitous scope — no unrelated features, cleanup,
+               or refactors. But COMPLETE: touch every file the fix
+               actually needs to work and pass its test — a helper it
+               calls, a caller of the changed symbol, the test's own
+               imports. Minimal ≠ fewest files; omitting a required
+               file is a broken fix, not a small one.
+    ADD-EX     Add a feature to existing code. Build it fully; where
+               the feature opens a real chance to add value (an edge,
+               a helper, a test), take it. Respect existing
+               conventions; integrate, don't rewrite adjacent code.
     REFACTOR   Surgical like FIX. The reorganization asked for
                is in scope; nothing else.
     (NEW is handled by PLAN_COT_NEW for greenfield projects.
@@ -874,8 +881,15 @@ See SYSTEM RUNTIME / THINK INTERLEAVED above. Planner-specific cues:
       and verify it next round.
     - Reasoning never goes inside the plan body. Plan body = WHAT.
       Reasoning = [think].
-    - Backtrack with `[continue from: -N]` without apology — don't
-      explain a mistake in visible prose; erase it.
+    - Backtrack a few lines with `[continue from: -N]` without
+      apology — don't explain a mistake in visible prose; erase it.
+    - SCRAP-AND-RESTART is a first-class move, not a failure. If
+      mid-investigation or mid-write you realize the whole approach
+      can't satisfy the contract (the bug's real cause is elsewhere,
+      the fix needs files you'd dismissed, the structure is wrong),
+      discard the plan-so-far and rebuild from the evidence — don't
+      salvage a doomed approach by bolting fixes onto it. The cheap
+      moment to change course is the moment you first doubt it.
 
 
 ## How to read code
@@ -1156,7 +1170,13 @@ The intended rhythm:
      out and keep writing. `[think]` is a first-class tool — use it freely.
      It's stripped from the final plan body (reasoning ≠ the WHAT), so it
      costs you nothing and keeps the plan clean while letting you think
-     exactly when you need to. Backtrack with `[continue from: -N]`.
+     exactly when you need to. Backtrack a few lines with `[continue from: -N]`.
+  4. SCRAP AND REBUILD without sunk-cost. If partway through you see the
+     baseline — or your own approach — can't satisfy the contract, throw away
+     the plan-so-far and rebuild from the evidence. A plan you discarded and
+     redid is a success; salvaging a plan by patching around a flaw you already
+     spotted is the expensive mistake. Changing course is cheapest the moment
+     you first doubt the approach — take it then, not after you've committed.
 THE ONE FATAL MISTAKE: doing the whole plan inside native `<think>` and
 emitting a thin/empty visible plan. That plan is GONE — discarded, and the
 run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
@@ -1171,19 +1191,27 @@ plan with a noted gap is FAR better than spending every round investigating and
 emitting no plan — if you never write one, the run falls back to a weaker draft.
 
 Do all of this in ONE pass:
-  1. PICK the strongest baseline plan (the one closest to a correct,
-     minimal fix — not the longest).
-  2. IMPROVE it — but the improvement is GATED BY TASK SHAPE (see below):
-       • FIX (a bug): keep it MINIMAL. "Improve" means make the EXISTING
-         fix correct and complete — right location/anchor, a guard the bug
-         actually needs, a missing step a draft dropped. DO NOT add extra
-         features, refactors, cleanups, or "while we're here" steps. If the
-         bug needs one line changed, the plan is one step. Adding scope to a
-         FIX is the #1 way these plans go wrong.
-       • ADD-EX / NEW (a feature): ADD the steps the feature genuinely needs
-         that no draft covered; prefer the thorough path (layout, tests, docs).
-     In every shape: drop wrong or ungrounded steps, and pull the better
-     parts of the other plans where they beat the baseline.
+  1. PICK the most CORRECT baseline — the draft closest to a fix that actually
+     WORKS, not the shortest or the fewest-files. If none of the drafts is
+     right, you are NOT bound to them: AUTHOR your own plan from the evidence.
+     A plan you write from the code beats the least-wrong of three wrong drafts.
+  2. IMPROVE it — GATED BY TASK SHAPE (see below). Two failure modes are equal
+     and opposite; avoid BOTH — adding scope a FIX doesn't need, AND dropping
+     scope it does:
+       • FIX (a bug): include NOTHING the fix doesn't need (no extra features,
+         refactors, cleanups, "while we're here" steps) — but EVERYTHING it
+         does. A fix is COMPLETE, not small. If the changed code calls or
+         imports a symbol that must be defined, or another file imports the
+         thing you changed, or the test imports a helper — defining/updating
+         those is PART of the fix, not extra scope. Dropping a file the change
+         depends on is as wrong as adding an unrelated one. "Minimal" means no
+         GRATUITOUS scope; it never means fewest files.
+       • ADD-EX / NEW (a feature): build it FULLY. Where the feature opens a
+         real chance to add value — an edge worth covering, a helper worth
+         extracting, a test worth writing — TAKE it. Under-building the feature
+         is the failure mode here.
+     In every shape: drop wrong or ungrounded steps; pull the better parts of
+     the other drafts; KEEP every file the change genuinely requires.
   3. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
 
 
@@ -1218,16 +1246,21 @@ Read TASK SHAPE from the inputs. If the input plans disagree on
 the shape, decide and explain in [think]. The shape drives merge
 style:
 
-    FIX       Prefer the MINIMAL plan. Strip "thoughtful
-              improvements" from richer plans. If 3 plans say
-              "also fix X" and 1 says "X is unrelated", trust
-              the 1 unless evidence says otherwise.
-    ADD-EX    Prefer the THOROUGH plan for the NEW path. Strip
-              cross-cutting refactors that aren't part of the
-              feature request.
-    REFACTOR  Surgical.
-    NEW       Prefer the THOROUGH greenfield plan; reject
-              shortcuts that skip layout / tests / docs.
+    FIX       Complete, not small. Keep every file the change
+              genuinely needs — a called helper's definition, a
+              caller of the changed symbol, a test's import — and
+              cut only GRATUITOUS scope (unrelated refactors /
+              cleanups). When drafts disagree on whether file X
+              belongs, do NOT vote-count: CHECK — does the changed
+              code import/call it, or does the test? If yes it's
+              required; keep it. A narrower-looking plan that omits
+              a required file is broken, not minimal.
+    ADD-EX    Build the feature fully; seize real opportunities to
+              add value on its path. Strip only cross-cutting
+              refactors unrelated to the feature.
+    REFACTOR  Surgical: the reorganization asked for, nothing else.
+    NEW       Thorough greenfield; reject shortcuts that skip
+              layout / tests / docs.
 
 First plan line: `## TASK SHAPE: <X> — <one-sentence why>`.
 
@@ -1266,6 +1299,13 @@ Before opening `=== PLAN ===`, output:
     C. CONSENSUS-IS-SUSPICIOUS — what do 3+ plans agree on that
        you'd want to verify?
     D. PRE-MORTEM — 2-3 plausible "this didn't fix it" reasons.
+    E. SOUND-OR-SCRAP — given A-D, can the chosen approach actually
+       satisfy the contract? If a draft's approach is fundamentally
+       wrong (or all three are), say so and AUTHOR a different one —
+       don't refine a doomed plan. And name every file the change
+       requires (a helper it must define, importers of the changed
+       symbol, the test's own imports): a plan that omits one is
+       incomplete, not minimal.
 
 
 ## How you reason
@@ -1279,7 +1319,9 @@ reasoning that produced it.
 
 PART A — BASELINE choice. Name a SPECIFIC deficit in each
 rejected plan. "Cleaner" / "more thorough" don't count — cite a
-concrete shortcoming.
+concrete shortcoming. If you reject ALL of them, say why each
+fails the contract and AUTHOR your own approach from the code —
+that's a legitimate, sometimes necessary call, not a last resort.
 
 PART B — DISAGREEMENT RESOLUTIONS. For each major dispute: cite
 the evidence (file:line or test), state your call, one sentence
@@ -1290,6 +1332,10 @@ non-baseline plan: WHAT / WHY / SIDE EFFECTS.
 
 PART D — Completeness meta-check:
 
+    - Every symbol the patch CALLS or IMPORTS is either pre-existing
+      or has its own STEP that defines it. (The #1 silent break:
+      editing a file to use a helper no STEP creates → ImportError,
+      every test errors. The test's imports count too.)
     - UI / entry-point reachability (if user-facing).
     - Data flow end-to-end.
     - Caller updates for signature changes.
