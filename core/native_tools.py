@@ -191,10 +191,35 @@ async def _do_read(args: dict, ctx: dict) -> str:
     s = args.get("start_line"); e = args.get("end_line")
     if s is not None and e is not None:
         try:
-            arg = f"{path} {int(s)}-{int(e)}"
+            s_i, e_i = int(s), int(e)
         except (TypeError, ValueError):
             return (f"✗ read_file: start_line/end_line must be integers "
                     f"(got start_line={s!r}, end_line={e!r}).")
+        # Validate the range BEFORE delegating. _run_code_reads renders an
+        # inverted / out-of-bounds / negative range as a header with an EMPTY
+        # body (or, for negatives, a misleading "FILE NOT FOUND") — both leave
+        # the coder with nothing and a hallucination risk. Tell it precisely
+        # what's wrong and how to fix it, the same way the text loop would.
+        if s_i < 1 or e_i < 1:
+            return (f"✗ read_file: line numbers must be ≥ 1 (got start_line={s_i}, "
+                    f"end_line={e_i}). Re-issue with a positive 1-based range, or "
+                    f"omit start_line/end_line to read the whole file.")
+        if e_i < s_i:
+            return (f"✗ read_file: invalid range — start_line ({s_i}) must be ≤ "
+                    f"end_line ({e_i}). Put the smaller line number first.")
+        # Out-of-bounds start (beyond EOF) — name the file's real length.
+        _base = ctx.get("file_contents", {}).get(path)
+        if _base is None:
+            sb0 = ctx.get("sandbox")
+            if sb0 is not None:
+                _base = sb0.load_file(path)
+        if _base is not None:
+            _total = _base.count("\n") + 1
+            if s_i > _total:
+                return (f"✗ read_file: start_line {s_i} is out of range — {path} has "
+                        f"only {_total} line(s). Read within 1-{_total}, or omit the "
+                        f"range to read the whole file.")
+        arg = f"{path} {s_i}-{e_i}"
     else:
         arg = path
     try:
@@ -227,6 +252,20 @@ def _do_replace(args: dict, ctx: dict) -> str:
     except (TypeError, ValueError):
         return (f"✗ replace_lines: start_line and end_line must be integers "
                 f"(got start_line={s!r}, end_line={e!r}).")
+    # Validate the range up front. The text [REPLACE LINES] regex only matches
+    # `\d+`, so a NEGATIVE start (e.g. -1) never reaches the applier's range
+    # check — it falls through to the vague "no change produced (range may be
+    # invalid)". Catch it here with a precise, actionable message. (An inverted
+    # range IS caught downstream, but the message comes back duplicated; we
+    # de-dup it below.)
+    if s_i < 1 or e_i < 1:
+        return (f"✗ replace_lines: invalid range — line numbers must be positive "
+                f"(1 ≤ start ≤ end); got start_line={s_i}, end_line={e_i}. Use the "
+                f"1-based line numbers from your most recent read_file.")
+    if e_i < s_i:
+        return (f"✗ replace_lines: invalid range — start_line ({s_i}) must be ≤ "
+                f"end_line ({e_i}). Put the smaller line number first (use the "
+                f"numbers from your most recent read_file).")
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])   # to catch a suffix-resolved key (review #2)
     block = (f"=== EDIT: {path} ===\n[REPLACE LINES {s_i}-{e_i}]\n"
@@ -235,8 +274,13 @@ def _do_replace(args: dict, ctx: dict) -> str:
     result, matched, attempted, skips = _apply_extracted_code(
         ext, ctx["file_contents"], ctx.get("sandbox"),
         viewed_versions=ctx.get("viewed_versions"))
-    # malformed-range messages live on the extracted dict
-    skips = list(ext.get("malformed_edits", [])) + list(skips)
+    # malformed-range messages live on the extracted dict. The same message can
+    # appear in BOTH malformed_edits and skips (e.g. an inverted range) — merge
+    # while preserving order and dropping exact duplicates so the coder sees the
+    # reason ONCE, not "...invalid range... | ...invalid range...".
+    _seen: set = set()
+    skips = [x for x in (list(ext.get("malformed_edits", [])) + list(skips))
+             if not (str(x).strip() in _seen or _seen.add(str(x).strip()))]
     if path in result:
         # No-op guard: a byte-identical replace is not a real edit. Reporting it
         # as "✓ Applied" would pollute files_changed and let a coder that changed
@@ -371,8 +415,33 @@ async def _do_semantic(args: dict, ctx: dict) -> str:
     if not project_root:
         return "✗ semantic_search needs a project_root."
     maps_dir = _maps_dir(project_root)
-    _, file_hash = _load_all_code(project_root)
-    return await semantic_retrieve(q, project_root, maps_dir, file_hash, top_n=10)
+    try:
+        _, file_hash = _load_all_code(project_root)
+        out = await semantic_retrieve(q, project_root, maps_dir, file_hash, top_n=10)
+    except Exception as ex:
+        return (f"✗ semantic_search failed ({str(ex)[:120]}). Embeddings may be "
+                f"unavailable — use search_text for an exact symbol/string, or "
+                f"find_refs for a known name.")
+    # semantic_retrieve signals trouble with a parenthetical, NOT a ✗ — so a
+    # weak native coder can't tell it failed and isn't told the alternative.
+    # Normalise: when embeddings are unavailable or there's nothing to search,
+    # return a ✗ that names the fallback tools (parity with how the text loop
+    # would flag a no-result lookup). A real hit list passes through unchanged.
+    low = (out or "").lower()
+    if not (out or "").strip():
+        return ("✗ semantic_search returned nothing for that query. Try search_text "
+                "for an exact symbol/string, or rephrase the concept.")
+    if low.startswith("(semantic search unavailable") or low.startswith("(no code to search"):
+        _detail = out.strip().strip("()")
+        if _detail.lower().startswith("semantic search unavailable:"):
+            _detail = _detail.split(":", 1)[1].strip()
+        return (f"✗ semantic_search unavailable: {_detail}. "
+                f"Fall back to search_text (exact text/regex) or find_refs (a known "
+                f"symbol name) instead.")
+    if "no " in low and ("match" in low or "result" in low) and len(out.strip()) < 80:
+        return (f"✗ semantic_search: {out.strip()} — 0 matches. Try search_text with "
+                f"an exact term, or rephrase the concept.")
+    return out
 
 
 def _do_dependson(args: dict, ctx: dict) -> str:
@@ -404,9 +473,32 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         return _do_dependson(args, ctx)
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
-    return (f"✗ Unknown tool '{name}'. Available: read_file, find_refs, find_callers, "
-            f"search_text, file_purpose, semantic_search, depends_on, create_file, "
-            f"replace_lines, finish.")
+    # A weak/native model often reaches for a name from another idiom (the text
+    # tags, or generic verbs). Name the LIKELY intended native tool first — same
+    # courtesy the text loop gives ([READ]→[CODE], [GREP]→[SEARCH]) — then list
+    # the full set, so the coder corrects in one step instead of guessing.
+    _ALIAS = {
+        "read": "read_file", "open": "read_file", "cat": "read_file",
+        "get": "read_file", "view": "read_file", "code": "read_file",
+        "keep": "read_file", "show": "read_file",
+        "grep": "search_text", "search": "search_text", "find": "search_text",
+        "rg": "search_text", "ls": "search_text", "list": "search_text",
+        "glob": "search_text", "ripgrep": "search_text",
+        "refs": "find_refs", "references": "find_refs", "usages": "find_refs",
+        "callers": "find_callers", "dependency": "find_callers",
+        "dependson": "depends_on", "depends": "depends_on",
+        "purpose": "file_purpose", "summary": "file_purpose", "gist": "file_purpose",
+        "semantic": "semantic_search",
+        "write": "create_file", "new_file": "create_file", "touch": "create_file",
+        "edit": "replace_lines", "replace": "replace_lines",
+        "modify": "replace_lines", "patch": "replace_lines", "apply": "replace_lines",
+        "done": "finish", "stop": "finish", "complete": "finish", "end": "finish",
+    }
+    suggestion = _ALIAS.get((name or "").strip().lower().lstrip("[").rstrip("]:"))
+    hint = (f" Did you mean '{suggestion}'?" if suggestion else "")
+    return (f"✗ Unknown tool '{name}'.{hint} Available: read_file, find_refs, "
+            f"find_callers, search_text, file_purpose, semantic_search, depends_on, "
+            f"create_file, replace_lines, finish.")
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────

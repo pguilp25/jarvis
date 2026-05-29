@@ -269,6 +269,118 @@ def test_read_file_noninteger_lines_no_crash():
         _cleanup(root)
 
 
+def test_read_file_inverted_range_is_not_silent():
+    # start_line > end_line currently yields a header with an EMPTY body and no
+    # signal — the model can hallucinate. It must say the range is invalid.
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("read_file", {"path": rel, "start_line": 5, "end_line": 2}, ctx)
+        assert isinstance(out, str)
+        low = out.lower()
+        assert "invalid" in low or "start_line must be ≤ end_line" in low or \
+               "no lines" in low, f"silent empty range: {out!r}"
+    finally:
+        _cleanup(root)
+
+
+def test_read_file_out_of_range_is_not_silent():
+    # start_line beyond EOF yields a header with an empty body and no signal.
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("read_file", {"path": rel, "start_line": 9000, "end_line": 9001}, ctx)
+        assert isinstance(out, str)
+        low = out.lower()
+        assert "out of range" in low or "beyond" in low or "only" in low or \
+               "has" in low and "line" in low, f"silent OOB range: {out!r}"
+    finally:
+        _cleanup(root)
+
+
+def test_read_file_negative_line_reports_range_not_missing_file():
+    # Negative line numbers must not be reported as "FILE NOT FOUND" (wrong cause).
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("read_file", {"path": rel, "start_line": -5, "end_line": -1}, ctx)
+        assert isinstance(out, str)
+        assert "not found" not in out.lower(), f"negative line misreported as missing file: {out!r}"
+    finally:
+        _cleanup(root)
+
+
+def test_replace_lines_inverted_range_message_not_duplicated():
+    # The invalid-range message must appear ONCE, not twice (malformed_edits +
+    # skips both carry it → "invalid range ... | invalid range ...").
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 5, "end_line": 2,
+                     "new_content": "0|x = 1"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+        assert out.lower().count("invalid range") <= 1, f"duplicated reason: {out!r}"
+    finally:
+        _cleanup(root)
+
+
+def test_replace_lines_negative_range_says_why():
+    # A negative range currently rejects with the vague "no change produced
+    # (range may be invalid)" — it should name the range problem and how to fix.
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": -1, "end_line": 2,
+                     "new_content": "0|x = 1"}, ctx)
+        assert isinstance(out, str) and out.startswith("✗")
+        low = out.lower()
+        assert "range" in low and ("1 ≤" in out or ">= 1" in low or "positive" in low
+                                   or "out of bounds" in low), \
+            f"vague negative-range reject: {out!r}"
+    finally:
+        _cleanup(root)
+
+
+def test_semantic_search_failure_has_marker_and_fallback_hint():
+    # When embeddings are unavailable / 0 hits, the result is
+    # "(semantic search unavailable: ...)" — no ✗ marker, no "try search_text".
+    # The model can't tell it failed and isn't told the alternative.
+    import core.native_tools as nt
+
+    async def _boom(*a, **k):
+        return "(semantic search unavailable: Embed API HTTP 403)"
+    ctx, rel, root = _mk_ctx()
+    orig = None
+    try:
+        import tools.embeddings as emb
+        orig = emb.semantic_retrieve
+        emb.semantic_retrieve = _boom
+        out = _disp("semantic_search", {"query": "counting"}, ctx)
+        assert isinstance(out, str)
+        assert out.startswith("✗"), f"failure not marked: {out!r}"
+        assert "search_text" in out or "find_refs" in out, f"no fallback hint: {out!r}"
+    finally:
+        if orig is not None:
+            emb.semantic_retrieve = orig
+        _cleanup(root)
+
+
+def test_unknown_tool_suggests_correct_name_for_common_aliases():
+    # READ→read_file, GREP/SEARCH→search_text, CODE→read_file: a weak model that
+    # emits an alias should be told the RIGHT tool, not just the full list.
+    ctx, rel, root = _mk_ctx()
+    try:
+        for alias, want in (("READ", "read_file"), ("GREP", "search_text"),
+                            ("SEARCH", "search_text"), ("CODE", "read_file"),
+                            ("VIEW", "read_file")):
+            out = _disp(alias, {}, ctx)
+            assert isinstance(out, str) and out.startswith("✗")
+            # the current code only lists all tools; ideally it names `want` as
+            # the likely intended tool.
+            assert want in out, (alias, out)
+    finally:
+        _cleanup(root)
+
+
 def test_replace_lines_noop_is_rejected():
     # a byte-identical replace must NOT report success or pollute files_changed
     ctx, rel, root = _mk_ctx()
