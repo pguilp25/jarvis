@@ -2851,7 +2851,7 @@ async def call_with_tools(
       [CODE: path/to/file]    → read actual source code file
       [REFS: name]            → find all definitions, imports, usages
       [PURPOSE: category]     → all code serving a purpose (exact/fuzzy category name)
-      [SEMANTIC: description] → vector embedding search over purpose categories, returns top 10 matches
+      [SEMANTIC: description] → vector-embedding search over the CODE (functions/classes), returns the top 10 matching `file:line` units
       [DISCARD: #label]       → remove a labeled result from context
 
     research_cache: shared dict that accumulates all lookup results across
@@ -2992,7 +2992,15 @@ async def call_with_tools(
         # without a real signal. The two-tag pair is now the ONLY trigger.
         return False
 
+    # Temporary instrumentation (env-gated, zero-cost when unset): trace WHY the
+    # tool loop exits, to root-cause the merger stopping after round 1.
+    _DBG_LOOP = bool(os.environ.get("JARVIS_DEBUG_TOOLLOOP"))
+    def _dbg(msg):
+        if _DBG_LOOP:
+            warn(f"  [toolloop:{log_label}] R{round_num}: {msg}")
+
     _empty_streak = 0
+    _dead_tool_nudges = 0   # bounded rescues for unrecognized/disabled tool calls
     for round_num in range(1, max_rounds + 1):
         # ── Dump the exact prompt sent to this model this round ──────────
         # Diagnostic only — writes `{session_dir}/prompts/{model}__{label}__R{N}.md`
@@ -3510,7 +3518,9 @@ async def call_with_tools(
         file_tags     = _detector.valid_args("CODE")      if project_root else []
         refs_tags     = _detector.valid_args("REFS")      if project_root else []
         purpose_tags  = _detector.valid_args("PURPOSE")   if purpose_map else []
-        semantic_tags = _detector.valid_args("SEMANTIC")  if purpose_map else []
+        # SEMANTIC now indexes the CODE itself (AST chunks) — it no longer needs
+        # a purpose map, so it's a first-class tool gated only on project_root.
+        semantic_tags = _detector.valid_args("SEMANTIC")  if project_root else []
         lsp_tags      = _detector.valid_args("LSP")       if project_root else []
         knowledge_tags = _detector.valid_args("KNOWLEDGE")
         # RUN is extracted OUTSIDE the detector (bracket-balanced) — its free-form
@@ -3555,6 +3565,10 @@ async def call_with_tools(
                         or refs_tags or purpose_tags or semantic_tags or lsp_tags
                         or knowledge_tags or keep_tags or view_tags
                         or dependency_tags or discard_tags)
+        _dbg(f"has_tags={has_tags} has_stop={has_stop} "
+             f"purpose={len(purpose_tags)} file={len(file_tags)} code={len(code_tags)} "
+             f"refs={len(refs_tags)} view={len(view_tags)} detail={len(detail_tags)} "
+             f"result_len={len(result)}")
 
         # ── Dropped-tag detection (visibility for the model) ─────────
         # The full _mask_quoted_tags enforces [tool use] blocks: any tag
@@ -3863,6 +3877,7 @@ async def call_with_tools(
         )
         _plan_committed = bool(_PLAN_HEADERS.search(result))
         if _plan_committed and has_tags:
+            _dbg("EXIT: plan-headers + tool tags → treat as final")
             warn(
                 f"  [{model.split('/')[-1]}] round {round_num}: "
                 f"plan headers + stray tool tags detected — "
@@ -3905,6 +3920,38 @@ async def call_with_tools(
             full_response = ""
             continue
 
+        # UNRECOGNIZED / DISABLED TOOL CALL (pylint-4551 merger bug): the model
+        # wrote a tool tag we did NOT extract — e.g. [PURPOSE: file] when this
+        # call has no purpose_map, so purpose_tags is gated to [] (~line 3519).
+        # has_tags is then False even though the model clearly intended to
+        # investigate and continue (it emitted [STOP] expecting a result next
+        # round). The "no tags → treat as final" break below would take that
+        # mid-investigation deferral as the FINAL answer and silently quit —
+        # exactly how the merger died after one round with a "let me read
+        # inspector.py first" non-plan. Instead, tell the model the tool isn't
+        # available and keep the loop alive so it produces its answer from what it
+        # already has. Bounded so a model re-requesting a dead tool can't spin.
+        if (not has_tags and not _gate_keep_alive
+                and has_tool_tags(result) and _dead_tool_nudges < 2
+                and (has_pending_edits is None
+                     or not has_pending_edits(full_response + result))):
+            _dead_tool_nudges += 1
+            _dbg(f"unrecognized/disabled tool call — rescue nudge "
+                 f"{_dead_tool_nudges}/2 (not treating as final)")
+            warn(f"  [{model.split('/')[-1]}] round {round_num}: requested tool not "
+                 f"available in this step — asking it to proceed with what it has "
+                 f"(nudge {_dead_tool_nudges}/2)")
+            full_response += result
+            current_prompt = (
+                current_prompt + "\n\nASSISTANT: " + full_response
+                + "\n\n[SYSTEM NOTE: The tool you requested is not available in "
+                "this step, so it returned nothing. Do NOT request files or tools "
+                "again — proceed with the information you already have and write "
+                "your complete answer now.]\n\nContinue:")
+            result = ""
+            full_response = ""
+            continue
+
         if has_tags:
             # Trim result to end at the last tag — anything the model
             # wrote after the last ] is speculation without results.
@@ -3938,6 +3985,7 @@ async def call_with_tools(
         )
         if (not has_tags and not _gate_keep_alive
                 and not _stop_with_pending and not _pending_no_signal):
+            _dbg("EXIT: no tags + nothing pending → break (treat as final)")
             break  # No tool requests and nothing to apply — done
         # When _gate_keep_alive is set, a [DONE] carried fresh edits: keep the
         # round alive (even with no tool tags) so on_stop applies them and the
@@ -4381,8 +4429,10 @@ async def call_with_tools(
             from tools.embeddings import semantic_retrieve
             maps_dir = _maps_dir(project_root)
             _, file_hash = _load_all_code(project_root)
+            # Semantic search now indexes the CODE itself (AST chunks) — no
+            # purpose map required, so it works map-free.
             return await semantic_retrieve(
-                tag, purpose_map, project_root, maps_dir, file_hash, top_n=10
+                tag, project_root, maps_dir, file_hash, top_n=10
             )
         def _run_lsp(tag):
             return (
@@ -4435,7 +4485,7 @@ async def call_with_tools(
                 r = await _locked_lookup("PURPOSE", t, _run_purpose)
                 round_output += r
 
-        if semantic_tags and purpose_map and project_root:
+        if semantic_tags and project_root:
             new_tags, cached = _cached_or_run("SEMANTIC", semantic_tags)
             round_output += cached
             for t in new_tags:

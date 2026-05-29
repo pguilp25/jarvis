@@ -1,8 +1,12 @@
 """
 NVIDIA NIM embeddings client — uses llama-nemotron-embed-1b-v2.
-Generates vector embeddings for semantic search over the code purpose map.
+Generates vector embeddings for semantic search DIRECTLY over the code
+(functions/classes, AST-extracted) — no LLM-generated purpose map required.
+Semantic search is a first-class, always-available tool: it indexes the source
+itself, so it works with zero indexing pre-pass and survives map removal.
 """
 
+import ast
 import json
 import math
 import os
@@ -116,6 +120,152 @@ def parse_purpose_chunks(purpose_map: str) -> list[dict]:
     return chunks
 
 
+# ─── Code chunker (AST — no purpose map needed) ───────────────────────────────
+
+_SKIP_DIR_PARTS = {".git", "node_modules", "__pycache__", ".jarvis", ".venv",
+                   "venv", "dist", "build", ".pytest_cache", ".jarvis_sandbox",
+                   ".mypy_cache", ".tox", "site-packages"}
+
+
+# The embedding model's safe input window (chars). A unit that fits is embedded
+# WHOLE (max fidelity, no truncation); a unit larger than this is split into
+# line-aligned, slightly-overlapping windows so the entire body is still
+# represented across chunks. ~6000 chars ≈ 1500 tokens — comfortably under the
+# model's limit, so a batch never fails for being too long.
+_EMBED_WINDOW_CHARS = 6000
+_WINDOW_OVERLAP_LINES = 3
+
+
+def _line_windows(lines: list[str], max_chars: int = _EMBED_WINDOW_CHARS) -> list[str]:
+    """Split a list of source lines into the FEWEST windows that each fit in
+    max_chars, breaking only at line boundaries (never mid-line) with a small
+    overlap so context isn't lost across a split. A unit that already fits
+    returns as a single, complete window — no truncation, no padding."""
+    joined = "\n".join(lines)
+    if len(joined) <= max_chars:
+        return [joined]
+    windows, cur, cur_len = [], [], 0
+    for ln in lines:
+        if cur and cur_len + len(ln) + 1 > max_chars:
+            windows.append("\n".join(cur))
+            cur = cur[-_WINDOW_OVERLAP_LINES:]            # carry overlap forward
+            cur_len = sum(len(x) + 1 for x in cur)
+        cur.append(ln)
+        cur_len += len(ln) + 1
+    if cur:
+        windows.append("\n".join(cur))
+    return windows
+
+
+def _unit_start_line(node) -> int:
+    """First source line of a def/class INCLUDING decorators. `ast` sets
+    `node.lineno` to the `def`/`class` keyword, so a decorated unit would
+    otherwise drop its `@decorator` lines — losing fidelity (a `@property` or
+    `@app.route(...)` is part of what the symbol IS)."""
+    line = node.lineno
+    for dec in getattr(node, "decorator_list", []):
+        line = min(line, getattr(dec, "lineno", line))
+    return line
+
+
+def parse_code_chunks(project_root: str) -> list[dict]:
+    """AST-walk every .py file and return indexable chunks, one per semantic unit
+    (function / method / class-header / module-level code):
+        {"name": "rel::qualname:line", "text": <full unit source>,
+         "file": rel, "line": <1-based start incl. decorators>}.
+
+    Invariants (these are what the test suite pins — break one and retrieval
+    quality silently degrades):
+      • COMPLETE — every function/class/method in a parseable file is emitted.
+      • FAITHFUL — a unit that fits the window is embedded WHOLE (decorators →
+        last body line), never truncated; the text begins with `rel::qual` for
+        symbol/path grounding.
+      • FLEXIBLE — a unit larger than the window is split into line-aligned,
+        overlapping windows whose union covers every line (no gap, no mid-line
+        cut); small units are a single window (no padding).
+      • NON-DUPLICATING — a class emits only its HEADER (class line → first
+        method); its methods are separate chunks, never embedded twice.
+      • LOSSLESS — module-level code (docstring, imports, constants, top-level
+        statements) is captured as a `::<module>` chunk; an unparseable file is
+        still indexed via raw line-windows so nothing vanishes from search.
+      • DETERMINISTIC — same tree → same chunks, in source order.
+    """
+    chunks: list[dict] = []
+    root = Path(project_root)
+    for dirpath, dirnames, filenames in os.walk(project_root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_PARTS]
+        for fn in sorted(filenames):
+            if not fn.endswith(".py"):
+                continue
+            abs_path = Path(dirpath) / fn
+            try:
+                src = abs_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            rel = str(abs_path.relative_to(root)).replace(os.sep, "/")
+            src_lines = src.splitlines()
+
+            def _emit(qual, start, end, line):
+                body = src_lines[start - 1:end]
+                if not any(s.strip() for s in body):
+                    return
+                wins = _line_windows(body)
+                for wi, w in enumerate(wins):
+                    suffix = f"#{wi + 1}/{len(wins)}" if len(wins) > 1 else ""
+                    chunks.append({
+                        "name": f"{rel}::{qual}:{line}{suffix}",
+                        "text": f"{rel}::{qual}\n{w}",
+                        "file": rel, "line": line,
+                    })
+
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                # Bulletproof: an unparseable file is still searchable via raw
+                # line-windows — code never silently disappears from the index.
+                for w in _line_windows(src_lines):
+                    if w.strip():
+                        chunks.append({"name": f"{rel}::<file>", "text": f"{rel}\n{w}",
+                                       "file": rel, "line": 1})
+                continue
+
+            def _walk(node, prefix=""):
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        s = _unit_start_line(child)
+                        _emit(f"{prefix}{child.name}", s,
+                              getattr(child, "end_lineno", child.lineno), s)
+                    elif isinstance(child, ast.ClassDef):
+                        s = _unit_start_line(child)
+                        method_starts = [_unit_start_line(c) for c in child.body
+                                         if isinstance(c, (ast.FunctionDef,
+                                                           ast.AsyncFunctionDef))]
+                        header_end = (min(method_starts) - 1 if method_starts
+                                      else getattr(child, "end_lineno", child.lineno))
+                        _emit(f"{prefix}{child.name}", s, header_end, s)
+                        _walk(child, prefix=f"{prefix}{child.name}.")
+            _walk(tree)
+
+            # Module-level code: every top-level statement that ISN'T a def/class
+            # (module docstring, imports, constants, top-level logic), in order.
+            mod_lines: list[str] = []
+            for stmt in tree.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    continue
+                s = getattr(stmt, "lineno", None)
+                e = getattr(stmt, "end_lineno", s)
+                if s:
+                    mod_lines.extend(src_lines[s - 1:e])
+            if any(s.strip() for s in mod_lines):
+                wins = _line_windows(mod_lines)
+                for wi, w in enumerate(wins):
+                    suffix = f"#{wi + 1}/{len(wins)}" if len(wins) > 1 else ""
+                    chunks.append({"name": f"{rel}::<module>{suffix}",
+                                   "text": f"{rel}\n{w}", "file": rel, "line": 1})
+    return chunks
+
+
 # ─── Main: build / retrieve ───────────────────────────────────────────────────
 
 async def build_embeddings(
@@ -152,34 +302,60 @@ async def build_embeddings(
     return chunks
 
 
+async def build_code_embeddings(
+    project_root: str,
+    maps_dir: Path,
+    file_hash: str,
+    batch_size: int = 32,
+) -> list[dict]:
+    """Embed every function/class chunk (AST) and save to cache. No purpose map."""
+    from core.cli import status, warn
+    chunks = parse_code_chunks(project_root)
+    if not chunks:
+        return []
+    all_vecs: list[list[float]] = []
+    for i in range(0, len(chunks), batch_size):
+        batch_texts = [c["text"] for c in chunks[i:i + batch_size]]
+        try:
+            vecs = await embed_texts(batch_texts, input_type="passage")
+            all_vecs.extend(vecs)
+            status(f"    Embedded {min(i + batch_size, len(chunks))}/{len(chunks)} code chunks")
+        except Exception as e:
+            warn(f"    Embedding batch {i // batch_size + 1} failed: {e}")
+            all_vecs.extend([[0.0] * 4096] * len(batch_texts))
+    for chunk, vec in zip(chunks, all_vecs):
+        chunk["vec"] = vec
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    save_embed_cache(maps_dir, file_hash, chunks)
+    return chunks
+
+
 async def semantic_retrieve(
     query: str,
-    purpose_map: str,
     project_root: str,
     maps_dir: Path,
     file_hash: str,
     top_n: int = 10,
 ) -> str:
-    """Embed query, find top_n purpose chunks, return their code with ±10 lines context."""
-    from tools.code_index import get_purpose_snippets
+    """Embed the query, find the top_n most similar CODE chunks (functions/classes,
+    AST-extracted from the source), and return each as `file:line` + a snippet.
+    No purpose map — semantic search indexes the code itself."""
     from core.cli import status, warn
 
-    # Load or build embedding cache
     cache = load_embed_cache(maps_dir)
     if cache and cache.get("hash") == file_hash and cache.get("chunks"):
         chunks = cache["chunks"]
     else:
-        status("    Building semantic index (first time)...")
+        status("    Building semantic code index (first time)...")
         try:
-            chunks = await build_embeddings(purpose_map, maps_dir, file_hash)
+            chunks = await build_code_embeddings(project_root, maps_dir, file_hash)
         except Exception as e:
             warn(f"    Semantic index build failed: {e}")
             return f"(semantic search unavailable: {e})"
 
     if not chunks:
-        return "(no purpose categories to search)"
+        return "(no code to search)"
 
-    # Embed the query
     try:
         query_vecs = await embed_texts([query], input_type="query")
         qvec = query_vecs[0]
@@ -187,24 +363,25 @@ async def semantic_retrieve(
         warn(f"    Query embedding failed: {e}")
         return f"(semantic search unavailable: {e})"
 
-    # Rank by cosine similarity
     scored = []
     for chunk in chunks:
         vec = chunk.get("vec")
         if not vec or all(v == 0 for v in vec[:5]):
             continue
         sim = cosine_similarity(qvec, vec)
-        scored.append((sim, chunk["name"]))
+        scored.append((sim, chunk))
 
-    scored.sort(reverse=True)
+    scored.sort(key=lambda t: t[0], reverse=True)
     top = scored[:top_n]
-
     if not top:
         return f"(no results for '{query}')"
 
-    parts = [f"=== SEMANTIC: '{query}' — top {len(top)} matches ===\n"]
-    for sim, cat_name in top:
-        snippet = get_purpose_snippets(purpose_map, cat_name, project_root)
-        parts.append(f"[similarity: {sim:.3f}]\n{snippet}\n")
-
+    parts = [f"=== SEMANTIC: '{query}' — top {len(top)} code matches ===\n"
+             "(use [CODE: file] or [VIEW: file start end] to read any match in full)\n"]
+    for sim, chunk in top:
+        snippet = "\n".join(chunk.get("text", "").splitlines()[:8])
+        parts.append(
+            f"[{sim:.3f}] {chunk['file']}:{chunk['line']} — {chunk['name'].split('::')[-1]}\n"
+            f"{snippet}\n"
+        )
     return "\n".join(parts)
