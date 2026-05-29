@@ -71,3 +71,37 @@ def test_knowledge_dir_resolves():
     assert KNOWLEDGE_DIR.exists(), f"KNOWLEDGE_DIR missing: {KNOWLEDGE_DIR}"
     topics = list_knowledge()
     assert isinstance(topics, list)
+
+
+# ── HIGH: [CODE:] argument parsing (single line number → one-line range) ───────
+
+def test_code_single_line_number_is_a_range():
+    from core.tool_call import _parse_code_arg
+    assert _parse_code_arg("foo.py 60") == ("foo.py", [(60, 60)])
+    assert _parse_code_arg("foo.py 10-20") == ("foo.py", [(10, 20)])
+    assert _parse_code_arg("foo.py") == ("foo.py", None)
+    assert _parse_code_arg("a/b.py 5-9, 30-40") == ("a/b.py", [(5, 9), (30, 40)])
+
+
+# ── HIGH: [SEARCH:] malformed-regex is reported, not silently literal ──────────
+
+def test_search_invalid_regex_reports_fallback():
+    import tempfile, os
+    from tools.codebase import search_code, format_search_results
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "a.py"), "w").write("x = 1\n")
+    out = format_search_results(search_code(r"\d+(unclosed", d))
+    assert "not a valid regex" in out and "literal" in out.lower()
+
+
+# ── #6: empty SEARCH/CODE arg does NOT fire a bogus tool-use-boundary query ────
+
+def test_empty_arg_does_not_fire_bogus_query():
+    for t in ("[tool use][SEARCH:][/tool use]",
+              "[tool use][SEARCH: ][/tool use]",
+              "[tool use][CODE: ][/tool use]"):
+        d = TagDetector(t)
+        assert d.valid_tags() == [], f"{t} fired a phantom tag: {d.valid_tags()}"
+    # a real query still fires
+    d = TagDetector("[tool use][SEARCH: def foo][/tool use]")
+    assert any(x.tag_type == "SEARCH" and x.clean_arg == "def foo" for x in d.valid_tags())

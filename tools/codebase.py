@@ -569,6 +569,7 @@ def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS) 
         # regex internal error. If our heuristic chose regex mode but
         # ripgrep rejects the pattern, transparently retry as -F
         # (fixed-string). That's almost always what the user meant.
+        _regex_fell_back = False
         if (result.returncode > 1
             and "regex parse error" in (result.stderr or "").lower()
             and "-F" not in cmd):
@@ -577,6 +578,7 @@ def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS) 
                 result = subprocess.run(
                     fixed_cmd, capture_output=True, text=True, timeout=10
                 )
+                _regex_fell_back = True
             except Exception:
                 pass
         # v8.11 fix: surface invalid-regex errors that survived the
@@ -610,6 +612,14 @@ def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS) 
             # lead — this stable re-sort guarantees test-first without disturbing
             # relative order within each group.
             merged.sort(key=lambda r: 0 if _is_test_path(r.get("file", "")) else 1)
+            if _regex_fell_back:
+                # Tell the model its pattern wasn't a valid regex (so it doesn't
+                # read "0 / few matches" as "not in the codebase").
+                merged.insert(0, {
+                    "file": "__note__", "line_num": 0, "is_match": False,
+                    "line": (f"⚠ {pattern!r} is not a valid regex — searched it as a "
+                             f"LITERAL string instead. If you meant a regex, fix/escape it."),
+                })
             return merged
     except FileNotFoundError:
         pass  # ripgrep not installed, fall through to grep
@@ -697,8 +707,15 @@ def format_search_results(results: list[dict]) -> str:
     match). Previously the format was identical for both, forcing
     the model to mentally re-scan each line for the search pattern.
     """
+    # Informational notes (e.g. "your pattern wasn't a valid regex, searched as a
+    # literal") are rendered plainly, FIRST — so a broken regex is never a silent
+    # "no matches". They carry file == "__note__".
+    notes = [r["line"] for r in results if r.get("file") == "__note__"]
+    results = [r for r in results if r.get("file") != "__note__"]
+    note_str = ("\n".join(notes) + "\n") if notes else ""
+
     if not results:
-        return "(no matches found)"
+        return (note_str + "(no matches found)") if note_str else "(no matches found)"
 
     # v8.10: handle empty-pattern error sentinel from search_code.
     if len(results) == 1 and results[0].get("file") == "__error__":
@@ -713,7 +730,7 @@ def format_search_results(results: list[dict]) -> str:
         marker = "→" if r.get("is_match", True) else " "
         lines.append(f"  {marker} {r['line_num']:>4}: {r['line']}")
 
-    return "\n".join(lines)
+    return note_str + "\n".join(lines)
 
 
 # ─── On-Demand Search Tag Detection ─────────────────────────────────────────

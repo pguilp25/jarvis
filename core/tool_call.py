@@ -1148,6 +1148,12 @@ def _parse_code_arg(raw: str) -> tuple[str, list[tuple[int, int]] | None]:
     range_pat = re.compile(r'\s+((?:\d+\s*-\s*\d+)(?:\s*,\s*\d+\s*-\s*\d+)*)\s*$')
     m = range_pat.search(raw)
     if not m:
+        # A trailing SINGLE line number ("foo.py 60") is a one-line range — read
+        # that line, not "FILE NOT FOUND" for a path 'foo.py 60' that can't exist.
+        m1 = re.search(r'\s+(\d+)\s*$', raw)
+        if m1:
+            _n = int(m1.group(1))
+            return raw[:m1.start()].strip(), [(_n, _n)]
         return raw, None
     filepath = raw[:m.start()].strip()
     ranges = []
@@ -1567,7 +1573,22 @@ async def _run_code_reads(
                 # Format matches add_line_numbers — `LINENO|INDENT|content`
                 # (prefix) or `LINENO|<spaces><content>` (whitespace).
                 selected_parts = []
+                _range_warnings = []   # parity with VIEW: explain bad ranges, don't return blank
                 for start, end in line_ranges:
+                    if start > end:
+                        _range_warnings.append(
+                            f"⚠ Backwards range {start}-{end} — read as {end}-{start}.")
+                        start, end = end, start
+                    if start > total_lines:
+                        _range_warnings.append(
+                            f"⚠ Lines {start}-{end} are past end-of-file ({fpath} has "
+                            f"{total_lines} lines). Re-request within 1-{total_lines}, "
+                            f"or [VIEW: {fpath} {start}].")
+                        continue
+                    if end > total_lines:
+                        _range_warnings.append(
+                            f"⚠ Range clamped to {start}-{total_lines} ({fpath} has "
+                            f"{total_lines} lines).")
                     start = max(1, start)
                     end = min(total_lines, end)
                     slice_lines = all_lines[start - 1:end]
@@ -1585,6 +1606,8 @@ async def _run_code_reads(
 
                 range_str = ", ".join(f"{a}-{b}" for a, b in line_ranges)
                 combined = '\n'.join(selected_parts)
+                if _range_warnings:   # surface the reason; never a silent empty body
+                    combined = "\n".join(_range_warnings) + (("\n" + combined) if combined else "")
                 source_tag = _diff_source_tag(
                     sandbox_path=os.path.join(sandbox_dir, fpath),
                     project_path=os.path.join(project_root, fpath),
@@ -4128,7 +4151,10 @@ async def call_with_tools(
             kimi-k2.6 re-issued [CODE: separable.py] in R1, R2, R7 because
             the runtime kept obliging.
             """
-            if tag_type in ("CODE", "KEEP") and not cache_file_reads:
+            # RUN is non-deterministic w.r.t. the working tree BY DESIGN — re-running
+            # a command after an edit observes the NEW state (verify-in-loop). Caching
+            # it with "do not re-request" actively misleads the reviewer. Always re-run.
+            if tag_type in ("CODE", "KEEP", "RUN") and not cache_file_reads:
                 return tags, ""
             cached_out = ""
             new_tags = []

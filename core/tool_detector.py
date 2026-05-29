@@ -174,6 +174,12 @@ def _validate_arg(tag_type: str, clean_arg: str) -> "str | None":
     """Return rejection reason, or None if the arg is well-shaped."""
     if not clean_arg:
         return "empty arg"
+    # Tool-use-boundary artifact: `[SEARCH:]` (no arg) makes the `.+?` regex skip
+    # the empty body and capture the `][/tool use` that follows — a bogus query
+    # that would "fire" a real search for garbage. Treat it as an empty arg so the
+    # model is told its tag had no argument, not handed a phantom result.
+    if clean_arg.startswith("]") or "[/tool use" in clean_arg or "[/" in clean_arg:
+        return "empty arg"
     if tag_type in ("CODE", "KEEP", "VIEW"):
         if not _RE_PATH_ARG.match(clean_arg):
             return f"arg {clean_arg!r} not a path-shape (path [+ ranges])"
