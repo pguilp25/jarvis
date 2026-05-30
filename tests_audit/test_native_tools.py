@@ -589,17 +589,23 @@ def test_native_prompt_has_no_text_edit_format():
         assert tok not in IMPLEMENT_NATIVE_PROMPT, f"native prompt leaks text-protocol token {tok!r}"
 
 
-def test_coder_prompts_ground_on_test_literals():
-    """ckpt 64: the #1 SWE-bench-Pro resolution failure was the coder inventing a
-    plausible-but-wrong value ('editor' vs the test's 'Editor'). Both coder prompts
-    must instruct it to read the failing test and copy the asserted literal exactly.
-    Pins the instruction so it can't silently regress."""
+def test_coder_prompts_ground_on_spec_literals():
+    """ckpt 64/66: the #1 SWE-bench-Pro fail was the coder inventing a
+    plausible-but-wrong value ('editor' vs the spec's 'Editor'). Both coder
+    prompts must tell it to match the REQUIREMENTS/INTERFACE literals exactly and
+    not invent them. STRICT PROTOCOL: they must NOT instruct reading the held-out
+    failing test (it isn't on disk, and peeking would invalidate the score)."""
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT, IMPLEMENT_PROMPT
     for nm, t in (("native", IMPLEMENT_NATIVE_PROMPT), ("text", IMPLEMENT_PROMPT)):
         low = t.lower()
         assert "don't invent" in low, f"{nm} coder prompt dropped the don't-invent-the-value rule"
         assert "'Editor'" in t and "'editor'" in t, \
             f"{nm} coder prompt dropped the Editor≠editor exact-literal example"
+        assert "requirements" in low and "interface" in low, \
+            f"{nm} coder prompt must ground literals on the requirements/interface spec"
+        # strict protocol: do not nudge the coder to read the failing test
+        assert "read the failing test" not in low and "match its asserted" not in low, \
+            f"{nm} coder prompt still points at the held-out test (protocol violation)"
 
 
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────

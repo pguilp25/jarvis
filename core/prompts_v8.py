@@ -1683,13 +1683,13 @@ After you've verified the applied DIFF, drop into [think] and TRACE the change
 against the contract:
     1. State the input concretely (the failing input for a fix; a representative
        input for new code).
-    2. Walk the patched code with that input to the asserted value / behaviour.
-       When a failing TEST states the expected value, `[CODE:]` that test and match
-       its literal EXACTLY — case, punctuation, trailing chars, dict keys/shape
-       (`'Editor'` ≠ `'editor'`; `'1.2.3.4'` ≠ `'1.2.3.4/32'`): copy it from the
-       `assert`, don't invent or "tidy" it. If you touched a BRANCH (if/elif/else,
-       early return, try/except), trace one input per branch you changed — not just
-       the happy path.
+    2. Walk the patched code with that input to the expected value / behaviour.
+       Match the REQUIREMENTS / INTERFACE in the issue EXACTLY — exact symbol names,
+       paths, signatures, and any literal value/string/shape the spec states (case,
+       punctuation, trailing chars, dict keys: `'Editor'` ≠ `'editor'`; `'1.2.3.4'` ≠
+       `'1.2.3.4/32'`). Copy those literals from the spec; don't invent or "tidy"
+       them. If you touched a BRANCH (if/elif/else, early return, try/except), trace
+       one input per branch you changed — not just the happy path.
     3. Trace lands right → [DONE][CONFIRM_DONE]. Gap inside this STEP → write the
        missing edit, [STOP], verify, then [DONE]. Gap outside → `MISSED SITE:
        <file>:<func> — <why>` in [think], then [DONE].
@@ -1847,7 +1847,7 @@ HOW TO WORK:
   1. PLAN-ADHERENCE FIRST. Re-read the step and do EXACTLY what it says — no more, no less. If the step treats two cases DIFFERENTLY (e.g. "yield group A immediately, but COLLECT group B and yield it at the end"), your code MUST branch that way; a simpler shape that collapses the distinction is WRONG.
   2. LOOK BEFORE YOU LEAP. Unsure who uses a symbol or where code lives? Call a lookup tool (find_refs / find_callers / search_text / semantic_search) BEFORE editing — guessing causes rejects. Before changing a high-fanout symbol, find_callers it and either preserve its contract or fix the callers in this step.
   3. EDIT MINIMALLY. Touch only what THIS step requires. Match the file's existing style; copy the INDENT count from the read view — never type leading spaces.
-  4. VERIFY, THEN finish. After an edit applies, re-read the WHOLE changed region and confirm: (a) the new code does what the step asks. When a failing TEST pins the behavior, `read_file` that test and make your output match its asserted literals EXACTLY — case, punctuation, trailing chars, dict keys/shape (`'Editor'` ≠ `'editor'`; `'1.2.3.4'` ≠ `'1.2.3.4/32'`): copy the value straight from the `assert`, don't invent it or "tidy" the wording. (b) you didn't delete or split an ADJACENT definition — every function/class near your edit must still have its header AND body contiguous and intact (a stray `return …`/body line with no matching `def` above it is the tell-tale of an orphaned method). Only then call finish(summary). An edit that "applied" can still be wrong."""
+  4. VERIFY, THEN finish. After an edit applies, re-read the WHOLE changed region and confirm: (a) the new code does what the step asks AND matches the REQUIREMENTS / INTERFACE in the issue context EXACTLY — exact symbol names, paths and signatures, and any literal value/string/shape the spec states (case, punctuation, trailing chars, dict keys: `'Editor'` ≠ `'editor'`; `'1.2.3.4'` ≠ `'1.2.3.4/32'`). Copy those literals straight from the requirements/interface; don't invent, paraphrase or "tidy" them. (b) you didn't delete or split an ADJACENT definition — every function/class near your edit must still have its header AND body contiguous and intact (a stray `return …`/body line with no matching `def` above it is the tell-tale of an orphaned method). Only then call finish(summary). An edit that "applied" can still be wrong."""
 
 
 # ════════════════════════════════════════════════════════════════════════
