@@ -196,6 +196,28 @@ def build_task_prompt(instance: dict) -> str:
     ]
     if hints:
         parts.extend(["", "=== MAINTAINER HINTS (from PR discussion) ===", hints])
+
+    # SWE-bench Pro ships a precise spec the agent is MEANT to use: detailed
+    # behavioral `requirements` + an `interface` block naming the exact symbols/
+    # paths/signatures to implement. Feeding these removes the "invent the exact
+    # internal API" ceiling (the pylint-4551 oracle problem) — on Pro the contract
+    # is GIVEN, so the planner must cover ALL of it and match the named interface.
+    requirements = (instance.get("requirements") or "").strip()
+    interface = (instance.get("interface") or "").strip()
+    if requirements:
+        parts.extend([
+            "",
+            "=== REQUIREMENTS (every one of these must hold after your change) ===",
+            requirements,
+        ])
+    if interface:
+        parts.extend([
+            "",
+            "=== INTERFACE TO IMPLEMENT — exact names, paths, and signatures ===",
+            "Create/modify EXACTLY these symbols at these paths with these signatures "
+            "(this is the contract the tests check — match names and locations precisely):",
+            interface,
+        ])
     return "\n".join(parts)
 
 
@@ -473,8 +495,14 @@ def _load_swe_bench_dataset():
 
 
 async def main_async(args) -> None:
-    print(f"Loading {DATASET_NAME} split={SPLIT}...", file=_orig_stderr)
-    ds = _load_swe_bench_dataset()
+    if args.instances_json:
+        import json as _json
+        ds = _json.load(open(args.instances_json))
+        print(f"Loaded {len(ds)} instances from {args.instances_json} (offline)",
+              file=_orig_stderr)
+    else:
+        print(f"Loading {DATASET_NAME} split={SPLIT}...", file=_orig_stderr)
+        ds = _load_swe_bench_dataset()
 
     instances = _select_instances(ds, args.limit, args.instance_ids, args.seed)
     if not instances:
@@ -561,6 +589,9 @@ def parse_args() -> argparse.Namespace:
                    help="model_name_or_path field in predictions.")
     p.add_argument("--instance-ids", default="",
                    help="Comma-separated instance_ids; overrides --limit.")
+    p.add_argument("--instances-json", default="",
+                   help="Load instances from a local JSON list (e.g. SWE-bench Pro "
+                        "subset) instead of the HF Verified dataset. Offline.")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                    help=f"Per-instance hard timeout in seconds (default {DEFAULT_TIMEOUT}).")
     p.add_argument("--seed", type=int, default=None,
