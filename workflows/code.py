@@ -9007,9 +9007,48 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # (see plan_scope.rank_relevant_tests — generic stems like main/__init__
         # used to bury the real gold test past the cap on big repos like pylint).
         _contract_gaps: list = []   # the test imports a symbol that doesn't exist yet
-        for _tf in rank_relevant_tests(_test_pool, _scope, cap=16):
+        # phase_plan has NO `sandbox` (it runs BEFORE the coder sandbox exists) — the
+        # old backstop used sandbox.load_file → NameError → the whole try/except
+        # silently SKIPPED the test-derived + contract checks on every run. Read the
+        # ORIGINAL repo files from project_root instead (correct: at plan time no
+        # edits exist yet, so the test's imports + the module's defined symbols are
+        # exactly the pre-fix contract).
+        def _read_proj(rp):
             try:
-                _src = sandbox.load_file(_tf) if sandbox else None
+                _fp = os.path.join(project_root, rp)
+                if os.path.isfile(_fp):
+                    return open(_fp, encoding="utf-8", errors="replace").read()
+            except Exception:
+                return None
+            return None
+        _dbg = os.environ.get("JARVIS_DEBUG_CONTRACT")
+        # PACKAGE-PRIORITY: on a big repo (pylint: 702 test files) rank_relevant_tests'
+        # basename ranking buries the contract test past the cap when its name doesn't
+        # match a scope stem (e.g. scope=inspector.py but the contract lives in the
+        # writer test). The tests that matter share the scope's PACKAGE — pull those
+        # first by path token (e.g. 'pyreverse'), so the contract test is always read.
+        _pkg_tokens = set()
+        for _s in _scope:
+            for _part in _s.replace("\\", "/").split("/")[:-1]:
+                if len(_part) >= 4 and _part not in ("test", "tests", "src", "lib"):
+                    _pkg_tokens.add(_part)
+        _pkg_tests = [t for t in _test_pool
+                      if t.endswith(".py") and "test" in t.lower()
+                      and any(tok in t for tok in _pkg_tokens)]
+        _ranked_tests = rank_relevant_tests(_test_pool, _scope, cap=16)
+        # package-matching tests FIRST (they're the relevant ones), then the ranked
+        # set; dedupe preserving order; bounded so I/O stays sane on huge repos.
+        _cand_tests = list(dict.fromkeys(_pkg_tests + _ranked_tests))[:30]
+        if _dbg:
+            warn(f"  [CDBG] disk_tests={len(_disk_tests)} pool={len(_test_pool)} pkg_tokens={sorted(_pkg_tokens)}")
+            warn(f"  [CDBG] scope={_scope}  scope_dirs={sorted(_scope_dirs)}")
+            warn(f"  [CDBG] pkg_tests({len(_pkg_tests)})={[os.path.basename(t) for t in _pkg_tests[:8]]}")
+            warn(f"  [CDBG] cand(top10)={[os.path.basename(t) for t in _cand_tests[:10]]}")
+        for _tf in _cand_tests:
+            try:
+                _src = _read_proj(_tf)
+                if _dbg and ('writer' in _tf.lower() or 'pyreverse' in _tf.lower()):
+                    warn(f"  [CDBG] test {os.path.basename(_tf)}: loaded={_src is not None} len={len(_src or '')}")
                 if not _src:
                     continue
                 # Resolve the test's imports against the DISK pool, not the prose-
@@ -9017,6 +9056,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 # .writer (modules no planner named) resolves to nothing, is judged
                 # irrelevant, and the contract check never runs. (The ckpt-53b miss.)
                 _hit = modules_to_files(imported_modules(_src), _resolve_pool)
+                if _dbg and ('writer' in _tf.lower() or 'pyreverse' in _tf.lower()):
+                    _rel = any(h in _scope_set or _same_pkg(h) for h in _hit)
+                    warn(f"  [CDBG] {os.path.basename(_tf)}: hit={_hit} relevant={_rel} "
+                         f"pyreverse_imports={ {m: sorted(s) for m, s in imported_symbols(_src).items() if 'pyreverse' in m} }")
                 # RELEVANT = the test imports a module IN scope OR a same-package
                 # sibling of one (broadened so a writer-test counts for an
                 # inspector-scoped plan in the same pyreverse package).
@@ -9037,7 +9080,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                     _modfile = _mf[0]
                     if not (_modfile in _scope_set or _same_pkg(_modfile)):
                         continue   # only modules in/next-to scope
-                    _modsrc = sandbox.load_file(_modfile) if sandbox else None
+                    _modsrc = _read_proj(_modfile)
                     if _modsrc is None:
                         continue
                     _miss = missing_symbols(_syms, _modsrc)
