@@ -48,7 +48,7 @@ import re
 from core.cli import status, warn
 
 # Models built for native function-calling — use the structured loop, not text.
-NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "groq/gpt-oss-120b"}
+NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss-120b"}
 
 
 def is_native_tool_model(model_id: str) -> bool:
@@ -514,14 +514,12 @@ async def _dispatch(name: str, args: dict, ctx: dict):
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────
-# gpt-oss-120b is hosted on multiple providers. We exhaust ALL of them (retrying
-# each on transient errors) BEFORE the workflow gives up and switches to a
-# DIFFERENT model — "try a different gpt endpoint before changing the model"
-# (user, 2026-05-29). OpenRouter first (the forced :free route, fast), then
-# NVIDIA NIM (no TPM cap, 128K window — the real alternate for big coder prompts).
-# Groq is excluded: its gpt-oss free tier throttles >8K-context to ~nothing and
-# our coder prompts are always >8K.
-_GPT_OSS_PROVIDERS = ("openrouter", "nvidia")
+# Coder chain (user 2026-05-29) places gpt-oss on each infra at a DISTINCT slot:
+# nvidia/gpt-oss-120b = OpenRouter :free (slot 1, primary); nvidia/gpt-oss-nim =
+# NVIDIA NIM (slot 4, after qwen+mistral). So each native gpt model pins ONE
+# endpoint here — the chain ORDER is orchestrated in workflows/code.py, not by
+# cycling endpoints inside one call. (Groq excluded: 8K free-tier throttle.)
+_GPT_OSS_ENDPOINT = {"gpt-oss-120b": "openrouter", "gpt-oss-nim": "nvidia"}
 _PERM = re.compile(r'HTTP\s*(?:400|401|403|404|410)\b', re.IGNORECASE)
 
 
@@ -552,7 +550,7 @@ async def _call_tools_with_retry(model_id, messages, tools, max_tokens,
     endpoint. Non-gpt-oss models keep the single-endpoint behavior."""
     from clients.nvidia import call_nvidia_tools
     short = model_id.split('/')[-1]
-    providers = list(_GPT_OSS_PROVIDERS) if "gpt-oss" in short else [""]
+    providers = [_GPT_OSS_ENDPOINT[short]] if short in _GPT_OSS_ENDPOINT else [""]
     last = None
     for pi, provider in enumerate(providers):
         for attempt in range(per_provider_retries):

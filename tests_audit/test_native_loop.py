@@ -207,11 +207,9 @@ def test_loop_transient_error_then_success():
 def test_loop_hard_error_gives_up():
     ctx, rel, root = _mk_ctx()
     try:
-        # gpt-oss now cycles its endpoints (OpenRouter → NVIDIA NIM) before the
-        # loop gives up — a real permanent error (HTTP 400) recurs on EVERY
-        # endpoint, so script it once per provider so all are exhausted.
-        from core.native_tools import _GPT_OSS_PROVIDERS
-        script = [RuntimeError("NVIDIA HTTP 400: malformed request")] * (len(_GPT_OSS_PROVIDERS) + 1)
+        # A permanent error (HTTP 400) on every call → the loop gives up.
+        # (gpt-oss-120b pins ONE endpoint now; the chain ORDER is in code.)
+        script = [RuntimeError("NVIDIA HTTP 400: malformed request")] * 3
         res, model = _run(script, ctx)
         assert res["done"] is False
         assert res["files_changed"] == []

@@ -42,6 +42,7 @@ MODELS = {
     # gpt-oss-120b on NIM + qwen3-coder on NIM — deep cross-provider fallback
     # targets for the most-redundant backbone models.
     "nvidia/gpt-oss-120b":   {"window": 128_000, "tpm": None, "provider": "nvidia"},
+    "nvidia/gpt-oss-nim":    {"window": 128_000, "tpm": None, "provider": "nvidia"},  # gpt-oss on NIM (coder chain slot 4, native)
     "nvidia/qwen3-coder":    {"window": 256_000, "tpm": None, "provider": "nvidia"},
 
     # z.ai / Zhipu (free GLM-Flash tier — the realistic free GLM)
@@ -98,6 +99,7 @@ NVIDIA_MODEL_IDS = {
     "nvidia/nemotron-super":    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/ultralong-8b":      "nvidia/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct",
     "nvidia/gpt-oss-120b":      "openai/gpt-oss-120b",
+    "nvidia/gpt-oss-nim":       "openai/gpt-oss-120b",  # NOT in OPENROUTER_FORCED → routes to NIM
     "nvidia/qwen3-coder":       "qwen/qwen3-coder-480b-a35b-instruct",
 }
 
@@ -193,14 +195,11 @@ NVIDIA_FALLBACKS = {
         "pollinations/qwen-coder", "nvidia/glm-5.1",
     ),
     "nvidia/qwen3-coder": (
-        # User-chosen coder chain (2026-05-28): coder's text fallback after native
-        # gpt-oss. mistral/large (128K ctx, flagship, NO 8K throttle) then glm-5.1
-        # (last resort). z.ai glm-4.7-flash was DROPPED from the coder path: its
-        # free tier throttles >8K-context requests to ~1% concurrency, and our
-        # prompts are always >8K — so it just 429s (code 1302). Extras after are
-        # deeper redundancy.
+        # Text-coder fallback within call_with_retry. The EXACT coder order
+        # (gpt-OR → qwen → mistral → gpt-NIM(native) → glm) is orchestrated in code
+        # (_implement_one_step), since gpt-NIM must run the NATIVE loop, not text —
+        # so it is NOT in this text chain. mistral/large → glm-5.1 only.
         "mistral/large", "nvidia/glm-5.1",
-        "mistral/codestral", "nvidia/deepseek-v4-flash", "zai/glm-4.7-flash",
     ),
     "nvidia/nemotron-super": (
         "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
@@ -215,14 +214,13 @@ NVIDIA_FALLBACKS = {
         "nvidia/minimax-m2.5", "mistral/codestral",
     ),
     "nvidia/gpt-oss-120b": (
-        # Coder flow (user-chosen 2026-05-29): gpt-oss (native, multi-endpoint
-        # OR→NIM) FIRST, then the TEXT CODER CHAIN — qwen3-coder → mistral/large
-        # → glm-5.1. mistral/large (flagship, 128K, no 8K throttle) sits BEFORE
-        # glm-5.1. (The native loop hands off to qwen3-coder in code; this chain
-        # is the same order for any text-path call of gpt-oss.)
+        # Text-path fallback for gpt-oss (rare; the native coder path orchestrates
+        # the real chain in code). qwen3-coder → mistral/large → glm-5.1.
         "nvidia/qwen3-coder", "mistral/large", "nvidia/glm-5.1",
-        "mistral/codestral", "zai/glm-4.7-flash",
     ),
+    # gpt-oss on NVIDIA NIM (coder chain slot 4, run NATIVE via code). If it's ever
+    # reached through call_with_retry, fall to glm-5.1.
+    "nvidia/gpt-oss-nim": ("nvidia/glm-5.1",),
 
     # ── reliable-provider primaries' onward chains ──
     "mistral/codestral": (

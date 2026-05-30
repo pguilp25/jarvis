@@ -184,6 +184,7 @@ async def call_with_retry(
     timeout: float = 0,  # 0 = auto-detect from provider
     log_label: str = "",
     stop_check: object = None,
+    no_fallback: bool = False,  # try ONLY model_id (no chain walk) — caller orchestrates order
 ) -> str:
     """
     Call a model with retries + exponential backoff + automatic fallback.
@@ -302,6 +303,11 @@ async def call_with_retry(
             warn(f"  ⚠️  {model_id}: {last_error}. Retry {error_attempt}/{max_retries} in {wait}s...")
             await asyncio.sleep(wait)
 
+    # no_fallback: the CALLER orchestrates cross-model order (e.g. the coder's
+    # explicit gpt→qwen→mistral→gpt-nim→glm chain) — don't walk this model's own
+    # NVIDIA_FALLBACKS, just report the failure so the caller moves to its next link.
+    if no_fallback:
+        raise RuntimeError(f"All retries failed for {model_id}: {last_error}")
     # v9.1 fix: walk the fallback chain (NVIDIA_FALLBACKS values are
     # TUPLES per config.py — previously the whole tuple was passed as
     # a model_id, silently breaking every fallback attempt).

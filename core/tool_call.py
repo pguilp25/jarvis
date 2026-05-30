@@ -2909,6 +2909,7 @@ async def call_with_tools(
     stop_on_tool_block: bool = False,
     cache_file_reads: bool = False,
     read_only_role: bool = False,
+    no_fallback: bool = False,   # try ONLY `model` (no chain walk) — caller orchestrates order
 ) -> dict:
     """
     Call a model with mid-thought tool use.
@@ -3146,6 +3147,7 @@ async def call_with_tools(
             model, current_prompt, max_tokens=max_tokens,
             stop_check=_stop_check,
             log_label=f"{log_label} — R{round_num}" if log_label else f"R{round_num}",
+            no_fallback=no_fallback,
         )
 
         # Apply [continue from: -N] backtrack directives BEFORE any other
@@ -4528,6 +4530,7 @@ async def call_with_tools(
                     model, current_prompt, max_tokens=max_tokens,
                     stop_check=None,  # no early stop — let it write everything
                     log_label=log_label + " (commit)",
+                    no_fallback=no_fallback,
                 )
                 # Strip any remaining signals — BOTH the full two-tag pairs
                 # AND the bare halves. Without the bare-half pass, a forced
