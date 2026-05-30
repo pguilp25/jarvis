@@ -9296,15 +9296,20 @@ def _extract_impl_steps(plan: str) -> list[dict]:
                 deps = [int(d) for d in dep_nums]
 
         # Parse FILES
+        _PATH_RE = r'([\w./\-]+\.(?:py|js|ts|jsx|tsx|html|css|json|lean|c|cpp|h|rs|java|go|rb|toml|yaml|yml|md|mjs|cjs|svelte|vue))'
         files = []
         files_match = re.search(r'FILES\s*[:]\s*(.+)', body, re.IGNORECASE)
         if files_match:
             files_text = files_match.group(1).strip()
-            file_paths = re.findall(
-                r'([\w./\-]+\.(?:py|js|ts|jsx|tsx|html|css|json|lean|c|cpp|h|rs|java|go|rb|toml|yaml|yml|md|mjs|cjs|svelte|vue))',
-                files_text,
-            )
+            file_paths = re.findall(_PATH_RE, files_text)
             files = list(dict.fromkeys(file_paths))  # dedup, preserve order
+        if not files:
+            # FALLBACK: the merger's forced-commit format names the file in the
+            # STEP HEADING ("### STEP 1 — pkg/mod.py: Add X") with no FILES: line.
+            # Without this, those steps parse files=[] and the coder loses its
+            # target — the exact bug that dropped openlibrary-08ac40's 2nd gold
+            # file. Pull any code path out of the step name/heading.
+            files = list(dict.fromkeys(re.findall(_PATH_RE, name)))
 
         # Parse step instructions (WHAT TO DO or DETAILS section)
         details = body
@@ -10616,7 +10621,27 @@ async def _implement_one_step(
     if shared_interfaces:
         iface_block = f"SHARED INTERFACES (use these EXACT names):\n{shared_interfaces}\n"
 
+    # ISSUE CONTEXT — the coder was previously fed ONLY the step text, never the
+    # problem statement / requirements / interface. So it invented symbol names,
+    # output shapes and behaviours the spec already pins. `task` carries the
+    # issue + Pro REQUIREMENTS + INTERFACE (and NO test — strict protocol), so
+    # handing it over is legitimate and high-signal. Tail-preserving cap: the
+    # INTERFACE (exact names/paths/signatures) sits at the END of `task`, so on a
+    # rare oversized task we keep head AND tail rather than truncating it away.
+    issue_ctx = ""
+    if task:
+        _t = task.strip()
+        _CAP = 4500
+        if len(_t) > _CAP:
+            _t = _t[: _CAP // 2] + "\n...\n" + _t[-_CAP // 2:]
+        issue_ctx = (
+            "=== THE ISSUE YOU ARE SOLVING (context — implement the STEP below, "
+            "not the whole issue) ===\n"
+            f"{_t}\n\n"
+        )
+
     step_instructions = (
+        f"{issue_ctx}"
         f"Implement ONLY this step:\n\n"
         f"STEP {step_num}: {step_name}\n"
         f"Files: {', '.join(step_files)}\n"

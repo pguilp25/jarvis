@@ -235,3 +235,33 @@ The fix should go in sympy/printing/latex.py
     # Traceback paths must NOT appear
     assert not any(".virtualenvs" in p for p in out)
     assert not any("/usr/lib/" in p for p in out)
+
+
+def test_impl_steps__file_in_heading_when_no_files_line():
+    """Merger forced-commit format names the file in the STEP HEADING with no
+    FILES: line (`### STEP N — pkg/mod.py: title`). The parser must recover the
+    target from the heading — else the coder loses its target (the bug that
+    dropped openlibrary-08ac40's second gold file)."""
+    plan = (
+        "## IMPLEMENTATION STEPS\n"
+        "### STEP 1 — openlibrary/catalog/marc/parse.py: Add ROLES dict\n"
+        "Add a ROLES mapping.\n"
+        "### STEP 2 — openlibrary/catalog/add_book/__init__.py: propagate role\n"
+        "In new_work, copy role onto each work author.\n"
+    )
+    out = _extract_impl_steps(plan)
+    assert out[0]["files"] == ["openlibrary/catalog/marc/parse.py"], out[0]["files"]
+    assert out[1]["files"] == ["openlibrary/catalog/add_book/__init__.py"], out[1]["files"]
+
+
+def test_impl_steps__files_line_still_preferred():
+    """The normal `FILES:` line format keeps working (heading fallback only
+    fires when no FILES: line yields a path)."""
+    plan = (
+        "## IMPLEMENTATION STEPS\n"
+        "### STEP 1: Add ROLES dict\n"
+        "FILES: openlibrary/catalog/marc/parse.py\n"
+        "Add a ROLES mapping.\n"
+    )
+    out = _extract_impl_steps(plan)
+    assert out[0]["files"] == ["openlibrary/catalog/marc/parse.py"], out[0]["files"]
