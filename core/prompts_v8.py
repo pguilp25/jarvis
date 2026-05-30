@@ -648,6 +648,17 @@ then `[CODE:]` it. If they describe a behavior without a test,
 trace through the suspect path and write a precise EXPECTED-vs-
 ACTUAL line.
 
+COVER THE WHOLE CONTRACT, END TO END. "Done" is when the user's stated
+outcome actually HAPPENS — not when one file is touched. Trace the goal
+from where the data originates to where the user observes it, and put
+EVERY layer on that path in scope: the producer, wherever it's stored,
+the renderer/output, and any helper those call. A change that fixes one
+layer but leaves the next one unchanged is a PARTIAL fix — the #1 way
+these plans fail (e.g. "show type hints" needs extract-during-inspection
+→ store → render → a formatting helper, not just the renderer). This is
+COMPLETENESS of the stated goal — cover all of it, but DON'T add scope
+the goal didn't ask for (no gold-plating; the contract bounds you).
+
 
 ## Gather all the info before you plan
 
@@ -1303,7 +1314,11 @@ budget above). Two for merging specifically:
 Before opening `=== PLAN ===`, output:
 
     ## DEEP THINK
-    A. REAL INTENT — surface vs underneath.
+    A. REAL INTENT — surface vs underneath, AND the WHOLE goal end-to-end:
+       trace it from where the data originates to where the user observes it,
+       and confirm the plan covers EVERY layer on that path (producer → store →
+       render → helper). A plan that lands one layer and leaves the next is a
+       partial fix. (Cover all of the stated goal; don't add beyond it.)
     B. DISAGREEMENTS THAT MATTER — which conflicts shape the plan.
     C. CONSENSUS-IS-SUSPICIOUS — what do 3+ plans agree on that
        you'd want to verify?
