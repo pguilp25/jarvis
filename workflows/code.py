@@ -11940,8 +11940,11 @@ async def _implement_one_step(
             status(f"  [native:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("native coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
             return _p
-        # EXACT coder chain (user 2026-05-29): gpt-oss(OR,native) -> qwen -> mistral
+        # EXACT coder chain: gpt-oss(OR,native) PRIMARY -> qwen -> mistral
         #   -> gpt-oss(NIM,native) -> glm-5.1. First link that produces edits wins.
+        #   (Reverted from the qwen-primary experiment: both free qwen routes failed as
+        #   primary — qwen3-480b 429-saturated, pollinations-qwen 0-edits. gpt-oss native
+        #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
                         ("mistral/large","text"), ("nvidia/gpt-oss-nim","native"),
                         ("nvidia/glm-5.1","text")]

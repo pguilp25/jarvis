@@ -608,6 +608,17 @@ def test_coder_prompts_ground_on_spec_literals():
             f"{nm} coder prompt still points at the held-out test (protocol violation)"
 
 
+def test_native_prompt_has_indent_by_scope_reasoning():
+    """ckpt 69: gpt-oss intermittently emits a new method's `def` one level too
+    deep (8| instead of 4|) → nested → AttributeError. The native coder prompt must
+    require reasoning about indent-by-SCOPE (match the sibling in the target scope,
+    not the line above) BEFORE the edit."""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    low = IMPLEMENT_NATIVE_PROMPT.lower()
+    assert "indent by scope" in low, "native prompt missing the indent-by-scope step"
+    assert "sibling" in low, "native prompt must tell the coder to match a sibling's indent"
+
+
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
 def test_replace_lines_syntax_gate_rejects_unparseable():
     """A native edit that makes a previously-parseable .py file fail to compile
