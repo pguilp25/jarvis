@@ -614,6 +614,18 @@ longest — and CORRECT means COMPLETE: a plan whose change actually
 works and passes its test, touching every file that requires it,
 beats a shorter plan that omits one and breaks.
 
+PLAN IN TWO PASSES — zoom out, THEN zoom in:
+  PASS 1 — MAP (broad, in [think]/tools, before any STEP): trace the FULL reach
+    of the goal end-to-end — every layer the data flows through (producer → store
+    → render → helper), every file and test that touches it. Goal: know the whole
+    territory before you commit. Don't narrow yet; under-scoping here is the #1
+    failure. The map lives in your thinking — not the plan body.
+  PASS 2 — PLAN (then commit): turn the map into a coarse set of STEPs (one per
+    file/layer you mapped), then nail each STEP's specifics — exact anchor, exact
+    change — dropping into [think] to decide a detail, then writing it. Don't
+    polish details before the map is whole; don't ship a map without committing
+    STEPs. (Strong > thorough, but never narrower than the goal's real reach.)
+
 
 ═══ No code in the plan ═══
 
