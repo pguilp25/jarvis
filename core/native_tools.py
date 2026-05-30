@@ -535,13 +535,35 @@ def _do_dependson(args: dict, ctx: dict) -> str:
     return extract_dependencies(sym, ctx.get("project_root", ""))
 
 
+def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
+    """Env-gated (JARVIS_DEBUG_EDITS=<path>) trace of every edit call + its result —
+    so we can see EXACTLY what new_content the coder emitted and why it was rejected.
+    Inert unless the env var is set. (Diagnostic for the 'why the coder failed' audit.)"""
+    import os
+    path = os.environ.get("JARVIS_DEBUG_EDITS")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*70}\nTOOL {tool}  args: start={args.get('start_line')} "
+                    f"end={args.get('end_line')} path={args.get('path')}\n"
+                    f"--- new_content ---\n{args.get('new_content', args.get('content',''))}\n"
+                    f"--- RESULT ---\n{result}\n")
+    except Exception:
+        pass
+
+
 async def _dispatch(name: str, args: dict, ctx: dict):
     if name == "read_file":
         return await _do_read(args, ctx)
     if name == "replace_lines":
-        return _do_replace(args, ctx)
+        res = _do_replace(args, ctx)
+        _debug_edit_trace("replace_lines", args, res)
+        return res
     if name == "create_file":
-        return _do_create(args, ctx)
+        res = _do_create(args, ctx)
+        _debug_edit_trace("create_file", args, res)
+        return res
     if name == "find_refs":
         return await _do_refs(args, ctx)
     if name == "find_callers":
