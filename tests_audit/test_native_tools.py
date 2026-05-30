@@ -589,6 +589,19 @@ def test_native_prompt_has_no_text_edit_format():
         assert tok not in IMPLEMENT_NATIVE_PROMPT, f"native prompt leaks text-protocol token {tok!r}"
 
 
+def test_coder_prompts_ground_on_test_literals():
+    """ckpt 64: the #1 SWE-bench-Pro resolution failure was the coder inventing a
+    plausible-but-wrong value ('editor' vs the test's 'Editor'). Both coder prompts
+    must instruct it to read the failing test and copy the asserted literal exactly.
+    Pins the instruction so it can't silently regress."""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT, IMPLEMENT_PROMPT
+    for nm, t in (("native", IMPLEMENT_NATIVE_PROMPT), ("text", IMPLEMENT_PROMPT)):
+        low = t.lower()
+        assert "don't invent" in low, f"{nm} coder prompt dropped the don't-invent-the-value rule"
+        assert "'Editor'" in t and "'editor'" in t, \
+            f"{nm} coder prompt dropped the Editor≠editor exact-literal example"
+
+
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
 def test_replace_lines_syntax_gate_rejects_unparseable():
     """A native edit that makes a previously-parseable .py file fail to compile
