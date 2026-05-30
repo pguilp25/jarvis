@@ -655,6 +655,25 @@ def test_replace_lines_syntax_gate_allows_valid_edit():
         _cleanup(root)
 
 
+def test_replace_lines_dup_gate_rejects_duplicate_block():
+    """ckpt 65: re-emitting an anchor block AND a copy → duplicate adjacent
+    statements (the 1a9e74bf bug). The gate must reject, not write."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        # greet's body (line 6) → a yield then an identical yield (dup adjacent)
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 6, "end_line": 6,
+                     "new_content": ('    self.cache.store(name, "hello", overwrite=True)\n'
+                                     '    self.cache.store(name, "hello", overwrite=True)')}, ctx)
+        assert out.startswith("✗"), out
+        assert "duplicate" in out.lower()
+        assert ctx["file_contents"][rel] == SRC
+        assert rel not in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
 def test_create_file_syntax_gate_rejects_unparseable():
     """A new .py module that doesn't parse would ImportError on first import —
     reject before writing."""

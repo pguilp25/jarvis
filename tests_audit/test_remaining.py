@@ -2,7 +2,8 @@
 `_mask_inert_zones`."""
 import pytest
 import asyncio
-from workflows.code import _check_syntax, _mask_inert_zones, _unreachable_after_jump
+from workflows.code import (_check_syntax, _mask_inert_zones, _unreachable_after_jump,
+                            _duplicate_adjacent_stmts)
 from core.tool_call import _strip_think
 
 
@@ -174,6 +175,42 @@ def test_unreachable__guard_return_then_outer_body_clean():
 def test_unreachable__unparseable_returns_empty():
     """Unparseable input is the syntax gate's job — the detector stays quiet."""
     assert _unreachable_after_jump("def f(:\n  return 1\n") == {}
+
+
+# ───────────────── _duplicate_adjacent_stmts ─────────────────
+
+def test_dup__duplicated_if_yield_block_flagged():
+    """The qutebrowser-1a9e74 insert footgun: re-emitting an anchor block AND
+    your own copy → two structurally-identical adjacent statements."""
+    src = ("def _args(flags):\n"
+           "    enabled = list(features(flags))\n"
+           "    if enabled:\n"
+           "        yield '--enable-features=' + ','.join(enabled)\n"
+           "    if enabled:\n"
+           "        yield '--enable-features=' + ','.join(enabled)\n")
+    dup = _duplicate_adjacent_stmts(src)
+    assert 5 in dup, dup
+
+
+def test_dup__distinct_adjacent_stmts_clean():
+    """Different adjacent statements are NOT flagged."""
+    src = ("def _args(flags):\n"
+           "    enabled = list(features(flags))\n"
+           "    if enabled:\n"
+           "        yield '--enable-features=' + ','.join(enabled)\n"
+           "    yield '--blink-settings=x'\n")
+    assert _duplicate_adjacent_stmts(src) == {}
+
+
+def test_dup__trivial_repeats_not_flagged():
+    """Tiny statements (dump < 40 chars) are below threshold — avoid false
+    positives on legit short repeats."""
+    src = "def f():\n    pass\n    pass\n"   # Pass() dumps to ~6 chars
+    assert _duplicate_adjacent_stmts(src) == {}
+
+
+def test_dup__unparseable_returns_empty():
+    assert _duplicate_adjacent_stmts("def f(:\n  x\n") == {}
 
 
 def test_syntax__valid_class_ok():

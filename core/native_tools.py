@@ -305,7 +305,8 @@ def _do_replace(args: dict, ctx: dict) -> str:
         # introduced — if the file was already broken, let it through rather than
         # send the coder chasing a pre-existing error in unrelated code.
         if path.endswith(".py"):
-            from workflows.code import _check_syntax, _unreachable_after_jump
+            from workflows.code import (_check_syntax, _unreachable_after_jump,
+                                        _duplicate_adjacent_stmts)
             ok_after, _serr = _check_syntax(path, result[path])
             if not ok_after and (before is None or _check_syntax(path, before)[0]):
                 return (f"✗ replace_lines NOT applied to {path}: your new_content makes "
@@ -327,6 +328,20 @@ def _do_replace(args: dict, ctx: dict) -> str:
                             f"return/raise at the same indent, so it never runs (the "
                             f"file is unchanged). If that logic should run on the "
                             f"success path, DEDENT it OUT of the guard block, then "
+                            f"re-send the SAME line range {s_i}-{e_i}.")
+                # Catch the insert footgun: re-emitting an anchor block AND your own
+                # copy → two structurally-identical adjacent statements (the
+                # 1a9e74bf duplicated `yield --enable-features` bug). Only flag dups
+                # THIS edit introduced.
+                new_dup = _duplicate_adjacent_stmts(result[path])
+                old_dup = _duplicate_adjacent_stmts(before) if before else {}
+                if len(new_dup) > len(old_dup):
+                    where = "; ".join(f"line {ln}: `{txt}`"
+                                      for ln, txt in sorted(new_dup.items())[:3])
+                    return (f"✗ replace_lines NOT applied to {path}: your edit creates "
+                            f"DUPLICATE adjacent code — {where} repeats the statement "
+                            f"right before it (the file is unchanged). You likely "
+                            f"re-emitted an anchor block AND your new copy. Keep ONE; "
                             f"re-send the SAME line range {s_i}-{e_i}.")
         sb = ctx.get("sandbox")
         if sb is not None:
@@ -401,7 +416,8 @@ def _do_create(args: dict, ctx: dict) -> str:
         # moment anything (incl. the test) imports it. Reject before writing so the
         # coder re-sends a corrected body, rather than ship a dead file.
         if path.endswith(".py"):
-            from workflows.code import _check_syntax, _unreachable_after_jump
+            from workflows.code import (_check_syntax, _unreachable_after_jump,
+                                        _duplicate_adjacent_stmts)
             ok_new, _serr = _check_syntax(path, produced)
             if not ok_new:
                 return (f"✗ create_file NOT written: {path} fails to parse, so it was "
@@ -414,6 +430,13 @@ def _do_create(args: dict, ctx: dict) -> str:
                 return (f"✗ create_file NOT written: {path} has UNREACHABLE code — "
                         f"{where} comes right after a return/raise at the same indent, "
                         f"so it never runs. Fix the indentation and re-send the full body.")
+            dup = _duplicate_adjacent_stmts(produced)
+            if dup:
+                where = "; ".join(f"line {ln}: `{txt}`"
+                                  for ln, txt in sorted(dup.items())[:3])
+                return (f"✗ create_file NOT written: {path} has DUPLICATE adjacent code — "
+                        f"{where} repeats the statement right before it. Keep ONE copy "
+                        f"and re-send the full body.")
         if ctx.get("sandbox") is not None:
             try:
                 ctx["sandbox"].write_file(path, produced)

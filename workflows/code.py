@@ -6377,6 +6377,39 @@ def _unreachable_after_jump(src: str) -> dict:
     return bad
 
 
+def _duplicate_adjacent_stmts(src: str) -> dict:
+    """Statements that are STRUCTURALLY IDENTICAL to their immediately-preceding
+    sibling in the same block — valid Python, near-certain a copy-paste/insert
+    bug. Catches the replace_lines insert footgun where the model re-emits an
+    anchor block it was supposed to keep AND its own copy (e.g. qutebrowser-1a9e74:
+    two identical `if enabled_features: yield '--enable-features=...'` blocks →
+    the test wants exactly ONE such flag). Returns {lineno: stripped-source}.
+    Only non-trivial statements (dump length > 40) to avoid flagging legit tiny
+    repeats. Empty on unparseable input."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return {}
+    lines = src.splitlines()
+    bad: dict = {}
+    for node in _ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            prev_dump = None
+            for st in stmts:
+                if not isinstance(st, _ast.stmt):
+                    continue
+                d = _ast.dump(st)  # excludes line/col by default → structural compare
+                if d == prev_dump and len(d) > 40 and st.lineno not in bad:
+                    bad[st.lineno] = (lines[st.lineno - 1].strip()[:60]
+                                      if st.lineno <= len(lines) else "")
+                prev_dump = d
+    return bad
+
+
 async def _call(model: str, prompt: str, max_tokens: int = 16384, log_label: str = "") -> dict:
     result = await call_with_retry(model, prompt, max_tokens=max_tokens, log_label=log_label)
     return {"model": model, "answer": result}
@@ -11424,10 +11457,12 @@ async def _implement_one_step(
             # Snapshot pre-existing unreachable-after-jump code too, so we only
             # flag dead code THIS edit introduced (not a bug already in the file).
             pre_edit_dead = {}
+            pre_edit_dup = {}
             for fp in produced:
                 oc = file_contents.get(fp, "")
                 if oc and fp.endswith(".py"):
                     pre_edit_dead[fp] = len(_unreachable_after_jump(oc))
+                    pre_edit_dup[fp] = len(_duplicate_adjacent_stmts(oc))
 
             syntax_errors = {}
             for fp, content in produced.items():
@@ -11445,6 +11480,7 @@ async def _implement_one_step(
                 # silently wrong.) Route it into the same focused fix loop.
                 elif passed and fp.endswith(".py"):
                     dead = _unreachable_after_jump(content)
+                    dup = _duplicate_adjacent_stmts(content)
                     if len(dead) > pre_edit_dead.get(fp, 0):
                         where = "; ".join(f"line {ln}: `{txt}`"
                                           for ln, txt in sorted(dead.items())[:3])
@@ -11454,6 +11490,14 @@ async def _implement_one_step(
                             f"If that logic should run on the success path, DEDENT "
                             f"it out of the guard block.")
                         warn(f"    {fp}: unreachable code after return/raise")
+                    elif len(dup) > pre_edit_dup.get(fp, 0):
+                        where = "; ".join(f"line {ln}: `{txt}`"
+                                          for ln, txt in sorted(dup.items())[:3])
+                        syntax_errors[fp] = (
+                            f"Duplicate adjacent code — {where} repeats the statement "
+                            f"right before it. You likely re-emitted an anchor block "
+                            f"AND your new copy; keep exactly ONE.")
+                        warn(f"    {fp}: duplicate adjacent statement")
 
             # ── 4. Syntax-fix-only loop ───────────────────────────────────
             # The general LLM self-review pass was removed: when files parse,
