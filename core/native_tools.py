@@ -244,6 +244,38 @@ async def _do_read(args: dict, ctx: dict) -> str:
     return out
 
 
+def _unreachable_after_jump(src: str) -> dict:
+    """Lines that are UNREACHABLE because they follow a return/raise/break/continue
+    at the same block level (valid Python, but a near-certain bug). This catches the
+    over-indentation slip where a model indents real logic INTO a guard's if-block —
+    e.g. `if not ok: return NotImplemented` followed by the merge body at the same
+    indent → the body is dead and the success path falls through to None. Returns
+    {lineno: stmt-source-snippet}. Empty on unparseable input (the syntax gate owns that)."""
+    import ast
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return {}
+    lines = src.splitlines()
+    bad = {}
+    TERM = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            terminated = False
+            for st in stmts:
+                if not isinstance(st, ast.stmt):
+                    continue
+                if terminated and st.lineno not in bad:
+                    snip = lines[st.lineno - 1].strip()[:60] if st.lineno <= len(lines) else ""
+                    bad[st.lineno] = snip
+                if isinstance(st, TERM):
+                    terminated = True
+    return bad
+
+
 def _do_replace(args: dict, ctx: dict) -> str:
     # Reuse the proven [REPLACE LINES] machinery (applier + validation gate +
     # actual-line reject feedback) by building the text block the runtime
@@ -297,6 +329,37 @@ def _do_replace(args: dict, ctx: dict) -> str:
                     f"byte-identical to lines {s_i}-{e_i}. Nothing changed — if you "
                     f"intended a change, re-check new_content; if the file is already "
                     f"correct, call finish.")
+        # SYNTAX GATE — parity with the text coder's parse gate (code.py:11374).
+        # A native edit that makes a previously-parseable .py file un-importable
+        # must NOT ship silently (that's how an IndentationError reached a final
+        # patch). Reject WITHOUT writing or mutating state so the loop re-targets
+        # the same (now-unchanged) lines and retries. Only block errors THIS edit
+        # introduced — if the file was already broken, let it through rather than
+        # send the coder chasing a pre-existing error in unrelated code.
+        if path.endswith(".py"):
+            from workflows.code import _check_syntax
+            ok_after, _serr = _check_syntax(path, result[path])
+            if not ok_after and (before is None or _check_syntax(path, before)[0]):
+                return (f"✗ replace_lines NOT applied to {path}: your new_content makes "
+                        f"the file fail to parse, so it was NOT written (the file is "
+                        f"unchanged). Fix the error below and re-send the SAME line "
+                        f"range {s_i}-{e_i}.\n{_serr}")
+            # Catch the over-indentation slip: valid Python where the edit buried
+            # real logic as DEAD CODE after a return/raise (e.g. merge body indented
+            # into a guard's if-block → success path returns None). Only flag code
+            # THIS edit made newly-unreachable.
+            if ok_after:
+                new_dead = _unreachable_after_jump(result[path])
+                old_dead = _unreachable_after_jump(before) if before else {}
+                if len(new_dead) > len(old_dead):
+                    where = "; ".join(f"line {ln}: `{txt}`"
+                                      for ln, txt in sorted(new_dead.items())[:3])
+                    return (f"✗ replace_lines NOT applied to {path}: your edit leaves "
+                            f"UNREACHABLE code — {where} comes right after a "
+                            f"return/raise at the same indent, so it never runs (the "
+                            f"file is unchanged). If that logic should run on the "
+                            f"success path, DEDENT it OUT of the guard block, then "
+                            f"re-send the SAME line range {s_i}-{e_i}.")
         sb = ctx.get("sandbox")
         if sb is not None:
             try:
@@ -366,6 +429,23 @@ def _do_create(args: dict, ctx: dict) -> str:
         viewed_versions=ctx.get("viewed_versions"))
     produced = result.get(path) if path in result else ext.get("new_files", {}).get(path)
     if produced is not None:
+        # SYNTAX GATE — a new .py module that doesn't parse would ImportError the
+        # moment anything (incl. the test) imports it. Reject before writing so the
+        # coder re-sends a corrected body, rather than ship a dead file.
+        if path.endswith(".py"):
+            from workflows.code import _check_syntax
+            ok_new, _serr = _check_syntax(path, produced)
+            if not ok_new:
+                return (f"✗ create_file NOT written: {path} fails to parse, so it was "
+                        f"not created. Fix the error below and re-send the full file "
+                        f"body in `content`.\n{_serr}")
+            dead = _unreachable_after_jump(produced)
+            if dead:
+                where = "; ".join(f"line {ln}: `{txt}`"
+                                  for ln, txt in sorted(dead.items())[:3])
+                return (f"✗ create_file NOT written: {path} has UNREACHABLE code — "
+                        f"{where} comes right after a return/raise at the same indent, "
+                        f"so it never runs. Fix the indentation and re-send the full body.")
         if ctx.get("sandbox") is not None:
             try:
                 ctx["sandbox"].write_file(path, produced)

@@ -587,3 +587,70 @@ def test_native_prompt_has_no_text_edit_format():
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
     for tok in ("=== EDIT:", "[edit:", "[REPLACE LINES", "[STOP][CONFIRM_STOP]"):
         assert tok not in IMPLEMENT_NATIVE_PROMPT, f"native prompt leaks text-protocol token {tok!r}"
+
+
+# ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
+def test_replace_lines_syntax_gate_rejects_unparseable():
+    """A native edit that makes a previously-parseable .py file fail to compile
+    must be REJECTED, not written + reported '✓ Applied' (that's how an
+    IndentationError reached a final patch before this gate). File stays unchanged."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        # replace the greet def (lines 4-6) with a colon-less def → SyntaxError
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 4, "end_line": 6,
+                     "new_content": "def greet(name)\n    return name"}, ctx)
+        assert out.startswith("✗"), out
+        assert "parse" in out.lower()
+        assert ctx["file_contents"][rel] == SRC          # unchanged
+        assert rel not in ctx["files_changed"]
+        assert ctx["sandbox"].load_file(rel) == SRC      # disk unchanged
+    finally:
+        _cleanup(root)
+
+
+def test_replace_lines_unreachable_gate_rejects_dead_code():
+    """The 0ea40e09 failure: valid Python where the edit buried real logic as
+    dead code after a return (success path silently returns None). Must reject."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        # replace greet's body (line 6) with a return followed by an unreachable stmt
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 6, "end_line": 6,
+                     "new_content": '    return "hi"\n    print("dead")'}, ctx)
+        assert out.startswith("✗"), out
+        assert "unreachable" in out.lower()
+        assert ctx["file_contents"][rel] == SRC          # unchanged
+        assert rel not in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
+def test_replace_lines_syntax_gate_allows_valid_edit():
+    """The gates must NOT block a clean edit — a valid one still applies."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)
+        out = _disp("replace_lines",
+                    {"path": rel, "start_line": 6, "end_line": 6,
+                     "new_content": '    return "hey " + name'}, ctx)
+        assert out.startswith("✓ Applied"), out
+        assert rel in ctx["files_changed"]
+    finally:
+        _cleanup(root)
+
+
+def test_create_file_syntax_gate_rejects_unparseable():
+    """A new .py module that doesn't parse would ImportError on first import —
+    reject before writing."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("create_file",
+                    {"path": "broken.py", "content": "def f(\n    return 1"}, ctx)
+        assert out.startswith("✗"), out
+        assert "broken.py" not in ctx["files_changed"]
+        assert ctx["sandbox"].load_file("broken.py") in (None, "")
+    finally:
+        _cleanup(root)
