@@ -1,6 +1,7 @@
 """
 Unified API — routes call to correct provider client.
 """
+import os
 
 from clients.groq import call_groq, call_groq_stream
 from clients.nvidia import call_nvidia, call_nvidia_stream
@@ -56,6 +57,13 @@ async def call_api_stream(
     Returns the complete response text.
     """
     from core import thought_logger
+
+    # TEST HOOK (inert unless set): JARVIS_FORCE_FAIL_MODELS=comma,substrings makes
+    # any matching model raise a permanent error — used to FORCE the coder fallback
+    # chain to walk through each link under controlled conditions. Zero prod impact.
+    _ff = os.environ.get("JARVIS_FORCE_FAIL_MODELS", "")
+    if _ff and any(s and s in model_id for s in _ff.split(",")):
+        raise RuntimeError(f"HTTP 404: forced test failure for {model_id} (JARVIS_FORCE_FAIL_MODELS)")
 
     provider = MODELS[model_id]["provider"]
 

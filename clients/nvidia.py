@@ -271,6 +271,11 @@ async def call_nvidia_tools(
     _route (gpt-oss → OpenRouter :free). Non-streaming — tool-calling turns are
     bounded and we need the whole tool_calls array at once. Raises on non-200 so
     the caller can retry / fall over (same error strings retry.py classifies)."""
+    # TEST HOOK (inert unless set) — see clients/api.py. Forces this native model
+    # to raise so the coder fallback chain can be exercised under controlled cond.
+    _ff = os.environ.get("JARVIS_FORCE_FAIL_MODELS", "")
+    if _ff and any(s and s in model_id for s in _ff.split(",")):
+        raise RuntimeError(f"HTTP 404: forced test failure for {model_id} (JARVIS_FORCE_FAIL_MODELS)")
     await nvidia_limiter.acquire()
     thinking(model_id)
     if force_provider:
