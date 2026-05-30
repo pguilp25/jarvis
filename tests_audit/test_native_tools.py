@@ -619,6 +619,16 @@ def test_native_prompt_has_indent_by_scope_reasoning():
     assert "sibling" in low, "native prompt must tell the coder to match a sibling's indent"
 
 
+def test_native_prompt_has_anti_over_elaboration_rule():
+    """ckpt 71: the coder over-elaborates (returns a wrapped type when a plain dict
+    is asked, appends an extra command flag, combines 'X or Y' alternatives). The
+    prompt must say the spec is a CEILING — implement only the stated behaviour."""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    low = IMPLEMENT_NATIVE_PROMPT.lower()
+    assert "ceiling" in low, "native prompt missing the spec-is-a-ceiling rule"
+    assert "pick exactly one" in low, "native prompt must say pick ONE of offered alternatives"
+
+
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
 def test_replace_lines_syntax_gate_rejects_unparseable():
     """A native edit that makes a previously-parseable .py file fail to compile
