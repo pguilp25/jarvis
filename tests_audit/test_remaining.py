@@ -2,7 +2,7 @@
 `_mask_inert_zones`."""
 import pytest
 import asyncio
-from workflows.code import _check_syntax, _mask_inert_zones
+from workflows.code import _check_syntax, _mask_inert_zones, _unreachable_after_jump
 from core.tool_call import _strip_think
 
 
@@ -135,6 +135,45 @@ def test_syntax__unicode_identifiers_ok():
     ok, msg = _check_syntax("test.py", "résumé = 1\n")
     # Python 3 accepts unicode identifiers
     assert ok
+
+
+# ───────────────── _unreachable_after_jump ─────────────────
+
+def test_unreachable__dead_code_after_return_in_guard():
+    """The 0ea40e09 over-indent class: real logic indented INTO a guard's
+    if-block sits after `return` at the same level → unreachable. Must flag it."""
+    src = ("def __or__(self, other):\n"
+           "    if not isinstance(other, dict):\n"
+           "        return NotImplemented\n"
+           "        merged = dict(self.data)\n"   # dead — same indent as the return
+           "        return merged\n")
+    dead = _unreachable_after_jump(src)
+    assert 4 in dead and 5 in dead, dead
+
+
+def test_unreachable__correct_dedented_code_clean():
+    """The CORRECT shape (body dedented OUT of the guard) flags nothing."""
+    src = ("def __or__(self, other):\n"
+           "    if not isinstance(other, dict):\n"
+           "        return NotImplemented\n"
+           "    merged = dict(self.data)\n"
+           "    return merged\n")
+    assert _unreachable_after_jump(src) == {}
+
+
+def test_unreachable__guard_return_then_outer_body_clean():
+    """A return that IS the last stmt of its block (early-return guard) is fine."""
+    src = ("def f(x):\n"
+           "    for i in x:\n"
+           "        if i:\n"
+           "            return i\n"
+           "    return None\n")
+    assert _unreachable_after_jump(src) == {}
+
+
+def test_unreachable__unparseable_returns_empty():
+    """Unparseable input is the syntax gate's job — the detector stays quiet."""
+    assert _unreachable_after_jump("def f(:\n  return 1\n") == {}
 
 
 def test_syntax__valid_class_ok():

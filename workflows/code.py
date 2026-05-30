@@ -6344,6 +6344,38 @@ def _check_syntax(filepath: str, content: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _unreachable_after_jump(src: str) -> dict:
+    """Python lines that are UNREACHABLE because they follow a
+    return/raise/break/continue at the SAME block level — valid Python, but a
+    near-certain bug. Catches the over-indentation slip where a model indents
+    real logic INTO a guard's if-block (e.g. `if not ok: return X` followed by
+    the real body at the same indent → the body is dead, the success path falls
+    through to None). Returns {lineno: stripped-source}. Empty on unparseable
+    input (the syntax gate owns that) or non-.py callers (caller guards ext)."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return {}
+    lines = src.splitlines()
+    bad: dict = {}
+    TERM = (_ast.Return, _ast.Raise, _ast.Break, _ast.Continue)
+    for node in _ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            terminated = False
+            for st in stmts:
+                if not isinstance(st, _ast.stmt):
+                    continue
+                if terminated and st.lineno not in bad:
+                    bad[st.lineno] = (lines[st.lineno - 1].strip()[:60]
+                                      if st.lineno <= len(lines) else "")
+                if isinstance(st, TERM):
+                    terminated = True
+    return bad
+
 
 async def _call(model: str, prompt: str, max_tokens: int = 16384, log_label: str = "") -> dict:
     result = await call_with_retry(model, prompt, max_tokens=max_tokens, log_label=log_label)
@@ -11364,6 +11396,14 @@ async def _implement_one_step(
                     if not ok:
                         pre_edit_errors[fp] = msg
 
+            # Snapshot pre-existing unreachable-after-jump code too, so we only
+            # flag dead code THIS edit introduced (not a bug already in the file).
+            pre_edit_dead = {}
+            for fp in produced:
+                oc = file_contents.get(fp, "")
+                if oc and fp.endswith(".py"):
+                    pre_edit_dead[fp] = len(_unreachable_after_jump(oc))
+
             syntax_errors = {}
             for fp, content in produced.items():
                 sandbox.write_file(fp, content)
@@ -11375,6 +11415,20 @@ async def _implement_one_step(
                 if not passed and fp not in pre_edit_errors:
                     syntax_errors[fp] = err_msg
                     warn(f"    {fp}: syntax error detected")
+                # Parses, but did the edit BURY logic as dead code after a
+                # return/raise? (the 0ea40e09 over-indent class — valid Python,
+                # silently wrong.) Route it into the same focused fix loop.
+                elif passed and fp.endswith(".py"):
+                    dead = _unreachable_after_jump(content)
+                    if len(dead) > pre_edit_dead.get(fp, 0):
+                        where = "; ".join(f"line {ln}: `{txt}`"
+                                          for ln, txt in sorted(dead.items())[:3])
+                        syntax_errors[fp] = (
+                            f"Unreachable code — {where} comes right after a "
+                            f"return/raise at the same indent, so it never runs. "
+                            f"If that logic should run on the success path, DEDENT "
+                            f"it out of the guard block.")
+                        warn(f"    {fp}: unreachable code after return/raise")
 
             # ── 4. Syntax-fix-only loop ───────────────────────────────────
             # The general LLM self-review pass was removed: when files parse,

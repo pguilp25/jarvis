@@ -244,38 +244,6 @@ async def _do_read(args: dict, ctx: dict) -> str:
     return out
 
 
-def _unreachable_after_jump(src: str) -> dict:
-    """Lines that are UNREACHABLE because they follow a return/raise/break/continue
-    at the same block level (valid Python, but a near-certain bug). This catches the
-    over-indentation slip where a model indents real logic INTO a guard's if-block —
-    e.g. `if not ok: return NotImplemented` followed by the merge body at the same
-    indent → the body is dead and the success path falls through to None. Returns
-    {lineno: stmt-source-snippet}. Empty on unparseable input (the syntax gate owns that)."""
-    import ast
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:
-        return {}
-    lines = src.splitlines()
-    bad = {}
-    TERM = (ast.Return, ast.Raise, ast.Break, ast.Continue)
-    for node in ast.walk(tree):
-        for field in ("body", "orelse", "finalbody"):
-            stmts = getattr(node, field, None)
-            if not isinstance(stmts, list):
-                continue
-            terminated = False
-            for st in stmts:
-                if not isinstance(st, ast.stmt):
-                    continue
-                if terminated and st.lineno not in bad:
-                    snip = lines[st.lineno - 1].strip()[:60] if st.lineno <= len(lines) else ""
-                    bad[st.lineno] = snip
-                if isinstance(st, TERM):
-                    terminated = True
-    return bad
-
-
 def _do_replace(args: dict, ctx: dict) -> str:
     # Reuse the proven [REPLACE LINES] machinery (applier + validation gate +
     # actual-line reject feedback) by building the text block the runtime
@@ -337,7 +305,7 @@ def _do_replace(args: dict, ctx: dict) -> str:
         # introduced — if the file was already broken, let it through rather than
         # send the coder chasing a pre-existing error in unrelated code.
         if path.endswith(".py"):
-            from workflows.code import _check_syntax
+            from workflows.code import _check_syntax, _unreachable_after_jump
             ok_after, _serr = _check_syntax(path, result[path])
             if not ok_after and (before is None or _check_syntax(path, before)[0]):
                 return (f"✗ replace_lines NOT applied to {path}: your new_content makes "
@@ -433,7 +401,7 @@ def _do_create(args: dict, ctx: dict) -> str:
         # moment anything (incl. the test) imports it. Reject before writing so the
         # coder re-sends a corrected body, rather than ship a dead file.
         if path.endswith(".py"):
-            from workflows.code import _check_syntax
+            from workflows.code import _check_syntax, _unreachable_after_jump
             ok_new, _serr = _check_syntax(path, produced)
             if not ok_new:
                 return (f"✗ create_file NOT written: {path} fails to parse, so it was "
