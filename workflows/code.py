@@ -10557,6 +10557,1177 @@ async def _implement_one_step(
     # native dispatcher reuses), so we return the changed files like the text path.
     from core.native_tools import is_native_tool_model, call_with_native_tools
     _coder_model = IMPLEMENT_MODEL   # text path uses this; native fallover overrides it
+    async def _text_pass(coder_model, _no_fb=True):
+        MAX_RETRIES = 5
+        # Snapshot the file content as it is at the START of this step (before any
+        # edit this step). The no-op detector must compare a produced edit against
+        # THIS baseline — NOT the running `file_contents`, which on_stop mutates
+        # mid-attempt. Without it, an edit that on_stop already applied looks
+        # identical to "current" and is falsely flagged a no-op → wasteful retry /
+        # FORCE-DONE loop (seen on django-12143 once block_edits started applying).
+        _step_orig_contents = {fp: c for fp, c in file_contents.items()}
+        _EDIT_UNDO.clear(); _EDIT_ORIG.clear()   # per-step undo history (numbers + file originals)
+        # Across-attempt state — carries forward what the model thought and
+        # tried in earlier attempts so it doesn't start from scratch.
+        prev_attempt_thinking = ""
+        prev_attempt_summary = ""
+        for attempt in range(1, MAX_RETRIES + 1):
+            _wlog.phase_event(
+                f"Step {step_num} attempt {attempt}/{MAX_RETRIES}",
+            )
+            # Only load files this step modifies
+            step_file_contents = {}
+            modify_set = set()
+
+            # If the plan step had no FILES: line, try to infer from the step body.
+            # A missing FILES: line causes _build_file_block to return "(no existing
+            # files — create all files from scratch)", making the coder think every
+            # file is new and triggering === FILE: === rewrites of existing files.
+            effective_files = list(step_files)
+            if not effective_files:
+                _file_pat = re.compile(
+                    r'[\w./\-]+\.(?:py|js|ts|jsx|tsx|html|css|json|lean|c|cpp|h|rs|'
+                    r'java|go|rb|toml|yaml|yml|md|mjs|cjs|svelte|vue)'
+                )
+                found = _file_pat.findall(step_instructions + " " + step_details)
+                # Only include files that are already known to the project
+                known = set(file_contents.keys())
+                effective_files = list(dict.fromkeys(
+                    f for f in found if f in known
+                ))
+                if effective_files:
+                    warn(f"    Step {step_num}: no FILES: line — inferred {effective_files} from step body")
+
+            for fp in effective_files:
+                if fp in file_contents:
+                    step_file_contents[fp] = file_contents[fp]
+                    modify_set.add(fp)
+                else:
+                    # Try to find by basename — handles plans that wrote the wrong
+                    # path (e.g. "tool_call.py" when the file is "core/tool_call.py").
+                    basename = os.path.basename(fp)
+                    fuzzy = next(
+                        (k for k in file_contents
+                         if os.path.basename(k) == basename and file_contents[k]),
+                        None,
+                    )
+                    if fuzzy:
+                        warn(f"    Step {step_num}: '{fp}' not found — "
+                             f"resolved to '{fuzzy}' by basename match")
+                        step_file_contents[fuzzy] = file_contents[fuzzy]
+                        modify_set.add(fuzzy)
+                    else:
+                        full_path = os.path.join(project_root, fp)
+                        content = sandbox.load_file(fp) or read_file(full_path) or ""
+                        step_file_contents[fp] = content
+                        file_contents[fp] = content
+                        modify_set.add(fp)
+
+            file_block = _build_file_block(step_file_contents, modify_files=modify_set)
+
+            # Build prev_thinking block — only on attempt 2+
+            if prev_attempt_thinking:
+                prev_thinking_block = (
+                    f"\n══════════════════════════════════════════════════════════════════════\n"
+                    f"YOUR PREVIOUS ATTEMPT (attempt {attempt - 1})\n"
+                    f"══════════════════════════════════════════════════════════════════════\n"
+                    f"\n{prev_attempt_summary}\n\n"
+                    f"This is what you wrote last attempt. Use it to inform this attempt —\n"
+                    f"don't repeat the same mistakes, but DO reuse correct analysis you\n"
+                    f"already did. The file content above shows the CURRENT state, which\n"
+                    f"may differ from what you saw last attempt if some edits applied.\n\n"
+                    f"--- BEGIN PREVIOUS THINKING ---\n"
+                    f"{prev_attempt_thinking}\n"
+                    f"--- END PREVIOUS THINKING ---\n"
+                )
+            else:
+                prev_thinking_block = ""
+
+            # On a reviewer route-back, the runtime RAN the code and it failed.
+            # Lead the step with exactly what broke + what to change. The file
+            # block above already shows the CURRENT (post-edit) state, so the
+            # coder is editing from the diff it just produced — fixing in place.
+            _step_instructions = step_instructions
+            if error_feedback:
+                _step_instructions = (
+                    "══════════════════════════════════════════════════════════════════════\n"
+                    "⚠ REVIEWER SENT THIS STEP BACK — your last patch did NOT pass when RUN\n"
+                    "══════════════════════════════════════════════════════════════════════\n"
+                    f"{error_feedback}\n\n"
+                    "The file content below is the CURRENT state (your prior edits are\n"
+                    "already applied — this is your diff). Fix the problem above IN PLACE:\n"
+                    "make a focused corrective edit, don't restart the step from scratch,\n"
+                    "and don't re-issue an edit that already applied.\n"
+                    "══════════════════════════════════════════════════════════════════════\n\n"
+                    + step_instructions
+                )
+
+            impl_prompt = IMPLEMENT_PROMPT.format(
+                step_instructions=_step_instructions,
+                shared_interfaces=iface_block,
+                file_content=file_block,
+                prev_code="",
+                prev_thinking=prev_thinking_block,
+            )
+
+            # ── on_stop callback: apply edits mid-stream so [CODE:] sees them ──
+            # _seen_edit_keys tracks edit BLOCKS (not file content) that have
+            # already been applied this attempt. Each [STOP] re-extracts the
+            # full response_so_far, which contains every prior block — without
+            # block-level dedup, line-number edits get re-applied against an
+            # already-modified file and silently corrupt it.
+            # _viewed_versions records what the model saw via [CODE: path]; line
+            # edits anchor to those snapshots so line numbers always refer to
+            # the version the model was looking at.
+            #
+            # PRE-POPULATE: the prompt's file_block ALREADY shows the model the
+            # current content of each modify-target with line numbers. If the
+            # model writes a `[REPLACE LINES]` without ever calling `[CODE:]`,
+            # the line numbers refer to THAT inline listing. Seeding
+            # _viewed_versions with the same content here keeps the anchor
+            # consistent across mid-stream [STOP]s — even after on_stop
+            # mutates the file on disk, the line edit still anchors to what
+            # the model originally saw.
+            _seen_edit_keys: set[str] = set()
+            _stop_applied: dict[str, str] = {}
+            _viewed_versions: dict[str, str] = {
+                fp: content for fp, content in step_file_contents.items() if content
+            }
+
+            def _on_stop_apply(response_so_far: str) -> "str | None":
+                """Called when the model writes [STOP]. Applies any pending
+                edit blocks to the sandbox so subsequent [CODE:] reads
+                return the post-edit state.
+
+                Returns a feedback string describing what happened to the
+                edits (which applied, which skipped, why) so the runtime
+                can surface it to the model in the next round. Returns
+                None when there are no new edits to report on.
+                """
+                try:
+                    ext = _extract_code_blocks(response_so_far)
+                    _dedup_against_seen(ext, _seen_edit_keys)
+                    # If dedup removed everything, there's nothing new to apply.
+                    # MUST include block_edits — the v11 `[edit]` block is the
+                    # PRIMARY edit format. Omitting it here meant a coder that
+                    # wrote an [edit] (and no legacy SEARCH/REPLACE) got `return
+                    # None` → the edit was NEVER applied mid-stream and NO diff
+                    # feedback was shown → the coder thought it failed and looped
+                    # or [FORCE DONE]'d → 0-byte patch. (Root cause of the live
+                    # 0B regression.)
+                    if not (ext["edits"] or ext["text_edits"]
+                            or ext["new_files"] or ext["reverts"]
+                            or ext["block_edits"] or ext["undo_edits"]
+                                or ext["malformed_edits"]):
+                        return None
+
+                    # Snapshot pre-apply CONTENT (not just line counts) for every
+                    # known file, so the feedback can show the model the actual
+                    # before/after DIFF of what its edits changed — the thing it
+                    # verifies before [DONE], instead of trusting "84 → 112 lines".
+                    pre_content = {fp: c for fp, c in file_contents.items()}
+
+                    produced, matched, total, skips = _apply_extracted_code(
+                        ext, file_contents, sandbox,
+                        viewed_versions=_viewed_versions,
+                    )
+
+                    feedback_lines = []
+                    diff_blocks = []
+                    view_blocks = []   # fresh re-numbered view per edited file
+                    if produced:
+                        from core.edit_diff import render_diff
+                        for fp, content in produced.items():
+                            # The diff the model verifies before [DONE] must be EXACTLY
+                            # what lands on disk. Read the real pre-edit file straight
+                            # from the sandbox NOW (before we overwrite it) and diff it
+                            # against the content we're about to write — so old→content
+                            # is the true on-disk transition, not an in-memory snapshot
+                            # that could drift (e.g. after a closest-match relocation,
+                            # or a previously reverted edit). Fall back to the pre-apply
+                            # snapshot only for a brand-new file (load_file → None).
+                            old = sandbox.load_file(fp)
+                            if old is None:
+                                old = pre_content.get(fp, "")
+                            sandbox.write_file(fp, content)   # ← persist to disk so [CODE:] sees it
+                            file_contents[fp] = content
+                            _stop_applied[fp] = content
+                            post = content.count('\n') + 1
+                            pre = old.count('\n') + 1 if old else 0
+                            if old is not None and old != "" and old == content:
+                                # No-op: the edit matched but the result is byte-identical.
+                                # Reporting "✓ MODIFIED" would tell the model it changed
+                                # something it didn't (it'd [DONE] on a phantom fix). Mirror
+                                # the native replace_lines guard (core/native_tools.py).
+                                feedback_lines.append(
+                                    f"  ⚠ NO CHANGE {fp}: edit matched but the result is "
+                                    f"byte-identical — nothing was modified. If you meant to "
+                                    f"change it, re-check the edit body; if it's already "
+                                    f"correct, don't re-edit."
+                                )
+                            elif pre == 0:
+                                feedback_lines.append(
+                                    f"  ✓ CREATED  {fp}  ({post} lines written)"
+                                )
+                            elif pre == post:
+                                feedback_lines.append(
+                                    f"  ✓ MODIFIED {fp}  (still {post} lines — in-place change)"
+                                )
+                            else:
+                                feedback_lines.append(
+                                    f"  ✓ MODIFIED {fp}  ({pre} → {post} lines)"
+                                )
+                            # Loud indent check on the lines this edit added/changed
+                            # (verbatim — no auto-reindent). Any slip is surfaced as a
+                            # ✗ INDENT error the model must fix before it can [DONE].
+                            feedback_lines.extend(_indent_feedback(old, content, fp))
+                            # The diff is the heart of the verify step. For a brand-new
+                            # file, the whole file IS the change — show it as the read
+                            # view rather than an all-`+` diff (less noisy).
+                            try:
+                                d = render_diff(old, content, fp)
+                                if d:
+                                    diff_blocks.append(
+                                        f"━━ DIFF of your edit to {fp} — this is EXACTLY "
+                                        f"what was applied (file BEFORE → file AFTER); the "
+                                        f"full NEW file is shown below ━━\n{d}"
+                                    )
+                            except Exception:
+                                pass
+                            # ERASE-AND-REFRESH the view: the edit just shifted the
+                            # line numbers, so the coder's earlier view of this file
+                            # is now STALE — a second edit anchored on those old
+                            # numbers is the #1 cause of "stale view" reject loops on
+                            # multi-location steps. Show the SAME file re-numbered
+                            # (current numbers) + tell it to discard the old view.
+                            try:
+                                from tools.codebase import add_line_numbers as _aln
+                                nl = content.count('\n') + 1
+                                if nl <= 700:
+                                    view_blocks.append(
+                                        f"══ NEW FILE AFTER YOUR EDIT — {fp} ({nl} lines) ══\n"
+                                        f"This is {fp} AS IT NOW STANDS with your edit applied "
+                                        f"(the DIFF above shows what changed). Your EARLIER view "
+                                        f"of {fp} is STALE — its line numbers shifted when this "
+                                        f"edit applied. DISCARD it. For any further edit to {fp}, "
+                                        f"copy line numbers from THIS view ONLY:\n"
+                                        + _aln(content, display_mode="prefix")
+                                        + f"\n══ END NEW FILE — {fp} ══"
+                                    )
+                                else:
+                                    view_blocks.append(
+                                        f"⚠ {fp} is now {nl} lines and its line numbers "
+                                        f"SHIFTED — your earlier view is STALE. Re-read with "
+                                        f"[CODE: {fp}] to get current numbers before editing "
+                                        f"it again."
+                                    )
+                            except Exception:
+                                pass
+                        status(f"    [STOP] applied {len(produced)} file(s) mid-stream")
+                    else:
+                        status("    [STOP] no edits applied this round")
+
+                    warn_lines = []
+                    if skips:
+                        for s in skips:
+                            # skips already start with "- " or similar — normalize
+                            text = s.strip().lstrip("-").strip()
+                            # "✓" = an edit (often numbered, e.g. edit:2) that DID
+                            # apply — echo it so the model knows what landed and
+                            # never re-submits it. "⚠" = advisory on an applied edit
+                            # (blank-line removal, duplication) — not a rejection.
+                            # Everything else is a real rejection.
+                            if text[:1] in "✓↩":   # applied / undone — info to show
+                                feedback_lines.append(f"  {text}")
+                            elif text.startswith("⚠"):
+                                warn_lines.append(f"  {text}")
+                            else:   # already formatted "✗ edit:N REJECTED — …"
+                                feedback_lines.append(
+                                    f"  {text}" if text.startswith("✗")
+                                    else f"  ✗ REJECTED  {text}")
+                    # Edits that the parser couldn't match at all (SEARCH not found)
+                    # show up as text_edits in `ext` but absent from `produced`.
+                    attempted_fps = (
+                        set(ext.get("text_edits", {}).keys())
+                        | set(ext.get("edits", {}).keys())
+                    )
+                    missed_fps = attempted_fps - set(produced.keys())
+                    for fp in missed_fps:
+                        # Don't duplicate skips that already mention this file
+                        if any(fp in s for s in skips):
+                            continue
+                        # Show the coder the ACTUAL nearest line so it can copy it
+                        # verbatim instead of re-reading + guessing again. This is
+                        # the difference between a 1-round recovery and a flail loop
+                        # that ends in an empty patch.
+                        hint = ""
+                        try:
+                            import difflib
+                            from core.view_lineno_strip import strip_view_linenos
+                            pairs = ext.get("text_edits", {}).get(fp, [])
+                            file_src = file_contents.get(fp, "") or ""
+                            file_lines = file_src.splitlines()
+                            if pairs and file_lines:
+                                search_raw = pairs[0][0]
+                                # first non-empty content line of the failed SEARCH
+                                cand = [l for l in strip_view_linenos(search_raw).splitlines()
+                                        if l.strip()]
+                                if cand:
+                                    # compare on PURE content: drop a leading INDENT|
+                                    # prefix too, so the fuzzy match isn't skewed by it
+                                    want = re.sub(r'^\d+\|', '', cand[0]).strip()
+                                    bare = [l.strip() for l in file_lines]
+                                    near = difflib.get_close_matches(want, bare, n=1, cutoff=0.6)
+                                    if near:
+                                        ln = bare.index(near[0]) + 1
+                                        actual = file_lines[bare.index(near[0])]
+                                        indent = len(actual) - len(actual.lstrip(' '))
+                                        hint = (
+                                            f"\n      you searched : {want[:80]}"
+                                            f"\n      file line {ln} : {ln}:{indent}|{near[0][:80]}"
+                                            f"\n      → copy that line VERBATIM into SEARCH."
+                                        )
+                        except Exception:
+                            hint = ""
+                        feedback_lines.append(
+                            f"  ✗ REJECTED  edit on {fp}: SEARCH anchor did not "
+                            f"match the file.{hint}"
+                            + ("" if hint else
+                               " Re-read with [CODE:] and copy the exact lines, "
+                               "OR use [REPLACE LINES N-M].")
+                        )
+
+                    # Reverts and new files (purely informational)
+                    for rpath in ext.get("reverts", []):
+                        feedback_lines.append(f"  ↺ REVERTED {rpath} to prior snapshot")
+
+                    if not feedback_lines and not warn_lines:
+                        return None
+                    summary = "\n".join(feedback_lines)
+                    # Lead with the DIFF (the thing the model verifies), then any
+                    # ⚠ advisories (placed adjacent to the diff they describe), then
+                    # the one-line-per-file summary. A leading "DIFF" sentinel lets
+                    # the continuation prompt frame this as the verify step.
+                    # The updated re-numbered view(s) come LAST so they're the most
+                    # recent thing in context — the coder anchors its next edit on
+                    # current line numbers, not the stale earlier view.
+                    view_out = ("\n\n" + "\n\n".join(view_blocks)) if view_blocks else ""
+                    if diff_blocks:
+                        out = "DIFF\n" + "\n\n".join(diff_blocks)
+                        if warn_lines:
+                            out += "\n\n" + "\n".join(warn_lines)
+                        if summary:
+                            out += "\n\n" + summary
+                        out += view_out
+                        return out
+                    parts = warn_lines + ([summary] if summary else [])
+                    base = "\n".join(parts) if parts else ""
+                    return (base + view_out) if (base or view_out) else None
+                except Exception as e:
+                    warn(f"    [STOP] edit apply failed: {e}")
+                    return f"  ✗ edit REJECTED — runtime error while applying edits: {e}"
+
+            def _has_pending_edits(response_so_far: str) -> bool:
+                """Non-mutating: does the response carry edit blocks not yet
+                applied? Dedups against a COPY of _seen_edit_keys so neither the
+                real set nor on_stop's later apply is affected. The verify gate
+                uses this to hold a [DONE] that arrived with fresh, unverified
+                edits until the model has seen the diff."""
+                try:
+                    ext = _extract_code_blocks(response_so_far)
+                    _dedup_against_seen(ext, set(_seen_edit_keys))
+                    return bool(ext.get("edits") or ext.get("text_edits")
+                                or ext.get("new_files") or ext.get("block_edits")
+                                or ext.get("reverts") or ext.get("undo_edits"))
+                except Exception:
+                    return False
+
+            # ── 1. Coder writes edits ────────────────────────────────────
+            impl_result = await _call_with_tools(
+                coder_model, impl_prompt, project_root,
+                detailed_map=detailed_map, purpose_map=purpose_map,
+                research_cache=research_cache,
+                log_label=f"step {step_num}: {step_name} (attempt {attempt})",
+                on_stop=_on_stop_apply,
+                has_pending_edits=_has_pending_edits,
+                viewed_versions=_viewed_versions, no_fallback=_no_fb)
+
+            # If edits were already applied at [STOP] time, use those results.
+            # Otherwise extract and apply from the final response as usual.
+            if _stop_applied:
+                produced = dict(_stop_applied)
+                # Re-extract to catch any edits written AFTER the last [STOP].
+                # Use the same _seen_edit_keys set so blocks already applied
+                # at [STOP] time aren't applied a second time here.
+                extracted = _extract_code_blocks(impl_result["answer"])
+                _dedup_against_seen(extracted, _seen_edit_keys)
+                late_produced, late_m, late_t, late_skips = _apply_extracted_code(
+                    extracted, file_contents, sandbox,
+                    viewed_versions=_viewed_versions,
+                )
+                if late_produced:
+                    produced.update(late_produced)
+                    for fp, content in late_produced.items():
+                        sandbox.write_file(fp, content)
+                        file_contents[fp] = content
+                matched = len(produced)
+                total = matched
+                # Surface every late skip — the model needs to see why post-STOP
+                # blocks failed, even when no new file was produced. Hiding skips
+                # when `late_produced` was empty made the retry loop see "no code
+                # produced" instead of "your SEARCH didn't match", and burnt the
+                # MAX_RETRIES budget retrying the same broken edit.
+                ambiguous_skips = list(late_skips)
+            else:
+                extracted = _extract_code_blocks(impl_result["answer"])
+                produced, matched, total, ambiguous_skips = _apply_extracted_code(
+                    extracted, file_contents, sandbox,
+                    viewed_versions=_viewed_versions,
+                )
+
+            if not produced:
+                # Fallback for new files: the model wrote a code block but didn't
+                # use the `=== FILE: ===` form. Only accept this if the target
+                # file doesn't already exist on disk — otherwise we'd silently
+                # overwrite real code with a stray code listing.
+                if len(step_files) == 1:
+                    target_fp = step_files[0]
+                    existing_content = file_contents.get(target_fp, "")
+                    if not existing_content.strip():
+                        raw_blocks = re.findall(
+                            r'```[^\n]*\n(.*?)```', impl_result["answer"], re.DOTALL
+                        )
+                        if raw_blocks:
+                            produced[target_fp] = max(raw_blocks, key=len).strip()
+                            matched, total = 1, 1
+
+            if not produced:
+                # Check if the model is saying no changes are needed (valid outcome).
+                # If it wrote [DONE] and indicated the code is already correct,
+                # treat this as a successful no-op rather than retrying forever.
+                #
+                # STRICT MARKER (replaces the fuzzy-phrase exit that used to
+                # false-positive on phrases like "code matches" or "all correct"):
+                # the model must write the LITERAL line `STEP COMPLETE: NO CHANGES
+                # NEEDED` (case-sensitive on the marker, free text around it).
+                # IMPLEMENT_PROMPT and SELF_CHECK_PROMPT teach this marker. Verify
+                # steps still get the verb-based exit because their step body is
+                # explicit about not producing code.
+                answer = impl_result["answer"]
+                answer_lower = answer.lower()
+                # [DONE] is stripped from the answer text by _call_with_tools before
+                # returning, so NEVER search for "[done]" in answer_lower — it will
+                # never be there. Use the explicit flag instead.
+                done_signaled = impl_result.get("done", False)
+                force_done_signaled = impl_result.get("force_done", False)
+
+                # Verify steps legitimately produce no code — if the step name or
+                # details says verify/confirm/no changes, accept a [DONE] response
+                # without requiring specific signal phrases. (Computed before the
+                # FORCE DONE guard so we can tell a verify step from a fix step.)
+                is_verify_step = any(kw in step_name.lower() for kw in (
+                    "verify", "verif", "confirm", "no changes", "no additional",
+                    "check", "validate",
+                )) or any(kw in step_details.lower() for kw in (
+                    "no additional changes needed", "verification only",
+                    "no code changes needed", "verify no",
+                    "no change needed", "no changes needed",
+                ))
+
+                # FORCE_DONE is the coder's escape hatch: "the file already
+                # satisfies the requirement, no edits needed." Legit on a verify
+                # step. But on a FIX step with ZERO edits ever applied, a model
+                # that FORCE-DONEs is often HALLUCINATING "already fixed" — observed
+                # live on astropy-12907, where glm-5.1 insisted line 245 already
+                # said `= right` while the file plainly showed `= 1`, and shipped a
+                # 0-byte patch. So: on a non-verify step with nothing applied, push
+                # back HARD and retry (make it re-read + quote the exact line and
+                # actually edit). Accept FORCE DONE only on a verify step, or once
+                # the retry budget is spent.
+                if force_done_signaled:
+                    _applied_anything = bool(_stop_applied)
+                    if (not is_verify_step and not _applied_anything
+                            and attempt < MAX_RETRIES):
+                        warn(f"    Step {step_num}: [FORCE DONE] with NO edit applied "
+                             f"on a fix step — likely hallucinated 'already done'; "
+                             f"pushing back (attempt {attempt})")
+                        prev_attempt_thinking = impl_result.get("answer", "")[-4000:]
+                        # If the model DID write an edit that got REJECTED, tell it
+                        # exactly why — otherwise it never learns its edit failed and
+                        # keeps believing "already fixed".
+                        _rej = "\n".join(
+                            f"    - {s.strip().lstrip('-').strip()}"
+                            for s in (ambiguous_skips or [])
+                        )[:1200]
+                        _rej_block = (
+                            ("\nYour previous edit DID NOT APPLY — here is why:\n"
+                             + _rej + "\nFix THAT and re-issue the [edit] block.\n")
+                            if _rej else ""
+                        )
+                        prev_attempt_summary = (
+                            "⚠ You wrote [FORCE DONE] claiming the requirement is ALREADY "
+                            "met — but NO edit was applied, and this is a FIX step. That "
+                            "usually means an edit you wrote was REJECTED (so the file is "
+                            "UNCHANGED) and you mistook it for done, OR you talked yourself "
+                            "into believing the change is in the file when it is NOT."
+                            + _rej_block +
+                            "Do this now, concretely:\n"
+                            "  1. [VIEW:] or [CODE:] the EXACT target line(s).\n"
+                            "  2. QUOTE the current line verbatim.\n"
+                            "  3. If it still shows the OLD / buggy code, WRITE THE [edit] "
+                            "block to change it — do NOT [FORCE DONE].\n"
+                            "Only [FORCE DONE] if you can quote the line PROVING it already "
+                            "matches the requirement. Do not trust memory or your plan — "
+                            "trust the quoted line."
+                        )
+                        continue
+                    status(
+                        f"    Step {step_num}: forced done by coder "
+                        f"(requirement already met — [FORCE DONE])"
+                    )
+                    break
+
+                if is_verify_step and done_signaled:
+                    status(f"    Step {step_num}: verified (no changes needed)")
+                    break
+
+                _NO_CHANGES_MARKER = re.compile(
+                    r'STEP\s+COMPLETE:\s*NO\s+CHANGES\s+NEEDED', re.IGNORECASE,
+                )
+                if done_signaled and _NO_CHANGES_MARKER.search(answer):
+                    status(
+                        f"    Step {step_num}: no changes needed "
+                        f"(model wrote STEP COMPLETE: NO CHANGES NEEDED)"
+                    )
+                    break
+                # v8.10 fix: RETRY [DONE] + 0 edits on first attempt; accept
+                # only after retry budget is exhausted. The previous behavior
+                # silently accepted bare [DONE] with no edits as equivalent
+                # to [FORCE DONE]. Two failure modes that should have been
+                # distinguished:
+                #   (a) Model legitimately recognized "file already satisfies
+                #       requirement" but used [DONE] instead of [FORCE DONE].
+                #       Acceptable on retry; correct fix is to teach the model.
+                #   (b) Model intended to emit edits but they came out in the
+                #       wrong format (markdown fences, prose, etc.). Silently
+                #       accepting = shipping NO_PATCH. Bad.
+                #
+                # Treating both as success obscured (b). Now: first attempt
+                # retries with the targeted correction message; if the model
+                # still emits [DONE] + 0 edits on retry, we accept (matching
+                # the previous loop-protection rationale).
+                if done_signaled:
+                    if attempt >= MAX_RETRIES - 1:
+                        # Out of retries — accept as no-op rather than burning
+                        # the last attempt.
+                        status(
+                            f"    Step {step_num}: [DONE] with zero edits "
+                            f"(retries exhausted; treating as no-change-needed)"
+                        )
+                        break
+                    # First attempt: retry with the 3-option correction prompt.
+                    warn(
+                        f"    Step {step_num}: [DONE] with zero edits on "
+                        f"attempt {attempt} — retrying with format-correction "
+                        f"prompt"
+                    )
+                    prev_attempt_thinking = impl_result.get("answer", "")[-6000:]
+                    prev_attempt_summary = (
+                        "OUTCOME: You wrote [DONE][CONFIRM_DONE] but no edit "
+                        "blocks landed. Three possibilities — pick one:\n"
+                        "(A) The step requirement is ALREADY MET in the file "
+                        "and no edits are needed. → use "
+                        "`[FORCE DONE][CONFIRM_FORCE_DONE]` (NOT plain "
+                        "[DONE]). Add the line `STEP COMPLETE: NO CHANGES "
+                        "NEEDED` for the runtime to accept cleanly.\n"
+                        "(B) You wrote edits but in a format the parser "
+                        "ignored. → check that each edit is wrapped in "
+                        "`=== EDIT: <path> === ... === END EDIT ===` with "
+                        "`[SEARCH]…[/SEARCH]` and `[REPLACE]…[/REPLACE]` "
+                        "inside, OR uses `[REPLACE LINES N-M]…[/REPLACE]`. "
+                        "Markdown ``` fences do NOT fire edits.\n"
+                        "(C) You forgot to emit edits before [DONE]. → "
+                        "write the EDIT blocks now, then "
+                        "`[STOP][CONFIRM_STOP]`. Don't ship [DONE] in the "
+                        "same response as a fresh EDIT — that's guessing."
+                    )
+                    continue
+                warn(f"    No code produced (attempt {attempt})")
+                # Stash thinking so the next attempt knows what was tried
+                attempt_thinking = impl_result.get("answer", "")
+                if len(attempt_thinking) > 6000:
+                    attempt_thinking = (
+                        "(...earlier portion of this attempt's thinking trimmed...)\n"
+                        + attempt_thinking[-6000:]
+                    )
+                prev_attempt_thinking = attempt_thinking
+                prev_attempt_summary = (
+                    "OUTCOME: NO edits were produced. The model wrote a response but "
+                    "no edit blocks were extractable.\n"
+                    "• If you intended to EDIT the file: wrap every change in "
+                    "`=== EDIT: path === [SEARCH]…[/SEARCH] [REPLACE]…[/REPLACE]` "
+                    "blocks. Plain [DONE] without any edit blocks now triggers a "
+                    "retry — markdown code fences are not edits.\n"
+                    "• If the step requirement is ALREADY MET in the file and no "
+                    "edits are needed: end the round with "
+                    "`[FORCE DONE][CONFIRM_FORCE_DONE]` (not plain [DONE]). That "
+                    "is the explicit escape hatch for 'no changes required'."
+                )
+                continue
+
+            # ── 2. Check match rate ───────────────────────────────────────
+            if total > 0 and matched < total:
+                failed = total - matched
+                warn(f"    {failed}/{total} edits FAILED to match")
+
+                if attempt < MAX_RETRIES:
+                    # Stash this attempt's thinking so the next attempt can see it.
+                    # Trim aggressively — the file content blows context budget if
+                    # the model wrote big edit blocks. Keep the last ~6000 chars
+                    # (typically 2-4 model "rounds" of analysis + edits).
+                    attempt_thinking = impl_result.get("answer", "")
+                    if len(attempt_thinking) > 6000:
+                        attempt_thinking = (
+                            "(...earlier portion of this attempt's thinking trimmed...)\n"
+                            + attempt_thinking[-6000:]
+                        )
+                    prev_attempt_thinking = attempt_thinking
+                    # Build a structured summary of what failed
+                    if ambiguous_skips:
+                        skip_details = "\n".join(ambiguous_skips)
+                        prev_attempt_summary = (
+                            f"OUTCOME: {failed} of {total} edits SKIPPED — SEARCH blocks "
+                            f"matched multiple locations. Use anchored [SEARCH: N-M] form.\n"
+                            f"Specific failures:\n{skip_details}"
+                        )
+                    else:
+                        prev_attempt_summary = (
+                            f"OUTCOME: {failed} of {total} edits did NOT match. The file "
+                            f"content shown above is the CURRENT state. Use line numbers "
+                            f"from the file listing — they are accurate."
+                        )
+                    status(f"    Retrying step {step_num} with fresh file state...")
+                    continue
+                else:
+                    warn(f"    Proceeding with {matched}/{total} matched edits")
+
+            status(f"    Edits applied: {matched}/{total} matched")
+
+            # ── No-op detection ────────────────────────────────────────────
+            # SEARCH/REPLACE blocks whose REPLACE body is byte-identical to
+            # the matched range count as "matched" above but produce no real
+            # diff. Treat all-no-op as a failed attempt and retry with a
+            # specific diagnostic. Observed failure on django-11551 and
+            # django-14631: workflow reported "Applied N changes" but final
+            # `git diff` was empty.
+            if total > 0 and produced:
+                # Compare against the STEP-START baseline, not the running
+                # file_contents (which on_stop already mutated with this very
+                # edit). Otherwise an applied edit reads as a no-op.
+                real_diff_files = [
+                    fp for fp, content in produced.items()
+                    if content != _step_orig_contents.get(fp, "")
+                ]
+                if not real_diff_files:
+                    warn(
+                        f"    All {len(produced)} edit(s) SEARCH-matched but "
+                        f"REPLACE was identical to current file content (attempt {attempt})"
+                    )
+                    if attempt < MAX_RETRIES:
+                        attempt_thinking = impl_result.get("answer", "")
+                        if len(attempt_thinking) > 6000:
+                            attempt_thinking = (
+                                "(...earlier portion trimmed...)\n"
+                                + attempt_thinking[-6000:]
+                            )
+                        prev_attempt_thinking = attempt_thinking
+                        prev_attempt_summary = (
+                            f"OUTCOME: {len(produced)} edit(s) MATCHED but produced "
+                            f"NO REAL CHANGE — your [REPLACE] body was BYTE-IDENTICAL "
+                            f"to the matched range. The file is unchanged. View the "
+                            f"current file content and emit a genuinely different "
+                            f"[REPLACE] body that satisfies the step requirement. "
+                            f"If the requirement is already met, write "
+                            f"`STEP COMPLETE: NO CHANGES NEEDED` and stop — do not "
+                            f"emit empty edits."
+                        )
+                        status(f"    Retrying step {step_num} (no real diff produced)...")
+                        continue
+                    else:
+                        warn(f"    Proceeding despite all-no-op edits (out of retries)")
+
+            # ── Deleted-import safety check ─────────────────────────────────
+            # If an edit removes a top-level `import`/`from … import …` line and
+            # some other file in the project re-exports those names via
+            # `from <this_module> import <name>`, the deletion will break the
+            # public re-export → ImportError → entire module unloadable.
+            # Observed failure on astropy__astropy-13236: 644 P→P tests failed
+            # because `NdarrayMixin` was removed from astropy/table/table.py
+            # but astropy/table/__init__.py re-exports it.
+            unsafe_deletions: dict[str, list[tuple[str, str]]] = {}
+            for fp, content in produced.items():
+                original_for_check = file_contents.get(fp, "")
+                if not original_for_check:
+                    continue
+                findings = _check_deleted_imports(
+                    fp, original_for_check, content, sandbox.project_root,
+                )
+                if findings:
+                    unsafe_deletions[fp] = findings
+            if unsafe_deletions:
+                warn(
+                    f"    Edit removes import(s) re-exported by other files "
+                    f"(attempt {attempt}) — REJECTED to prevent ImportError"
+                )
+                if attempt < MAX_RETRIES:
+                    lines: list[str] = []
+                    for fp, findings in unsafe_deletions.items():
+                        for imp_line, evidence in findings[:3]:
+                            lines.append(f"  - In {fp}, removing `{imp_line}` would break {evidence}")
+                    attempt_thinking = impl_result.get("answer", "")
+                    if len(attempt_thinking) > 6000:
+                        attempt_thinking = (
+                            "(...earlier portion trimmed...)\n"
+                            + attempt_thinking[-6000:]
+                        )
+                    prev_attempt_thinking = attempt_thinking
+                    prev_attempt_summary = (
+                        "OUTCOME: your edit REMOVED a top-level import that is "
+                        "still consumed via `from <this_module> import <name>` in "
+                        "another file. The import looks unused INSIDE the file you "
+                        "edited, but it is a PUBLIC RE-EXPORT — deleting it breaks "
+                        "the package's import surface.\n"
+                        "Concrete consumers found:\n"
+                        + "\n".join(lines)
+                        + "\nRetry: KEEP the import line. If you genuinely need to "
+                        "remove a symbol, also update the re-exporting `__init__.py` "
+                        "and every consumer in the same step."
+                    )
+                    status(f"    Retrying step {step_num} (unsafe import deletion)...")
+                    continue
+                else:
+                    warn(f"    Proceeding despite unsafe import deletion (out of retries)")
+
+            # Write to sandbox + update file_contents
+            # First snapshot which files already had syntax errors BEFORE this
+            # step's edits. We only want to show the model errors it introduced —
+            # asking it to fix pre-existing errors in unrelated parts of the file
+            # sends it on a wild-goose chase that cascades into new errors.
+            pre_edit_errors = {}
+            for fp in produced:
+                original_content = file_contents.get(fp, "")
+                if original_content:
+                    ok, msg = _check_syntax(fp, original_content)
+                    if not ok:
+                        pre_edit_errors[fp] = msg
+
+            syntax_errors = {}
+            for fp, content in produced.items():
+                sandbox.write_file(fp, content)
+                file_contents[fp] = content
+                status(f"    {fp}: done ({content.count(chr(10)) + 1} lines)")
+
+                # Only flag errors that are NEW — not ones that existed before
+                passed, err_msg = _check_syntax(fp, content)
+                if not passed and fp not in pre_edit_errors:
+                    syntax_errors[fp] = err_msg
+                    warn(f"    {fp}: syntax error detected")
+
+            # ── 4. Syntax-fix-only loop ───────────────────────────────────
+            # The general LLM self-review pass was removed: when files parse,
+            # we trust the coder + Phase 3.5 code-review to catch logic bugs
+            # without spending another ~25 min per step on a re-read pass.
+            # We still keep the loop body below for the syntax-error case —
+            # if `_check_syntax` flagged anything, the coder gets one focused
+            # chance to fix only the broken file(s). When no syntax errors
+            # were detected, skip the whole loop and return immediately.
+            if not syntax_errors:
+                return produced
+            MAX_VERIFY_ROUNDS = 5
+            coder_thinking = impl_result.get("answer", "")
+
+            # Strip edit blocks from thinking — we only want the REASONING,
+            # not the code. If the code has bad indent, showing it here would
+            # cause the self-checker to repeat the same mistake.
+            coder_thinking = re.sub(
+                r'===\s*(?:EDIT|FILE):\s*\S+.*?(?:```|\[/REPLACE\]|\[/INSERT\]|\[DELETE\s|<<<END>>>)',
+                '[... edit block removed ...]',
+                coder_thinking, flags=re.DOTALL,
+            )
+            # Also strip standalone REPLACE/INSERT blocks not inside === EDIT:
+            coder_thinking = re.sub(
+                r'\[REPLACE\s+LINES?\s+\d+\s*-\s*\d+\s*\].*?\[/REPLACE\]',
+                '[... edit block removed ...]',
+                coder_thinking, flags=re.DOTALL,
+            )
+            coder_thinking = re.sub(
+                r'\[INSERT\s+AFTER\s+LINE\s+\d+\s*\].*?\[/INSERT\]',
+                '[... edit block removed ...]',
+                coder_thinking, flags=re.DOTALL,
+            )
+
+            # Trim thinking to last 4000 chars to avoid bloat
+            if len(coder_thinking) > 4000:
+                coder_thinking = "(...earlier thinking trimmed...)\n" + coder_thinking[-4000:]
+
+            prev_syntax_errors = {}
+            repeat_count = 0
+            for verify_round in range(1, MAX_VERIFY_ROUNDS + 1):
+                # Build file list — names + line counts + syntax errors
+                files_list_parts = []
+                for fp, content in produced.items():
+                    line_count = content.count('\n') + 1
+                    entry = f"  {fp} — {line_count} lines (use [CODE: {fp}] to read)"
+                    if fp in syntax_errors:
+                        entry += f"\n    ⚠ SYNTAX ERROR:\n{syntax_errors[fp]}"
+
+                        if syntax_errors == prev_syntax_errors:
+                            repeat_count += 1
+                            # Extract error line number
+                            err_line_match = re.search(r'line\s+(\d+)', syntax_errors[fp], re.IGNORECASE)
+                            if err_line_match:
+                                err_line = int(err_line_match.group(1))
+                                file_lines = content.split('\n')
+                                ctx_start = max(0, err_line - 15)
+                                ctx_end = min(len(file_lines), err_line + 5)
+                                ctx_lines = []
+                                for i in range(ctx_start, ctx_end):
+                                    marker = " >>>" if i + 1 == err_line else "    "
+                                    ctx_lines.append(f"{marker} {i+1:4d} | {file_lines[i]}")
+                                entry += (
+                                    f"\n\n    ⚠ SAME ERROR REPEATED {repeat_count}x — "
+                                    f"here is the actual code around the error:\n"
+                                    + "\n".join(ctx_lines)
+                                    + f"\n\n    Look at the indentation of the lines ABOVE "
+                                    f"line {err_line}. Your replacement must match that "
+                                    f"indent level. Include the enclosing def/class line "
+                                    f"in your [REPLACE LINES] block."
+                                )
+                        else:
+                            repeat_count = 0
+
+                    files_list_parts.append(entry)
+
+                prev_syntax_errors = dict(syntax_errors)
+
+                # Build a LOUD banner for syntax errors so the model can't ignore
+                # them. Without this, models often [KEEP:] only the edited regions
+                # and miss broken lines OUTSIDE those ranges (e.g. a stray line-
+                # number trailer on an adjacent unchanged line). The banner names
+                # the file + error line and forbids VERIFIED until it's fixed.
+                syntax_banner = ""
+                if syntax_errors:
+                    lines_summary = []
+                    for fp, msg in syntax_errors.items():
+                        err_line_match = re.search(r'line\s+(\d+)', msg, re.IGNORECASE)
+                        err_line = err_line_match.group(1) if err_line_match else "?"
+                        lines_summary.append(f"    • {fp} line {err_line}")
+                    syntax_banner = (
+                        "\n══════════════════════════════════════════════════════════════════════\n"
+                        "🚨 SYNTAX ERROR — FIX THIS BEFORE ANYTHING ELSE\n"
+                        "══════════════════════════════════════════════════════════════════════\n"
+                        f"The file(s) below DO NOT PARSE. The user cannot run this code.\n"
+                        "  Broken file(s):\n"
+                        + "\n".join(lines_summary)
+                        + "\n\n"
+                        "PROCESS:\n"
+                        "  1. [CODE: <broken_file>] to read the WHOLE file (do NOT use [KEEP:]\n"
+                        "     to focus on the edited region — the broken line might be OUTSIDE\n"
+                        "     the edited range, e.g. a stray trailing integer on an adjacent line).\n"
+                        "  2. Find the line cited in the error context above.\n"
+                        "  3. Common cause: a stray trailing integer on a line — that's a\n"
+                        "     line number from the [CODE:] view that got copied into REPLACE\n"
+                        "     content. Strip it.\n"
+                        "  4. Write a [SEARCH]/[REPLACE] fix wrapped in === EDIT: <path> ===.\n"
+                        "  5. Do NOT write VERIFIED until the file PARSES.\n"
+                        "══════════════════════════════════════════════════════════════════════\n"
+                    )
+
+                check_prompt = SELF_CHECK_PROMPT.format(
+                    task=task,
+                    step_name=f"Step {step_num}: {step_name}",
+                    step_details=step_details,
+                    coder_thinking=syntax_banner + coder_thinking,
+                    changed_files_list="\n".join(files_list_parts),
+                )
+
+                # on_stop for self-check: apply fix edits mid-stream
+                _sc_seen_edit_keys: set[str] = set()
+                _sc_stop_applied: dict[str, str] = {}
+                # Pre-seed with the post-coder file state. The self-check prompt
+                # lists files by name + line count (not full content), but if
+                # the model writes [REPLACE LINES] right after [CODE:] reads it,
+                # the line numbers refer to that read. Seeding from `produced`
+                # gives a sensible default basis when [REPLACE LINES] arrives
+                # before any [CODE:] read in the same response.
+                _sc_viewed_versions: dict[str, str] = {
+                    fp: content for fp, content in produced.items() if content
+                }
+
+                def _on_stop_selfcheck(response_so_far: str) -> "str | None":
+                    """Apply fix edits during self-check. Returns a feedback
+                    string describing what applied vs was rejected so the
+                    runtime can show the verifier explicit results next round
+                    (same fix as for the coder)."""
+                    try:
+                        ext = _extract_code_blocks(response_so_far)
+                        # Self-check may not create new files — only fix existing ones.
+                        # Line edits ([REPLACE LINES]) are allowed: the prompt instructs
+                        # the model to use them and they are anchored to _sc_viewed_versions.
+                        ext["new_files"] = {}
+                        _dedup_against_seen(ext, _sc_seen_edit_keys)
+                        if not (ext["edits"] or ext["text_edits"] or ext["reverts"]
+                                or ext["block_edits"] or ext["undo_edits"]
+                                or ext["malformed_edits"]):
+                            return None
+                        pre_content = {fp: c for fp, c in file_contents.items()}
+                        produced, matched, total, skips = _apply_extracted_code(
+                            ext, file_contents, sandbox,
+                            viewed_versions=_sc_viewed_versions,
+                        )
+                        feedback_lines = []
+                        diff_blocks = []
+                        if produced:
+                            from core.edit_diff import render_diff
+                            for fp, content in produced.items():
+                                # diff from the ACTUAL on-disk file (read before write)
+                                # → guaranteed to be exactly what was applied.
+                                old = sandbox.load_file(fp)
+                                if old is None:
+                                    old = pre_content.get(fp, "")
+                                sandbox.write_file(fp, content)
+                                file_contents[fp] = content
+                                _sc_stop_applied[fp] = content
+                                post = content.count('\n') + 1
+                                pre = old.count('\n') + 1 if old else 0
+                                if old is not None and old != "" and old == content:
+                                    # No-op fix: byte-identical result. The self-check has
+                                    # NO batch-level no-op backstop, so an unreported no-op
+                                    # here lets it sign off on a phantom fix.
+                                    feedback_lines.append(
+                                        f"  ⚠ NO CHANGE {fp}: your fix matched but the result is "
+                                        f"byte-identical — nothing changed. Re-check the edit, or "
+                                        f"if the code is already correct, don't re-edit.")
+                                elif pre == post:
+                                    feedback_lines.append(f"  ✓ FIX APPLIED {fp} (still {post} lines)")
+                                else:
+                                    feedback_lines.append(f"  ✓ FIX APPLIED {fp} ({pre} → {post} lines)")
+                                feedback_lines.extend(_indent_feedback(old, content, fp))
+                                try:
+                                    d = render_diff(old, content, fp)
+                                    if d:
+                                        diff_blocks.append(
+                                            f"━━ DIFF of your fix to {fp} — exactly what "
+                                            f"was applied (file BEFORE → file AFTER) ━━\n{d}"
+                                        )
+                                except Exception:
+                                    pass
+                            status(f"    [STOP] self-check applied {len(produced)} fix(es)")
+                        warn_lines = []
+                        for s in skips:
+                            text = s.strip().lstrip("-").strip()
+                            if text[:1] in "✓↩":   # applied / undone — info to show
+                                feedback_lines.append(f"  {text}")
+                            elif text.startswith("⚠"):   # advisory on an applied edit
+                                warn_lines.append(f"  {text}")
+                            else:
+                                feedback_lines.append(
+                                    f"  {text}" if text.startswith("✗")
+                                    else f"  ✗ FIX REJECTED  {text}")
+                        attempted = set(ext.get("text_edits", {}).keys()) | set(ext.get("edits", {}).keys())
+                        for fp in attempted - set(produced.keys()):
+                            if any(fp in s for s in skips):
+                                continue
+                            feedback_lines.append(
+                                f"  ✗ FIX REJECTED  edit on {fp}: SEARCH anchor "
+                                f"did not match. Re-read with [CODE:] and copy "
+                                f"the exact lines, OR use [REPLACE LINES N-M]."
+                            )
+                        for rpath in ext.get("reverts", []):
+                            feedback_lines.append(f"  ↺ REVERTED {rpath} to prior snapshot")
+                        if not feedback_lines and not warn_lines:
+                            return None
+                        summary = "\n".join(feedback_lines)
+                        if diff_blocks:
+                            out = "DIFF\n" + "\n\n".join(diff_blocks)
+                            if warn_lines:
+                                out += "\n\n" + "\n".join(warn_lines)
+                            if summary:
+                                out += "\n\n" + summary
+                            return out
+                        parts = warn_lines + ([summary] if summary else [])
+                        return "\n".join(parts) if parts else None
+                    except Exception as e:
+                        warn(f"    [STOP] self-check apply failed: {e}")
+                        return f"  ✗ runtime error during self-check apply: {e}"
+
+                def _sc_has_pending_edits(response_so_far: str) -> bool:
+                    try:
+                        ext = _extract_code_blocks(response_so_far)
+                        ext["new_files"] = {}  # self-check never creates files
+                        _dedup_against_seen(ext, set(_sc_seen_edit_keys))
+                        return bool(ext.get("edits") or ext.get("text_edits")
+                                    or ext.get("block_edits") or ext.get("reverts"))
+                    except Exception:
+                        return False
+
+                check_result = await _call_with_tools(
+                    IMPLEMENT_MODEL, check_prompt, project_root,
+                    detailed_map=detailed_map, purpose_map=purpose_map,
+                    research_cache=research_cache,
+                    log_label=f"self-check step {step_num} (round {verify_round})",
+                    on_stop=_on_stop_selfcheck,
+                    has_pending_edits=_sc_has_pending_edits,
+                    viewed_versions=_sc_viewed_versions, no_fallback=_no_fb)
+
+                check_answer = check_result.get("answer", "")
+
+                # Verified: model declared VERIFIED AND there are no NEW (un-applied)
+                # edit blocks left over after on_stop ran. We can't trust literal
+                # "[REPLACE" detection — on_stop applies edits mid-stream but the
+                # text remains in the answer. Instead, re-extract and dedup against
+                # _sc_seen_edit_keys: anything left is genuinely unapplied.
+                if "VERIFIED" in check_answer.upper():
+                    pending = _extract_code_blocks(check_answer)
+                    pending["new_files"] = {}
+                    _dedup_against_seen(pending, _sc_seen_edit_keys)
+                    has_unapplied = bool(
+                        pending["edits"] or pending["text_edits"] or pending["reverts"]
+                        or pending["block_edits"] or pending["undo_edits"]
+                        or pending["malformed_edits"]
+                    )
+                    if not has_unapplied and not syntax_errors:
+                        success(f"    Step {step_num} verified (round {verify_round})")
+                        break
+                    if has_unapplied and not syntax_errors:
+                        # Verifier said VERIFIED but wrote an edit without a [STOP]
+                        # before [DONE] — the edit wasn't applied by on_stop.
+                        # Apply it now and break rather than forcing a whole extra round.
+                        late, _, _, _ = _apply_extracted_code(
+                            pending, file_contents, sandbox,
+                            viewed_versions=_sc_viewed_versions,
+                        )
+                        if late:
+                            for fp, content in late.items():
+                                sandbox.write_file(fp, content)
+                                file_contents[fp] = content
+                                produced[fp] = content
+                        success(f"    Step {step_num} verified (round {verify_round}, late edits applied)")
+                        break
+                    if syntax_errors and not has_unapplied:
+                        # Model said VERIFIED but the file still has a syntax error
+                        # and no fix was written. Force another round.
+                        warn(f"    Self-check round {verify_round}: VERIFIED claimed but syntax errors remain — forcing another round")
+                        coder_thinking = (
+                            f"[Self-check round {verify_round}: you wrote VERIFIED but the "
+                            f"file STILL has a syntax error. Read the file fresh and write "
+                            f"a real fix. Do NOT write VERIFIED until the syntax error is gone.]"
+                        )
+
+                # Extract and apply fixes. Self-check may use [REPLACE LINES N-M]
+                # (as the prompt instructs) or [SEARCH]/[REPLACE]. New files are
+                # still forbidden — the self-checker only fixes existing files.
+                if _sc_stop_applied:
+                    fix_produced = dict(_sc_stop_applied)
+                    # Also catch any edits written after the last [STOP], using the
+                    # same seen-set so already-applied blocks aren't double-applied.
+                    fix_extracted = _extract_code_blocks(check_answer)
+                    fix_extracted["new_files"] = {}
+                    _dedup_against_seen(fix_extracted, _sc_seen_edit_keys)
+                    late_fix, _, _, v_skips = _apply_extracted_code(
+                        fix_extracted, file_contents, sandbox,
+                        viewed_versions=_sc_viewed_versions,
+                    )
+                    if late_fix:
+                        fix_produced.update(late_fix)
+                        for fp, content in late_fix.items():
+                            file_contents[fp] = content
+                    v_matched = len(fix_produced)
+                    v_total = v_matched
+                else:
+                    fix_extracted = _extract_code_blocks(check_answer)
+                    fix_extracted["new_files"] = {}
+                    fix_produced, v_matched, v_total, v_skips = _apply_extracted_code(
+                        fix_extracted, file_contents, sandbox,
+                        viewed_versions=_sc_viewed_versions,
+                    )
+
+                if fix_produced:
+                    for fp, content in fix_produced.items():
+                        sandbox.write_file(fp, content)
+                        file_contents[fp] = content
+                        produced[fp] = content
+
+                    # Re-check ALL produced files — not just the ones written this
+                    # round. A previous round may have shifted line numbers or left
+                    # a stale error in syntax_errors that no longer reflects the
+                    # file on disk. Re-checking everything keeps the dict accurate.
+                    syntax_errors = {}
+                    for fp, content in produced.items():
+                        passed, err_msg = _check_syntax(fp, content)
+                        if not passed:
+                            syntax_errors[fp] = err_msg
+
+                    # Replace coder_thinking with a minimal summary.
+                    # Keeping the full analysis text is harmful: it describes
+                    # what the code looked like BEFORE this round's fix, which
+                    # leads the next round to write SEARCH blocks for a state
+                    # that no longer exists. Give only a one-line status so the
+                    # next round reads the file fresh rather than reasoning from
+                    # a stale picture.
+                    coder_thinking = (
+                        f"[Self-check round {verify_round} applied {len(fix_produced)} fix(es). "
+                        f"Read the file(s) fresh to see the current state.]"
+                    )
+
+                    status(f"    Self-check round {verify_round}: applied {len(fix_produced)} fixes")
+
+                elif v_skips:
+                    # Every edit was skipped because its SEARCH block matched
+                    # multiple locations. This is NOT the same as "nothing to fix"
+                    # — the syntax error is still there; we just can't apply the
+                    # fix blindly. Feed the specific skip reasons back so the model
+                    # widens those SEARCH blocks in the next round rather than
+                    # silently exiting as verified.
+                    skip_details = "\n".join(v_skips)
+                    warn(f"    Self-check round {verify_round}: all edits skipped (ambiguous SEARCH blocks)")
+                    coder_thinking = (
+                        f"[Self-check round {verify_round}: your edits were NOT applied because "
+                        f"the following SEARCH blocks each matched multiple locations in the file:\n"
+                        f"{skip_details}\n"
+                        f"Use the ANCHORED form to pin each edit to the right location:\n"
+                        f"  [SEARCH: start-end]  (e.g. [SEARCH: 45-49])\n"
+                        f"  exact code\n"
+                        f"  [/SEARCH]\n"
+                        f"  [REPLACE]\n"
+                        f"  fixed code\n"
+                        f"  [/REPLACE]\n"
+                        f"Use the line numbers from [CODE:] or [KEEP:] output. "
+                        f"The syntax error is still present.]"
+                    )
+                    # Don't break — force another round
+
+                else:
+                    # Nothing was applied this round and there were no skips.
+                    # Only declare verified if the file actually parses. If
+                    # syntax_errors is non-empty, the model gave up without
+                    # fixing — force another round (or break out at MAX_VERIFY).
+                    if not syntax_errors:
+                        success(f"    Step {step_num} verified (no actionable fixes)")
+                        break
+                    warn(f"    Self-check round {verify_round}: no fix applied but {len(syntax_errors)} syntax error(s) remain")
+                    coder_thinking = (
+                        f"[Self-check round {verify_round}: NO fix was applied this round, "
+                        f"but the file still has syntax errors. Read the file fresh with "
+                        f"[CODE: file] and write an actual fix using [SEARCH]/[REPLACE] or "
+                        f"[REPLACE LINES N-M]. Do NOT just describe the fix — write the edit block.]"
+                    )
+
+            return produced
+
+        warn(f"    Step {step_num}: giving up after {MAX_RETRIES} attempts")
+        return {}
+
     if is_native_tool_model(IMPLEMENT_MODEL):
         from tools.codebase import add_line_numbers as _aln
         _nat_targets = {fp: file_contents[fp] for fp in step_files if fp in file_contents}
@@ -10597,1199 +11768,28 @@ async def _implement_one_step(
                 "viewed_versions": dict(_nat_targets),
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
                 "files_changed": set()}
-        _res = await call_with_native_tools(IMPLEMENT_MODEL, _nat_system, _nat_user, _ctx)
-        produced = {fp: file_contents[fp] for fp in _res.get("files_changed", [])}
-        status(f"  [native coder] step {step_num}: {len(produced)} file(s) edited, "
-               f"done={_res.get('done')}, rounds={_res.get('rounds')}, reason={_res.get('reason')}")
-        _wlog.phase_event("native coder step", step=step_num,
-                          files=len(produced), reason=_res.get("reason"))
-        if produced:
-            return produced
-        # gpt-oss (native) produced NOTHING (any reason) → degrade to the TEXT
-        # coder. CODER FALLBACK CHAIN (user-chosen 2026-05-28):
-        #   gpt-oss(native) → qwen3-coder → mistral/large → glm-5.1
-        # qwen3-coder is the FIRST text fallback because when its OR :free pool is
-        # full it 429s INSTANTLY — call_with_retry then fails over in ~ms (no
-        # stall), unlike NIM glm-5.1 which idles 600s. (glm-4.7-flash was dropped:
-        # z.ai throttles >8K-context requests — always our case — to ~1%
-        # concurrency.) The text path runs call_with_retry(qwen3-coder), whose
-        # NVIDIA_FALLBACKS leads mistral/large → glm-5.1, honoring the chain.
-        _coder_model = "nvidia/qwen3-coder"
-        warn(f"  [native coder] step {step_num} produced 0 edits "
-             f"(reason={_res.get('reason')}) — falling over to text coder chain "
-             f"qwen3-coder → mistral/large → glm-5.1")
-
-    MAX_RETRIES = 5
-    # Snapshot the file content as it is at the START of this step (before any
-    # edit this step). The no-op detector must compare a produced edit against
-    # THIS baseline — NOT the running `file_contents`, which on_stop mutates
-    # mid-attempt. Without it, an edit that on_stop already applied looks
-    # identical to "current" and is falsely flagged a no-op → wasteful retry /
-    # FORCE-DONE loop (seen on django-12143 once block_edits started applying).
-    _step_orig_contents = {fp: c for fp, c in file_contents.items()}
-    _EDIT_UNDO.clear(); _EDIT_ORIG.clear()   # per-step undo history (numbers + file originals)
-    # Across-attempt state — carries forward what the model thought and
-    # tried in earlier attempts so it doesn't start from scratch.
-    prev_attempt_thinking = ""
-    prev_attempt_summary = ""
-    for attempt in range(1, MAX_RETRIES + 1):
-        _wlog.phase_event(
-            f"Step {step_num} attempt {attempt}/{MAX_RETRIES}",
-        )
-        # Only load files this step modifies
-        step_file_contents = {}
-        modify_set = set()
-
-        # If the plan step had no FILES: line, try to infer from the step body.
-        # A missing FILES: line causes _build_file_block to return "(no existing
-        # files — create all files from scratch)", making the coder think every
-        # file is new and triggering === FILE: === rewrites of existing files.
-        effective_files = list(step_files)
-        if not effective_files:
-            _file_pat = re.compile(
-                r'[\w./\-]+\.(?:py|js|ts|jsx|tsx|html|css|json|lean|c|cpp|h|rs|'
-                r'java|go|rb|toml|yaml|yml|md|mjs|cjs|svelte|vue)'
-            )
-            found = _file_pat.findall(step_instructions + " " + step_details)
-            # Only include files that are already known to the project
-            known = set(file_contents.keys())
-            effective_files = list(dict.fromkeys(
-                f for f in found if f in known
-            ))
-            if effective_files:
-                warn(f"    Step {step_num}: no FILES: line — inferred {effective_files} from step body")
-
-        for fp in effective_files:
-            if fp in file_contents:
-                step_file_contents[fp] = file_contents[fp]
-                modify_set.add(fp)
-            else:
-                # Try to find by basename — handles plans that wrote the wrong
-                # path (e.g. "tool_call.py" when the file is "core/tool_call.py").
-                basename = os.path.basename(fp)
-                fuzzy = next(
-                    (k for k in file_contents
-                     if os.path.basename(k) == basename and file_contents[k]),
-                    None,
-                )
-                if fuzzy:
-                    warn(f"    Step {step_num}: '{fp}' not found — "
-                         f"resolved to '{fuzzy}' by basename match")
-                    step_file_contents[fuzzy] = file_contents[fuzzy]
-                    modify_set.add(fuzzy)
-                else:
-                    full_path = os.path.join(project_root, fp)
-                    content = sandbox.load_file(fp) or read_file(full_path) or ""
-                    step_file_contents[fp] = content
-                    file_contents[fp] = content
-                    modify_set.add(fp)
-
-        file_block = _build_file_block(step_file_contents, modify_files=modify_set)
-
-        # Build prev_thinking block — only on attempt 2+
-        if prev_attempt_thinking:
-            prev_thinking_block = (
-                f"\n══════════════════════════════════════════════════════════════════════\n"
-                f"YOUR PREVIOUS ATTEMPT (attempt {attempt - 1})\n"
-                f"══════════════════════════════════════════════════════════════════════\n"
-                f"\n{prev_attempt_summary}\n\n"
-                f"This is what you wrote last attempt. Use it to inform this attempt —\n"
-                f"don't repeat the same mistakes, but DO reuse correct analysis you\n"
-                f"already did. The file content above shows the CURRENT state, which\n"
-                f"may differ from what you saw last attempt if some edits applied.\n\n"
-                f"--- BEGIN PREVIOUS THINKING ---\n"
-                f"{prev_attempt_thinking}\n"
-                f"--- END PREVIOUS THINKING ---\n"
-            )
-        else:
-            prev_thinking_block = ""
-
-        # On a reviewer route-back, the runtime RAN the code and it failed.
-        # Lead the step with exactly what broke + what to change. The file
-        # block above already shows the CURRENT (post-edit) state, so the
-        # coder is editing from the diff it just produced — fixing in place.
-        _step_instructions = step_instructions
-        if error_feedback:
-            _step_instructions = (
-                "══════════════════════════════════════════════════════════════════════\n"
-                "⚠ REVIEWER SENT THIS STEP BACK — your last patch did NOT pass when RUN\n"
-                "══════════════════════════════════════════════════════════════════════\n"
-                f"{error_feedback}\n\n"
-                "The file content below is the CURRENT state (your prior edits are\n"
-                "already applied — this is your diff). Fix the problem above IN PLACE:\n"
-                "make a focused corrective edit, don't restart the step from scratch,\n"
-                "and don't re-issue an edit that already applied.\n"
-                "══════════════════════════════════════════════════════════════════════\n\n"
-                + step_instructions
-            )
-
-        impl_prompt = IMPLEMENT_PROMPT.format(
-            step_instructions=_step_instructions,
-            shared_interfaces=iface_block,
-            file_content=file_block,
-            prev_code="",
-            prev_thinking=prev_thinking_block,
-        )
-
-        # ── on_stop callback: apply edits mid-stream so [CODE:] sees them ──
-        # _seen_edit_keys tracks edit BLOCKS (not file content) that have
-        # already been applied this attempt. Each [STOP] re-extracts the
-        # full response_so_far, which contains every prior block — without
-        # block-level dedup, line-number edits get re-applied against an
-        # already-modified file and silently corrupt it.
-        # _viewed_versions records what the model saw via [CODE: path]; line
-        # edits anchor to those snapshots so line numbers always refer to
-        # the version the model was looking at.
-        #
-        # PRE-POPULATE: the prompt's file_block ALREADY shows the model the
-        # current content of each modify-target with line numbers. If the
-        # model writes a `[REPLACE LINES]` without ever calling `[CODE:]`,
-        # the line numbers refer to THAT inline listing. Seeding
-        # _viewed_versions with the same content here keeps the anchor
-        # consistent across mid-stream [STOP]s — even after on_stop
-        # mutates the file on disk, the line edit still anchors to what
-        # the model originally saw.
-        _seen_edit_keys: set[str] = set()
-        _stop_applied: dict[str, str] = {}
-        _viewed_versions: dict[str, str] = {
-            fp: content for fp, content in step_file_contents.items() if content
-        }
-
-        def _on_stop_apply(response_so_far: str) -> "str | None":
-            """Called when the model writes [STOP]. Applies any pending
-            edit blocks to the sandbox so subsequent [CODE:] reads
-            return the post-edit state.
-
-            Returns a feedback string describing what happened to the
-            edits (which applied, which skipped, why) so the runtime
-            can surface it to the model in the next round. Returns
-            None when there are no new edits to report on.
-            """
+        async def _native_pass(_model):
+            _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
+            _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
+            status(f"  [native:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
+            _wlog.phase_event("native coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
+            return _p
+        # EXACT coder chain (user 2026-05-29): gpt-oss(OR,native) -> qwen -> mistral
+        #   -> gpt-oss(NIM,native) -> glm-5.1. First link that produces edits wins.
+        _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
+                        ("mistral/large","text"), ("nvidia/gpt-oss-nim","native"),
+                        ("nvidia/glm-5.1","text")]
+        for _m, _mode in _CODER_CHAIN:
             try:
-                ext = _extract_code_blocks(response_so_far)
-                _dedup_against_seen(ext, _seen_edit_keys)
-                # If dedup removed everything, there's nothing new to apply.
-                # MUST include block_edits — the v11 `[edit]` block is the
-                # PRIMARY edit format. Omitting it here meant a coder that
-                # wrote an [edit] (and no legacy SEARCH/REPLACE) got `return
-                # None` → the edit was NEVER applied mid-stream and NO diff
-                # feedback was shown → the coder thought it failed and looped
-                # or [FORCE DONE]'d → 0-byte patch. (Root cause of the live
-                # 0B regression.)
-                if not (ext["edits"] or ext["text_edits"]
-                        or ext["new_files"] or ext["reverts"]
-                        or ext["block_edits"] or ext["undo_edits"]
-                            or ext["malformed_edits"]):
-                    return None
-
-                # Snapshot pre-apply CONTENT (not just line counts) for every
-                # known file, so the feedback can show the model the actual
-                # before/after DIFF of what its edits changed — the thing it
-                # verifies before [DONE], instead of trusting "84 → 112 lines".
-                pre_content = {fp: c for fp, c in file_contents.items()}
-
-                produced, matched, total, skips = _apply_extracted_code(
-                    ext, file_contents, sandbox,
-                    viewed_versions=_viewed_versions,
-                )
-
-                feedback_lines = []
-                diff_blocks = []
-                view_blocks = []   # fresh re-numbered view per edited file
-                if produced:
-                    from core.edit_diff import render_diff
-                    for fp, content in produced.items():
-                        # The diff the model verifies before [DONE] must be EXACTLY
-                        # what lands on disk. Read the real pre-edit file straight
-                        # from the sandbox NOW (before we overwrite it) and diff it
-                        # against the content we're about to write — so old→content
-                        # is the true on-disk transition, not an in-memory snapshot
-                        # that could drift (e.g. after a closest-match relocation,
-                        # or a previously reverted edit). Fall back to the pre-apply
-                        # snapshot only for a brand-new file (load_file → None).
-                        old = sandbox.load_file(fp)
-                        if old is None:
-                            old = pre_content.get(fp, "")
-                        sandbox.write_file(fp, content)   # ← persist to disk so [CODE:] sees it
-                        file_contents[fp] = content
-                        _stop_applied[fp] = content
-                        post = content.count('\n') + 1
-                        pre = old.count('\n') + 1 if old else 0
-                        if old is not None and old != "" and old == content:
-                            # No-op: the edit matched but the result is byte-identical.
-                            # Reporting "✓ MODIFIED" would tell the model it changed
-                            # something it didn't (it'd [DONE] on a phantom fix). Mirror
-                            # the native replace_lines guard (core/native_tools.py).
-                            feedback_lines.append(
-                                f"  ⚠ NO CHANGE {fp}: edit matched but the result is "
-                                f"byte-identical — nothing was modified. If you meant to "
-                                f"change it, re-check the edit body; if it's already "
-                                f"correct, don't re-edit."
-                            )
-                        elif pre == 0:
-                            feedback_lines.append(
-                                f"  ✓ CREATED  {fp}  ({post} lines written)"
-                            )
-                        elif pre == post:
-                            feedback_lines.append(
-                                f"  ✓ MODIFIED {fp}  (still {post} lines — in-place change)"
-                            )
-                        else:
-                            feedback_lines.append(
-                                f"  ✓ MODIFIED {fp}  ({pre} → {post} lines)"
-                            )
-                        # Loud indent check on the lines this edit added/changed
-                        # (verbatim — no auto-reindent). Any slip is surfaced as a
-                        # ✗ INDENT error the model must fix before it can [DONE].
-                        feedback_lines.extend(_indent_feedback(old, content, fp))
-                        # The diff is the heart of the verify step. For a brand-new
-                        # file, the whole file IS the change — show it as the read
-                        # view rather than an all-`+` diff (less noisy).
-                        try:
-                            d = render_diff(old, content, fp)
-                            if d:
-                                diff_blocks.append(
-                                    f"━━ DIFF of your edit to {fp} — this is EXACTLY "
-                                    f"what was applied (file BEFORE → file AFTER); the "
-                                    f"full NEW file is shown below ━━\n{d}"
-                                )
-                        except Exception:
-                            pass
-                        # ERASE-AND-REFRESH the view: the edit just shifted the
-                        # line numbers, so the coder's earlier view of this file
-                        # is now STALE — a second edit anchored on those old
-                        # numbers is the #1 cause of "stale view" reject loops on
-                        # multi-location steps. Show the SAME file re-numbered
-                        # (current numbers) + tell it to discard the old view.
-                        try:
-                            from tools.codebase import add_line_numbers as _aln
-                            nl = content.count('\n') + 1
-                            if nl <= 700:
-                                view_blocks.append(
-                                    f"══ NEW FILE AFTER YOUR EDIT — {fp} ({nl} lines) ══\n"
-                                    f"This is {fp} AS IT NOW STANDS with your edit applied "
-                                    f"(the DIFF above shows what changed). Your EARLIER view "
-                                    f"of {fp} is STALE — its line numbers shifted when this "
-                                    f"edit applied. DISCARD it. For any further edit to {fp}, "
-                                    f"copy line numbers from THIS view ONLY:\n"
-                                    + _aln(content, display_mode="prefix")
-                                    + f"\n══ END NEW FILE — {fp} ══"
-                                )
-                            else:
-                                view_blocks.append(
-                                    f"⚠ {fp} is now {nl} lines and its line numbers "
-                                    f"SHIFTED — your earlier view is STALE. Re-read with "
-                                    f"[CODE: {fp}] to get current numbers before editing "
-                                    f"it again."
-                                )
-                        except Exception:
-                            pass
-                    status(f"    [STOP] applied {len(produced)} file(s) mid-stream")
-                else:
-                    status("    [STOP] no edits applied this round")
-
-                warn_lines = []
-                if skips:
-                    for s in skips:
-                        # skips already start with "- " or similar — normalize
-                        text = s.strip().lstrip("-").strip()
-                        # "✓" = an edit (often numbered, e.g. edit:2) that DID
-                        # apply — echo it so the model knows what landed and
-                        # never re-submits it. "⚠" = advisory on an applied edit
-                        # (blank-line removal, duplication) — not a rejection.
-                        # Everything else is a real rejection.
-                        if text[:1] in "✓↩":   # applied / undone — info to show
-                            feedback_lines.append(f"  {text}")
-                        elif text.startswith("⚠"):
-                            warn_lines.append(f"  {text}")
-                        else:   # already formatted "✗ edit:N REJECTED — …"
-                            feedback_lines.append(
-                                f"  {text}" if text.startswith("✗")
-                                else f"  ✗ REJECTED  {text}")
-                # Edits that the parser couldn't match at all (SEARCH not found)
-                # show up as text_edits in `ext` but absent from `produced`.
-                attempted_fps = (
-                    set(ext.get("text_edits", {}).keys())
-                    | set(ext.get("edits", {}).keys())
-                )
-                missed_fps = attempted_fps - set(produced.keys())
-                for fp in missed_fps:
-                    # Don't duplicate skips that already mention this file
-                    if any(fp in s for s in skips):
-                        continue
-                    # Show the coder the ACTUAL nearest line so it can copy it
-                    # verbatim instead of re-reading + guessing again. This is
-                    # the difference between a 1-round recovery and a flail loop
-                    # that ends in an empty patch.
-                    hint = ""
-                    try:
-                        import difflib
-                        from core.view_lineno_strip import strip_view_linenos
-                        pairs = ext.get("text_edits", {}).get(fp, [])
-                        file_src = file_contents.get(fp, "") or ""
-                        file_lines = file_src.splitlines()
-                        if pairs and file_lines:
-                            search_raw = pairs[0][0]
-                            # first non-empty content line of the failed SEARCH
-                            cand = [l for l in strip_view_linenos(search_raw).splitlines()
-                                    if l.strip()]
-                            if cand:
-                                # compare on PURE content: drop a leading INDENT|
-                                # prefix too, so the fuzzy match isn't skewed by it
-                                want = re.sub(r'^\d+\|', '', cand[0]).strip()
-                                bare = [l.strip() for l in file_lines]
-                                near = difflib.get_close_matches(want, bare, n=1, cutoff=0.6)
-                                if near:
-                                    ln = bare.index(near[0]) + 1
-                                    actual = file_lines[bare.index(near[0])]
-                                    indent = len(actual) - len(actual.lstrip(' '))
-                                    hint = (
-                                        f"\n      you searched : {want[:80]}"
-                                        f"\n      file line {ln} : {ln}:{indent}|{near[0][:80]}"
-                                        f"\n      → copy that line VERBATIM into SEARCH."
-                                    )
-                    except Exception:
-                        hint = ""
-                    feedback_lines.append(
-                        f"  ✗ REJECTED  edit on {fp}: SEARCH anchor did not "
-                        f"match the file.{hint}"
-                        + ("" if hint else
-                           " Re-read with [CODE:] and copy the exact lines, "
-                           "OR use [REPLACE LINES N-M].")
-                    )
-
-                # Reverts and new files (purely informational)
-                for rpath in ext.get("reverts", []):
-                    feedback_lines.append(f"  ↺ REVERTED {rpath} to prior snapshot")
-
-                if not feedback_lines and not warn_lines:
-                    return None
-                summary = "\n".join(feedback_lines)
-                # Lead with the DIFF (the thing the model verifies), then any
-                # ⚠ advisories (placed adjacent to the diff they describe), then
-                # the one-line-per-file summary. A leading "DIFF" sentinel lets
-                # the continuation prompt frame this as the verify step.
-                # The updated re-numbered view(s) come LAST so they're the most
-                # recent thing in context — the coder anchors its next edit on
-                # current line numbers, not the stale earlier view.
-                view_out = ("\n\n" + "\n\n".join(view_blocks)) if view_blocks else ""
-                if diff_blocks:
-                    out = "DIFF\n" + "\n\n".join(diff_blocks)
-                    if warn_lines:
-                        out += "\n\n" + "\n".join(warn_lines)
-                    if summary:
-                        out += "\n\n" + summary
-                    out += view_out
-                    return out
-                parts = warn_lines + ([summary] if summary else [])
-                base = "\n".join(parts) if parts else ""
-                return (base + view_out) if (base or view_out) else None
-            except Exception as e:
-                warn(f"    [STOP] edit apply failed: {e}")
-                return f"  ✗ edit REJECTED — runtime error while applying edits: {e}"
-
-        def _has_pending_edits(response_so_far: str) -> bool:
-            """Non-mutating: does the response carry edit blocks not yet
-            applied? Dedups against a COPY of _seen_edit_keys so neither the
-            real set nor on_stop's later apply is affected. The verify gate
-            uses this to hold a [DONE] that arrived with fresh, unverified
-            edits until the model has seen the diff."""
-            try:
-                ext = _extract_code_blocks(response_so_far)
-                _dedup_against_seen(ext, set(_seen_edit_keys))
-                return bool(ext.get("edits") or ext.get("text_edits")
-                            or ext.get("new_files") or ext.get("block_edits")
-                            or ext.get("reverts") or ext.get("undo_edits"))
-            except Exception:
-                return False
-
-        # ── 1. Coder writes edits ────────────────────────────────────
-        impl_result = await _call_with_tools(
-            _coder_model, impl_prompt, project_root,
-            detailed_map=detailed_map, purpose_map=purpose_map,
-            research_cache=research_cache,
-            log_label=f"step {step_num}: {step_name} (attempt {attempt})",
-            on_stop=_on_stop_apply,
-            has_pending_edits=_has_pending_edits,
-            viewed_versions=_viewed_versions,
-        )
-
-        # If edits were already applied at [STOP] time, use those results.
-        # Otherwise extract and apply from the final response as usual.
-        if _stop_applied:
-            produced = dict(_stop_applied)
-            # Re-extract to catch any edits written AFTER the last [STOP].
-            # Use the same _seen_edit_keys set so blocks already applied
-            # at [STOP] time aren't applied a second time here.
-            extracted = _extract_code_blocks(impl_result["answer"])
-            _dedup_against_seen(extracted, _seen_edit_keys)
-            late_produced, late_m, late_t, late_skips = _apply_extracted_code(
-                extracted, file_contents, sandbox,
-                viewed_versions=_viewed_versions,
-            )
-            if late_produced:
-                produced.update(late_produced)
-                for fp, content in late_produced.items():
-                    sandbox.write_file(fp, content)
-                    file_contents[fp] = content
-            matched = len(produced)
-            total = matched
-            # Surface every late skip — the model needs to see why post-STOP
-            # blocks failed, even when no new file was produced. Hiding skips
-            # when `late_produced` was empty made the retry loop see "no code
-            # produced" instead of "your SEARCH didn't match", and burnt the
-            # MAX_RETRIES budget retrying the same broken edit.
-            ambiguous_skips = list(late_skips)
-        else:
-            extracted = _extract_code_blocks(impl_result["answer"])
-            produced, matched, total, ambiguous_skips = _apply_extracted_code(
-                extracted, file_contents, sandbox,
-                viewed_versions=_viewed_versions,
-            )
-
-        if not produced:
-            # Fallback for new files: the model wrote a code block but didn't
-            # use the `=== FILE: ===` form. Only accept this if the target
-            # file doesn't already exist on disk — otherwise we'd silently
-            # overwrite real code with a stray code listing.
-            if len(step_files) == 1:
-                target_fp = step_files[0]
-                existing_content = file_contents.get(target_fp, "")
-                if not existing_content.strip():
-                    raw_blocks = re.findall(
-                        r'```[^\n]*\n(.*?)```', impl_result["answer"], re.DOTALL
-                    )
-                    if raw_blocks:
-                        produced[target_fp] = max(raw_blocks, key=len).strip()
-                        matched, total = 1, 1
-
-        if not produced:
-            # Check if the model is saying no changes are needed (valid outcome).
-            # If it wrote [DONE] and indicated the code is already correct,
-            # treat this as a successful no-op rather than retrying forever.
-            #
-            # STRICT MARKER (replaces the fuzzy-phrase exit that used to
-            # false-positive on phrases like "code matches" or "all correct"):
-            # the model must write the LITERAL line `STEP COMPLETE: NO CHANGES
-            # NEEDED` (case-sensitive on the marker, free text around it).
-            # IMPLEMENT_PROMPT and SELF_CHECK_PROMPT teach this marker. Verify
-            # steps still get the verb-based exit because their step body is
-            # explicit about not producing code.
-            answer = impl_result["answer"]
-            answer_lower = answer.lower()
-            # [DONE] is stripped from the answer text by _call_with_tools before
-            # returning, so NEVER search for "[done]" in answer_lower — it will
-            # never be there. Use the explicit flag instead.
-            done_signaled = impl_result.get("done", False)
-            force_done_signaled = impl_result.get("force_done", False)
-
-            # Verify steps legitimately produce no code — if the step name or
-            # details says verify/confirm/no changes, accept a [DONE] response
-            # without requiring specific signal phrases. (Computed before the
-            # FORCE DONE guard so we can tell a verify step from a fix step.)
-            is_verify_step = any(kw in step_name.lower() for kw in (
-                "verify", "verif", "confirm", "no changes", "no additional",
-                "check", "validate",
-            )) or any(kw in step_details.lower() for kw in (
-                "no additional changes needed", "verification only",
-                "no code changes needed", "verify no",
-                "no change needed", "no changes needed",
-            ))
-
-            # FORCE_DONE is the coder's escape hatch: "the file already
-            # satisfies the requirement, no edits needed." Legit on a verify
-            # step. But on a FIX step with ZERO edits ever applied, a model
-            # that FORCE-DONEs is often HALLUCINATING "already fixed" — observed
-            # live on astropy-12907, where glm-5.1 insisted line 245 already
-            # said `= right` while the file plainly showed `= 1`, and shipped a
-            # 0-byte patch. So: on a non-verify step with nothing applied, push
-            # back HARD and retry (make it re-read + quote the exact line and
-            # actually edit). Accept FORCE DONE only on a verify step, or once
-            # the retry budget is spent.
-            if force_done_signaled:
-                _applied_anything = bool(_stop_applied)
-                if (not is_verify_step and not _applied_anything
-                        and attempt < MAX_RETRIES):
-                    warn(f"    Step {step_num}: [FORCE DONE] with NO edit applied "
-                         f"on a fix step — likely hallucinated 'already done'; "
-                         f"pushing back (attempt {attempt})")
-                    prev_attempt_thinking = impl_result.get("answer", "")[-4000:]
-                    # If the model DID write an edit that got REJECTED, tell it
-                    # exactly why — otherwise it never learns its edit failed and
-                    # keeps believing "already fixed".
-                    _rej = "\n".join(
-                        f"    - {s.strip().lstrip('-').strip()}"
-                        for s in (ambiguous_skips or [])
-                    )[:1200]
-                    _rej_block = (
-                        ("\nYour previous edit DID NOT APPLY — here is why:\n"
-                         + _rej + "\nFix THAT and re-issue the [edit] block.\n")
-                        if _rej else ""
-                    )
-                    prev_attempt_summary = (
-                        "⚠ You wrote [FORCE DONE] claiming the requirement is ALREADY "
-                        "met — but NO edit was applied, and this is a FIX step. That "
-                        "usually means an edit you wrote was REJECTED (so the file is "
-                        "UNCHANGED) and you mistook it for done, OR you talked yourself "
-                        "into believing the change is in the file when it is NOT."
-                        + _rej_block +
-                        "Do this now, concretely:\n"
-                        "  1. [VIEW:] or [CODE:] the EXACT target line(s).\n"
-                        "  2. QUOTE the current line verbatim.\n"
-                        "  3. If it still shows the OLD / buggy code, WRITE THE [edit] "
-                        "block to change it — do NOT [FORCE DONE].\n"
-                        "Only [FORCE DONE] if you can quote the line PROVING it already "
-                        "matches the requirement. Do not trust memory or your plan — "
-                        "trust the quoted line."
-                    )
-                    continue
-                status(
-                    f"    Step {step_num}: forced done by coder "
-                    f"(requirement already met — [FORCE DONE])"
-                )
-                break
-
-            if is_verify_step and done_signaled:
-                status(f"    Step {step_num}: verified (no changes needed)")
-                break
-
-            _NO_CHANGES_MARKER = re.compile(
-                r'STEP\s+COMPLETE:\s*NO\s+CHANGES\s+NEEDED', re.IGNORECASE,
-            )
-            if done_signaled and _NO_CHANGES_MARKER.search(answer):
-                status(
-                    f"    Step {step_num}: no changes needed "
-                    f"(model wrote STEP COMPLETE: NO CHANGES NEEDED)"
-                )
-                break
-            # v8.10 fix: RETRY [DONE] + 0 edits on first attempt; accept
-            # only after retry budget is exhausted. The previous behavior
-            # silently accepted bare [DONE] with no edits as equivalent
-            # to [FORCE DONE]. Two failure modes that should have been
-            # distinguished:
-            #   (a) Model legitimately recognized "file already satisfies
-            #       requirement" but used [DONE] instead of [FORCE DONE].
-            #       Acceptable on retry; correct fix is to teach the model.
-            #   (b) Model intended to emit edits but they came out in the
-            #       wrong format (markdown fences, prose, etc.). Silently
-            #       accepting = shipping NO_PATCH. Bad.
-            #
-            # Treating both as success obscured (b). Now: first attempt
-            # retries with the targeted correction message; if the model
-            # still emits [DONE] + 0 edits on retry, we accept (matching
-            # the previous loop-protection rationale).
-            if done_signaled:
-                if attempt >= MAX_RETRIES - 1:
-                    # Out of retries — accept as no-op rather than burning
-                    # the last attempt.
-                    status(
-                        f"    Step {step_num}: [DONE] with zero edits "
-                        f"(retries exhausted; treating as no-change-needed)"
-                    )
-                    break
-                # First attempt: retry with the 3-option correction prompt.
-                warn(
-                    f"    Step {step_num}: [DONE] with zero edits on "
-                    f"attempt {attempt} — retrying with format-correction "
-                    f"prompt"
-                )
-                prev_attempt_thinking = impl_result.get("answer", "")[-6000:]
-                prev_attempt_summary = (
-                    "OUTCOME: You wrote [DONE][CONFIRM_DONE] but no edit "
-                    "blocks landed. Three possibilities — pick one:\n"
-                    "(A) The step requirement is ALREADY MET in the file "
-                    "and no edits are needed. → use "
-                    "`[FORCE DONE][CONFIRM_FORCE_DONE]` (NOT plain "
-                    "[DONE]). Add the line `STEP COMPLETE: NO CHANGES "
-                    "NEEDED` for the runtime to accept cleanly.\n"
-                    "(B) You wrote edits but in a format the parser "
-                    "ignored. → check that each edit is wrapped in "
-                    "`=== EDIT: <path> === ... === END EDIT ===` with "
-                    "`[SEARCH]…[/SEARCH]` and `[REPLACE]…[/REPLACE]` "
-                    "inside, OR uses `[REPLACE LINES N-M]…[/REPLACE]`. "
-                    "Markdown ``` fences do NOT fire edits.\n"
-                    "(C) You forgot to emit edits before [DONE]. → "
-                    "write the EDIT blocks now, then "
-                    "`[STOP][CONFIRM_STOP]`. Don't ship [DONE] in the "
-                    "same response as a fresh EDIT — that's guessing."
-                )
-                continue
-            warn(f"    No code produced (attempt {attempt})")
-            # Stash thinking so the next attempt knows what was tried
-            attempt_thinking = impl_result.get("answer", "")
-            if len(attempt_thinking) > 6000:
-                attempt_thinking = (
-                    "(...earlier portion of this attempt's thinking trimmed...)\n"
-                    + attempt_thinking[-6000:]
-                )
-            prev_attempt_thinking = attempt_thinking
-            prev_attempt_summary = (
-                "OUTCOME: NO edits were produced. The model wrote a response but "
-                "no edit blocks were extractable.\n"
-                "• If you intended to EDIT the file: wrap every change in "
-                "`=== EDIT: path === [SEARCH]…[/SEARCH] [REPLACE]…[/REPLACE]` "
-                "blocks. Plain [DONE] without any edit blocks now triggers a "
-                "retry — markdown code fences are not edits.\n"
-                "• If the step requirement is ALREADY MET in the file and no "
-                "edits are needed: end the round with "
-                "`[FORCE DONE][CONFIRM_FORCE_DONE]` (not plain [DONE]). That "
-                "is the explicit escape hatch for 'no changes required'."
-            )
-            continue
-
-        # ── 2. Check match rate ───────────────────────────────────────
-        if total > 0 and matched < total:
-            failed = total - matched
-            warn(f"    {failed}/{total} edits FAILED to match")
-
-            if attempt < MAX_RETRIES:
-                # Stash this attempt's thinking so the next attempt can see it.
-                # Trim aggressively — the file content blows context budget if
-                # the model wrote big edit blocks. Keep the last ~6000 chars
-                # (typically 2-4 model "rounds" of analysis + edits).
-                attempt_thinking = impl_result.get("answer", "")
-                if len(attempt_thinking) > 6000:
-                    attempt_thinking = (
-                        "(...earlier portion of this attempt's thinking trimmed...)\n"
-                        + attempt_thinking[-6000:]
-                    )
-                prev_attempt_thinking = attempt_thinking
-                # Build a structured summary of what failed
-                if ambiguous_skips:
-                    skip_details = "\n".join(ambiguous_skips)
-                    prev_attempt_summary = (
-                        f"OUTCOME: {failed} of {total} edits SKIPPED — SEARCH blocks "
-                        f"matched multiple locations. Use anchored [SEARCH: N-M] form.\n"
-                        f"Specific failures:\n{skip_details}"
-                    )
-                else:
-                    prev_attempt_summary = (
-                        f"OUTCOME: {failed} of {total} edits did NOT match. The file "
-                        f"content shown above is the CURRENT state. Use line numbers "
-                        f"from the file listing — they are accurate."
-                    )
-                status(f"    Retrying step {step_num} with fresh file state...")
-                continue
-            else:
-                warn(f"    Proceeding with {matched}/{total} matched edits")
-
-        status(f"    Edits applied: {matched}/{total} matched")
-
-        # ── No-op detection ────────────────────────────────────────────
-        # SEARCH/REPLACE blocks whose REPLACE body is byte-identical to
-        # the matched range count as "matched" above but produce no real
-        # diff. Treat all-no-op as a failed attempt and retry with a
-        # specific diagnostic. Observed failure on django-11551 and
-        # django-14631: workflow reported "Applied N changes" but final
-        # `git diff` was empty.
-        if total > 0 and produced:
-            # Compare against the STEP-START baseline, not the running
-            # file_contents (which on_stop already mutated with this very
-            # edit). Otherwise an applied edit reads as a no-op.
-            real_diff_files = [
-                fp for fp, content in produced.items()
-                if content != _step_orig_contents.get(fp, "")
-            ]
-            if not real_diff_files:
-                warn(
-                    f"    All {len(produced)} edit(s) SEARCH-matched but "
-                    f"REPLACE was identical to current file content (attempt {attempt})"
-                )
-                if attempt < MAX_RETRIES:
-                    attempt_thinking = impl_result.get("answer", "")
-                    if len(attempt_thinking) > 6000:
-                        attempt_thinking = (
-                            "(...earlier portion trimmed...)\n"
-                            + attempt_thinking[-6000:]
-                        )
-                    prev_attempt_thinking = attempt_thinking
-                    prev_attempt_summary = (
-                        f"OUTCOME: {len(produced)} edit(s) MATCHED but produced "
-                        f"NO REAL CHANGE — your [REPLACE] body was BYTE-IDENTICAL "
-                        f"to the matched range. The file is unchanged. View the "
-                        f"current file content and emit a genuinely different "
-                        f"[REPLACE] body that satisfies the step requirement. "
-                        f"If the requirement is already met, write "
-                        f"`STEP COMPLETE: NO CHANGES NEEDED` and stop — do not "
-                        f"emit empty edits."
-                    )
-                    status(f"    Retrying step {step_num} (no real diff produced)...")
-                    continue
-                else:
-                    warn(f"    Proceeding despite all-no-op edits (out of retries)")
-
-        # ── Deleted-import safety check ─────────────────────────────────
-        # If an edit removes a top-level `import`/`from … import …` line and
-        # some other file in the project re-exports those names via
-        # `from <this_module> import <name>`, the deletion will break the
-        # public re-export → ImportError → entire module unloadable.
-        # Observed failure on astropy__astropy-13236: 644 P→P tests failed
-        # because `NdarrayMixin` was removed from astropy/table/table.py
-        # but astropy/table/__init__.py re-exports it.
-        unsafe_deletions: dict[str, list[tuple[str, str]]] = {}
-        for fp, content in produced.items():
-            original_for_check = file_contents.get(fp, "")
-            if not original_for_check:
-                continue
-            findings = _check_deleted_imports(
-                fp, original_for_check, content, sandbox.project_root,
-            )
-            if findings:
-                unsafe_deletions[fp] = findings
-        if unsafe_deletions:
-            warn(
-                f"    Edit removes import(s) re-exported by other files "
-                f"(attempt {attempt}) — REJECTED to prevent ImportError"
-            )
-            if attempt < MAX_RETRIES:
-                lines: list[str] = []
-                for fp, findings in unsafe_deletions.items():
-                    for imp_line, evidence in findings[:3]:
-                        lines.append(f"  - In {fp}, removing `{imp_line}` would break {evidence}")
-                attempt_thinking = impl_result.get("answer", "")
-                if len(attempt_thinking) > 6000:
-                    attempt_thinking = (
-                        "(...earlier portion trimmed...)\n"
-                        + attempt_thinking[-6000:]
-                    )
-                prev_attempt_thinking = attempt_thinking
-                prev_attempt_summary = (
-                    "OUTCOME: your edit REMOVED a top-level import that is "
-                    "still consumed via `from <this_module> import <name>` in "
-                    "another file. The import looks unused INSIDE the file you "
-                    "edited, but it is a PUBLIC RE-EXPORT — deleting it breaks "
-                    "the package's import surface.\n"
-                    "Concrete consumers found:\n"
-                    + "\n".join(lines)
-                    + "\nRetry: KEEP the import line. If you genuinely need to "
-                    "remove a symbol, also update the re-exporting `__init__.py` "
-                    "and every consumer in the same step."
-                )
-                status(f"    Retrying step {step_num} (unsafe import deletion)...")
-                continue
-            else:
-                warn(f"    Proceeding despite unsafe import deletion (out of retries)")
-
-        # Write to sandbox + update file_contents
-        # First snapshot which files already had syntax errors BEFORE this
-        # step's edits. We only want to show the model errors it introduced —
-        # asking it to fix pre-existing errors in unrelated parts of the file
-        # sends it on a wild-goose chase that cascades into new errors.
-        pre_edit_errors = {}
-        for fp in produced:
-            original_content = file_contents.get(fp, "")
-            if original_content:
-                ok, msg = _check_syntax(fp, original_content)
-                if not ok:
-                    pre_edit_errors[fp] = msg
-
-        syntax_errors = {}
-        for fp, content in produced.items():
-            sandbox.write_file(fp, content)
-            file_contents[fp] = content
-            status(f"    {fp}: done ({content.count(chr(10)) + 1} lines)")
-
-            # Only flag errors that are NEW — not ones that existed before
-            passed, err_msg = _check_syntax(fp, content)
-            if not passed and fp not in pre_edit_errors:
-                syntax_errors[fp] = err_msg
-                warn(f"    {fp}: syntax error detected")
-
-        # ── 4. Syntax-fix-only loop ───────────────────────────────────
-        # The general LLM self-review pass was removed: when files parse,
-        # we trust the coder + Phase 3.5 code-review to catch logic bugs
-        # without spending another ~25 min per step on a re-read pass.
-        # We still keep the loop body below for the syntax-error case —
-        # if `_check_syntax` flagged anything, the coder gets one focused
-        # chance to fix only the broken file(s). When no syntax errors
-        # were detected, skip the whole loop and return immediately.
-        if not syntax_errors:
-            return produced
-        MAX_VERIFY_ROUNDS = 5
-        coder_thinking = impl_result.get("answer", "")
-
-        # Strip edit blocks from thinking — we only want the REASONING,
-        # not the code. If the code has bad indent, showing it here would
-        # cause the self-checker to repeat the same mistake.
-        coder_thinking = re.sub(
-            r'===\s*(?:EDIT|FILE):\s*\S+.*?(?:```|\[/REPLACE\]|\[/INSERT\]|\[DELETE\s|<<<END>>>)',
-            '[... edit block removed ...]',
-            coder_thinking, flags=re.DOTALL,
-        )
-        # Also strip standalone REPLACE/INSERT blocks not inside === EDIT:
-        coder_thinking = re.sub(
-            r'\[REPLACE\s+LINES?\s+\d+\s*-\s*\d+\s*\].*?\[/REPLACE\]',
-            '[... edit block removed ...]',
-            coder_thinking, flags=re.DOTALL,
-        )
-        coder_thinking = re.sub(
-            r'\[INSERT\s+AFTER\s+LINE\s+\d+\s*\].*?\[/INSERT\]',
-            '[... edit block removed ...]',
-            coder_thinking, flags=re.DOTALL,
-        )
-
-        # Trim thinking to last 4000 chars to avoid bloat
-        if len(coder_thinking) > 4000:
-            coder_thinking = "(...earlier thinking trimmed...)\n" + coder_thinking[-4000:]
-
-        prev_syntax_errors = {}
-        repeat_count = 0
-        for verify_round in range(1, MAX_VERIFY_ROUNDS + 1):
-            # Build file list — names + line counts + syntax errors
-            files_list_parts = []
-            for fp, content in produced.items():
-                line_count = content.count('\n') + 1
-                entry = f"  {fp} — {line_count} lines (use [CODE: {fp}] to read)"
-                if fp in syntax_errors:
-                    entry += f"\n    ⚠ SYNTAX ERROR:\n{syntax_errors[fp]}"
-
-                    if syntax_errors == prev_syntax_errors:
-                        repeat_count += 1
-                        # Extract error line number
-                        err_line_match = re.search(r'line\s+(\d+)', syntax_errors[fp], re.IGNORECASE)
-                        if err_line_match:
-                            err_line = int(err_line_match.group(1))
-                            file_lines = content.split('\n')
-                            ctx_start = max(0, err_line - 15)
-                            ctx_end = min(len(file_lines), err_line + 5)
-                            ctx_lines = []
-                            for i in range(ctx_start, ctx_end):
-                                marker = " >>>" if i + 1 == err_line else "    "
-                                ctx_lines.append(f"{marker} {i+1:4d} | {file_lines[i]}")
-                            entry += (
-                                f"\n\n    ⚠ SAME ERROR REPEATED {repeat_count}x — "
-                                f"here is the actual code around the error:\n"
-                                + "\n".join(ctx_lines)
-                                + f"\n\n    Look at the indentation of the lines ABOVE "
-                                f"line {err_line}. Your replacement must match that "
-                                f"indent level. Include the enclosing def/class line "
-                                f"in your [REPLACE LINES] block."
-                            )
-                    else:
-                        repeat_count = 0
-
-                files_list_parts.append(entry)
-
-            prev_syntax_errors = dict(syntax_errors)
-
-            # Build a LOUD banner for syntax errors so the model can't ignore
-            # them. Without this, models often [KEEP:] only the edited regions
-            # and miss broken lines OUTSIDE those ranges (e.g. a stray line-
-            # number trailer on an adjacent unchanged line). The banner names
-            # the file + error line and forbids VERIFIED until it's fixed.
-            syntax_banner = ""
-            if syntax_errors:
-                lines_summary = []
-                for fp, msg in syntax_errors.items():
-                    err_line_match = re.search(r'line\s+(\d+)', msg, re.IGNORECASE)
-                    err_line = err_line_match.group(1) if err_line_match else "?"
-                    lines_summary.append(f"    • {fp} line {err_line}")
-                syntax_banner = (
-                    "\n══════════════════════════════════════════════════════════════════════\n"
-                    "🚨 SYNTAX ERROR — FIX THIS BEFORE ANYTHING ELSE\n"
-                    "══════════════════════════════════════════════════════════════════════\n"
-                    f"The file(s) below DO NOT PARSE. The user cannot run this code.\n"
-                    "  Broken file(s):\n"
-                    + "\n".join(lines_summary)
-                    + "\n\n"
-                    "PROCESS:\n"
-                    "  1. [CODE: <broken_file>] to read the WHOLE file (do NOT use [KEEP:]\n"
-                    "     to focus on the edited region — the broken line might be OUTSIDE\n"
-                    "     the edited range, e.g. a stray trailing integer on an adjacent line).\n"
-                    "  2. Find the line cited in the error context above.\n"
-                    "  3. Common cause: a stray trailing integer on a line — that's a\n"
-                    "     line number from the [CODE:] view that got copied into REPLACE\n"
-                    "     content. Strip it.\n"
-                    "  4. Write a [SEARCH]/[REPLACE] fix wrapped in === EDIT: <path> ===.\n"
-                    "  5. Do NOT write VERIFIED until the file PARSES.\n"
-                    "══════════════════════════════════════════════════════════════════════\n"
-                )
-
-            check_prompt = SELF_CHECK_PROMPT.format(
-                task=task,
-                step_name=f"Step {step_num}: {step_name}",
-                step_details=step_details,
-                coder_thinking=syntax_banner + coder_thinking,
-                changed_files_list="\n".join(files_list_parts),
-            )
-
-            # on_stop for self-check: apply fix edits mid-stream
-            _sc_seen_edit_keys: set[str] = set()
-            _sc_stop_applied: dict[str, str] = {}
-            # Pre-seed with the post-coder file state. The self-check prompt
-            # lists files by name + line count (not full content), but if
-            # the model writes [REPLACE LINES] right after [CODE:] reads it,
-            # the line numbers refer to that read. Seeding from `produced`
-            # gives a sensible default basis when [REPLACE LINES] arrives
-            # before any [CODE:] read in the same response.
-            _sc_viewed_versions: dict[str, str] = {
-                fp: content for fp, content in produced.items() if content
-            }
-
-            def _on_stop_selfcheck(response_so_far: str) -> "str | None":
-                """Apply fix edits during self-check. Returns a feedback
-                string describing what applied vs was rejected so the
-                runtime can show the verifier explicit results next round
-                (same fix as for the coder)."""
-                try:
-                    ext = _extract_code_blocks(response_so_far)
-                    # Self-check may not create new files — only fix existing ones.
-                    # Line edits ([REPLACE LINES]) are allowed: the prompt instructs
-                    # the model to use them and they are anchored to _sc_viewed_versions.
-                    ext["new_files"] = {}
-                    _dedup_against_seen(ext, _sc_seen_edit_keys)
-                    if not (ext["edits"] or ext["text_edits"] or ext["reverts"]
-                            or ext["block_edits"] or ext["undo_edits"]
-                            or ext["malformed_edits"]):
-                        return None
-                    pre_content = {fp: c for fp, c in file_contents.items()}
-                    produced, matched, total, skips = _apply_extracted_code(
-                        ext, file_contents, sandbox,
-                        viewed_versions=_sc_viewed_versions,
-                    )
-                    feedback_lines = []
-                    diff_blocks = []
-                    if produced:
-                        from core.edit_diff import render_diff
-                        for fp, content in produced.items():
-                            # diff from the ACTUAL on-disk file (read before write)
-                            # → guaranteed to be exactly what was applied.
-                            old = sandbox.load_file(fp)
-                            if old is None:
-                                old = pre_content.get(fp, "")
-                            sandbox.write_file(fp, content)
-                            file_contents[fp] = content
-                            _sc_stop_applied[fp] = content
-                            post = content.count('\n') + 1
-                            pre = old.count('\n') + 1 if old else 0
-                            if old is not None and old != "" and old == content:
-                                # No-op fix: byte-identical result. The self-check has
-                                # NO batch-level no-op backstop, so an unreported no-op
-                                # here lets it sign off on a phantom fix.
-                                feedback_lines.append(
-                                    f"  ⚠ NO CHANGE {fp}: your fix matched but the result is "
-                                    f"byte-identical — nothing changed. Re-check the edit, or "
-                                    f"if the code is already correct, don't re-edit.")
-                            elif pre == post:
-                                feedback_lines.append(f"  ✓ FIX APPLIED {fp} (still {post} lines)")
-                            else:
-                                feedback_lines.append(f"  ✓ FIX APPLIED {fp} ({pre} → {post} lines)")
-                            feedback_lines.extend(_indent_feedback(old, content, fp))
-                            try:
-                                d = render_diff(old, content, fp)
-                                if d:
-                                    diff_blocks.append(
-                                        f"━━ DIFF of your fix to {fp} — exactly what "
-                                        f"was applied (file BEFORE → file AFTER) ━━\n{d}"
-                                    )
-                            except Exception:
-                                pass
-                        status(f"    [STOP] self-check applied {len(produced)} fix(es)")
-                    warn_lines = []
-                    for s in skips:
-                        text = s.strip().lstrip("-").strip()
-                        if text[:1] in "✓↩":   # applied / undone — info to show
-                            feedback_lines.append(f"  {text}")
-                        elif text.startswith("⚠"):   # advisory on an applied edit
-                            warn_lines.append(f"  {text}")
-                        else:
-                            feedback_lines.append(
-                                f"  {text}" if text.startswith("✗")
-                                else f"  ✗ FIX REJECTED  {text}")
-                    attempted = set(ext.get("text_edits", {}).keys()) | set(ext.get("edits", {}).keys())
-                    for fp in attempted - set(produced.keys()):
-                        if any(fp in s for s in skips):
-                            continue
-                        feedback_lines.append(
-                            f"  ✗ FIX REJECTED  edit on {fp}: SEARCH anchor "
-                            f"did not match. Re-read with [CODE:] and copy "
-                            f"the exact lines, OR use [REPLACE LINES N-M]."
-                        )
-                    for rpath in ext.get("reverts", []):
-                        feedback_lines.append(f"  ↺ REVERTED {rpath} to prior snapshot")
-                    if not feedback_lines and not warn_lines:
-                        return None
-                    summary = "\n".join(feedback_lines)
-                    if diff_blocks:
-                        out = "DIFF\n" + "\n\n".join(diff_blocks)
-                        if warn_lines:
-                            out += "\n\n" + "\n".join(warn_lines)
-                        if summary:
-                            out += "\n\n" + summary
-                        return out
-                    parts = warn_lines + ([summary] if summary else [])
-                    return "\n".join(parts) if parts else None
-                except Exception as e:
-                    warn(f"    [STOP] self-check apply failed: {e}")
-                    return f"  ✗ runtime error during self-check apply: {e}"
-
-            def _sc_has_pending_edits(response_so_far: str) -> bool:
-                try:
-                    ext = _extract_code_blocks(response_so_far)
-                    ext["new_files"] = {}  # self-check never creates files
-                    _dedup_against_seen(ext, set(_sc_seen_edit_keys))
-                    return bool(ext.get("edits") or ext.get("text_edits")
-                                or ext.get("block_edits") or ext.get("reverts"))
-                except Exception:
-                    return False
-
-            check_result = await _call_with_tools(
-                IMPLEMENT_MODEL, check_prompt, project_root,
-                detailed_map=detailed_map, purpose_map=purpose_map,
-                research_cache=research_cache,
-                log_label=f"self-check step {step_num} (round {verify_round})",
-                on_stop=_on_stop_selfcheck,
-                has_pending_edits=_sc_has_pending_edits,
-                viewed_versions=_sc_viewed_versions,
-            )
-
-            check_answer = check_result.get("answer", "")
-
-            # Verified: model declared VERIFIED AND there are no NEW (un-applied)
-            # edit blocks left over after on_stop ran. We can't trust literal
-            # "[REPLACE" detection — on_stop applies edits mid-stream but the
-            # text remains in the answer. Instead, re-extract and dedup against
-            # _sc_seen_edit_keys: anything left is genuinely unapplied.
-            if "VERIFIED" in check_answer.upper():
-                pending = _extract_code_blocks(check_answer)
-                pending["new_files"] = {}
-                _dedup_against_seen(pending, _sc_seen_edit_keys)
-                has_unapplied = bool(
-                    pending["edits"] or pending["text_edits"] or pending["reverts"]
-                    or pending["block_edits"] or pending["undo_edits"]
-                    or pending["malformed_edits"]
-                )
-                if not has_unapplied and not syntax_errors:
-                    success(f"    Step {step_num} verified (round {verify_round})")
-                    break
-                if has_unapplied and not syntax_errors:
-                    # Verifier said VERIFIED but wrote an edit without a [STOP]
-                    # before [DONE] — the edit wasn't applied by on_stop.
-                    # Apply it now and break rather than forcing a whole extra round.
-                    late, _, _, _ = _apply_extracted_code(
-                        pending, file_contents, sandbox,
-                        viewed_versions=_sc_viewed_versions,
-                    )
-                    if late:
-                        for fp, content in late.items():
-                            sandbox.write_file(fp, content)
-                            file_contents[fp] = content
-                            produced[fp] = content
-                    success(f"    Step {step_num} verified (round {verify_round}, late edits applied)")
-                    break
-                if syntax_errors and not has_unapplied:
-                    # Model said VERIFIED but the file still has a syntax error
-                    # and no fix was written. Force another round.
-                    warn(f"    Self-check round {verify_round}: VERIFIED claimed but syntax errors remain — forcing another round")
-                    coder_thinking = (
-                        f"[Self-check round {verify_round}: you wrote VERIFIED but the "
-                        f"file STILL has a syntax error. Read the file fresh and write "
-                        f"a real fix. Do NOT write VERIFIED until the syntax error is gone.]"
-                    )
-
-            # Extract and apply fixes. Self-check may use [REPLACE LINES N-M]
-            # (as the prompt instructs) or [SEARCH]/[REPLACE]. New files are
-            # still forbidden — the self-checker only fixes existing files.
-            if _sc_stop_applied:
-                fix_produced = dict(_sc_stop_applied)
-                # Also catch any edits written after the last [STOP], using the
-                # same seen-set so already-applied blocks aren't double-applied.
-                fix_extracted = _extract_code_blocks(check_answer)
-                fix_extracted["new_files"] = {}
-                _dedup_against_seen(fix_extracted, _sc_seen_edit_keys)
-                late_fix, _, _, v_skips = _apply_extracted_code(
-                    fix_extracted, file_contents, sandbox,
-                    viewed_versions=_sc_viewed_versions,
-                )
-                if late_fix:
-                    fix_produced.update(late_fix)
-                    for fp, content in late_fix.items():
-                        file_contents[fp] = content
-                v_matched = len(fix_produced)
-                v_total = v_matched
-            else:
-                fix_extracted = _extract_code_blocks(check_answer)
-                fix_extracted["new_files"] = {}
-                fix_produced, v_matched, v_total, v_skips = _apply_extracted_code(
-                    fix_extracted, file_contents, sandbox,
-                    viewed_versions=_sc_viewed_versions,
-                )
-
-            if fix_produced:
-                for fp, content in fix_produced.items():
-                    sandbox.write_file(fp, content)
-                    file_contents[fp] = content
-                    produced[fp] = content
-
-                # Re-check ALL produced files — not just the ones written this
-                # round. A previous round may have shifted line numbers or left
-                # a stale error in syntax_errors that no longer reflects the
-                # file on disk. Re-checking everything keeps the dict accurate.
-                syntax_errors = {}
-                for fp, content in produced.items():
-                    passed, err_msg = _check_syntax(fp, content)
-                    if not passed:
-                        syntax_errors[fp] = err_msg
-
-                # Replace coder_thinking with a minimal summary.
-                # Keeping the full analysis text is harmful: it describes
-                # what the code looked like BEFORE this round's fix, which
-                # leads the next round to write SEARCH blocks for a state
-                # that no longer exists. Give only a one-line status so the
-                # next round reads the file fresh rather than reasoning from
-                # a stale picture.
-                coder_thinking = (
-                    f"[Self-check round {verify_round} applied {len(fix_produced)} fix(es). "
-                    f"Read the file(s) fresh to see the current state.]"
-                )
-
-                status(f"    Self-check round {verify_round}: applied {len(fix_produced)} fixes")
-
-            elif v_skips:
-                # Every edit was skipped because its SEARCH block matched
-                # multiple locations. This is NOT the same as "nothing to fix"
-                # — the syntax error is still there; we just can't apply the
-                # fix blindly. Feed the specific skip reasons back so the model
-                # widens those SEARCH blocks in the next round rather than
-                # silently exiting as verified.
-                skip_details = "\n".join(v_skips)
-                warn(f"    Self-check round {verify_round}: all edits skipped (ambiguous SEARCH blocks)")
-                coder_thinking = (
-                    f"[Self-check round {verify_round}: your edits were NOT applied because "
-                    f"the following SEARCH blocks each matched multiple locations in the file:\n"
-                    f"{skip_details}\n"
-                    f"Use the ANCHORED form to pin each edit to the right location:\n"
-                    f"  [SEARCH: start-end]  (e.g. [SEARCH: 45-49])\n"
-                    f"  exact code\n"
-                    f"  [/SEARCH]\n"
-                    f"  [REPLACE]\n"
-                    f"  fixed code\n"
-                    f"  [/REPLACE]\n"
-                    f"Use the line numbers from [CODE:] or [KEEP:] output. "
-                    f"The syntax error is still present.]"
-                )
-                # Don't break — force another round
-
-            else:
-                # Nothing was applied this round and there were no skips.
-                # Only declare verified if the file actually parses. If
-                # syntax_errors is non-empty, the model gave up without
-                # fixing — force another round (or break out at MAX_VERIFY).
-                if not syntax_errors:
-                    success(f"    Step {step_num} verified (no actionable fixes)")
-                    break
-                warn(f"    Self-check round {verify_round}: no fix applied but {len(syntax_errors)} syntax error(s) remain")
-                coder_thinking = (
-                    f"[Self-check round {verify_round}: NO fix was applied this round, "
-                    f"but the file still has syntax errors. Read the file fresh with "
-                    f"[CODE: file] and write an actual fix using [SEARCH]/[REPLACE] or "
-                    f"[REPLACE LINES N-M]. Do NOT just describe the fix — write the edit block.]"
-                )
-
-        return produced
-
-    warn(f"    Step {step_num}: giving up after {MAX_RETRIES} attempts")
-    return {}
+                _prod = await (_native_pass(_m) if _mode == "native" else _text_pass(_m, True))
+            except Exception as _ce:
+                warn(f"  coder link {_m} failed: {str(_ce)[:80]}")
+                _prod = {}
+            if _prod:
+                return _prod
+        return {}
+    # Non-native primary (rare) — text coder with its own fallback chain.
+    return await _text_pass(IMPLEMENT_MODEL, False)
 
 
 async def phase_implement(
