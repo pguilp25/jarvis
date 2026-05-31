@@ -163,31 +163,32 @@ CODER_TOOLS = [
         "name": "edit_file",
         "description": (
             "Your PRIMARY edit tool. Change an existing file by giving `hunks` — a list "
-            "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
-            "line(s) to find, copied VERBATIM from read_file (real indentation, no "
-            "LINENO/INDENT prefixes); include enough surrounding context lines that "
-            "`old` is UNIQUE in the file. `new` is what those lines become. The match "
-            "is by CONTENT, not line numbers, so a stale line number can never make the "
-            "edit land in the wrong place — and copying the real lines keeps you focused "
-            "on exactly what you're changing.\n"
-            "  • CHANGE lines: old=[the current lines], new=[the replacements].\n"
+            "of {\"start_line\": N, \"old\": [...], \"new\": [...]} objects. `old` is the "
+            "EXACT existing line(s), copied VERBATIM from read_file (real indentation, no "
+            "LINENO/INDENT prefixes). `start_line` is the read_file line number where "
+            "`old` begins. `new` is what those lines become. The match is by CONTENT "
+            "(verified against the file) with `start_line` to pin WHICH occurrence — so "
+            "a stale number can't misfire AND a line that repeats isn't ambiguous. "
+            "Copying the real lines keeps you focused on exactly what you change.\n"
+            "  • CHANGE lines: old=[current lines], new=[replacements].\n"
             "  • INSERT: old=[the line you insert AFTER], new=[that same line, then your "
             "new line(s)].\n"
             "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
-            "Multiple hunks in one call edit several spots at once. The result is "
-            "parse-checked; a rejection tells you what went wrong so you can fix and "
-            "retry."),
+            "Multiple hunks edit several spots in one call. Parse-checked; a rejection "
+            "says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "hunks": {
                 "type": "array",
                 "description": "one or more content-anchored edits",
                 "items": {"type": "object", "properties": {
+                    "start_line": {"type": "integer",
+                                   "description": "read_file line number where `old` begins (pins which occurrence)"},
                     "old": {"type": "array", "items": {"type": "string"},
-                            "description": "exact existing line(s), copied verbatim from read_file, unique in the file"},
+                            "description": "exact existing line(s), copied verbatim from read_file"},
                     "new": {"type": "array", "items": {"type": "string"},
                             "description": "replacement line(s); empty array to delete"},
-                }, "required": ["old", "new"]},
+                }, "required": ["start_line", "old", "new"]},
             },
         }, "required": ["path", "hunks"]},
     }},
@@ -431,47 +432,99 @@ def _do_replace(args: dict, ctx: dict) -> str:
     return f"✗ NOT applied to {path}: {reason}"
 
 
+def _locate_block(cur_lines: list, old_list: list) -> "tuple[int | None, int]":
+    """Find where the consecutive `old_list` lines appear in cur_lines, matching
+    by STRIPPED content (whitespace/prefix-insensitive). Returns (1-based start
+    line of the FIRST match, total match count)."""
+    stripped = [str(o).strip() for o in old_list]
+    n = len(stripped)
+    if n == 0:
+        return None, 0
+    hits = []
+    for idx in range(len(cur_lines) - n + 1):
+        if [cur_lines[idx + k].strip() for k in range(n)] == stripped:
+            hits.append(idx + 1)
+    return (hits[0] if hits else None), len(hits)
+
+
 def _do_edit(args: dict, ctx: dict) -> str:
-    """CONTENT-ANCHORED edit (the primary edit tool). Instead of a line range,
-    the model gives JSON `hunks` — each {old:[lines], new:[lines]}. `old` is the
-    EXACT existing lines (copied from read_file, enough to be unique = the
-    context that anchors the change and focuses it); `new` is what they become.
-    We translate each hunk to the text coder's proven [SEARCH]/[REPLACE] block
-    (matched by CONTENT, not line numbers — so a stale number can't misfire) and
-    apply via the same _extract/_apply path replace_lines uses. To DELETE, make
-    `new` empty; to INSERT, set `old` to the line you insert after and `new` to
-    that line plus the additions."""
+    """CONTENT-ANCHORED edit (the primary edit tool), expressed as JSON `hunks` —
+    each {start_line, old:[lines], new:[lines]}. `old` = the EXACT existing lines
+    copied verbatim from read_file (the context that anchors + focuses); `new` =
+    what they become. `start_line` = the read-view line number where `old` begins
+    (disambiguates when `old` repeats; the content is still verified, so an
+    approximate number self-corrects). We translate to the text coder's NUMBERED
+    [edit] diff (number-first, content-verified) and apply via the same
+    _extract/_apply path replace_lines uses — so a stale number can't misfire AND
+    a non-unique match isn't ambiguous. DELETE: new=[]. INSERT: old=[line you add
+    after], new=[that line, then the additions]."""
     path = args.get("path", "")
     hunks = args.get("hunks")
     if not path:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
         return ("✗ edit_file needs a non-empty `hunks` array. Each hunk is "
-                "{\"old\": [exact existing line(s) copied from read_file], "
+                "{\"start_line\": N, \"old\": [exact existing line(s) from read_file], "
                 "\"new\": [replacement line(s)]}.")
 
-    def _as_lines(v):
-        if v is None:
-            return ""
-        if isinstance(v, list):
-            return "\n".join(str(x) for x in v)
-        return str(v)
+    cur = ctx["file_contents"].get(path)
+    if cur is None:
+        sb0 = ctx.get("sandbox")
+        if sb0 is not None:
+            cur = sb0.load_file(path)
+    if cur is None:
+        return (f"✗ edit_file: {path} is not in context — read it with read_file "
+                f"first, then copy the exact `old` lines (and their start_line) from "
+                f"that view.")
+    cur_lines = cur.split("\n")
 
-    blocks = []
+    def _as_list(v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        return str(v).split("\n")
+
+    edit_lines = []
     for i, h in enumerate(hunks, 1):
         if not isinstance(h, dict):
             return (f"✗ edit_file hunk #{i} is not an object — each hunk must be "
-                    f"{{\"old\": [...], \"new\": [...]}}.")
-        old_s = _as_lines(h.get("old"))
-        new_s = _as_lines(h.get("new"))
-        if not old_s.strip():
+                    f"{{\"start_line\": N, \"old\": [...], \"new\": [...]}}.")
+        old_list = _as_list(h.get("old"))
+        new_list = _as_list(h.get("new"))
+        if not any(o.strip() for o in old_list):
             return (f"✗ edit_file hunk #{i}: `old` is empty. Put the EXACT existing "
-                    f"line(s) to find here (copy them from read_file, with enough "
-                    f"context to be unique). To insert, set `old` to the line you're "
-                    f"inserting after and `new` to that line plus your additions.")
-        blocks.append(f"[SEARCH]\n{old_s}\n[/SEARCH]\n[REPLACE]\n{new_s}\n[/REPLACE]")
+                    f"line(s) to change/anchor on here (copy them from read_file). To "
+                    f"insert, set `old` to the line you're inserting after and `new` to "
+                    f"that line plus your additions.")
+        sl = h.get("start_line")
+        if sl is None:
+            # No number given — resolve from content; reject if it's not unique.
+            sl, n_hits = _locate_block(cur_lines, old_list)
+            if n_hits == 0:
+                return (f"✗ edit_file hunk #{i}: the `old` text wasn't found in {path} "
+                        f"— copy it VERBATIM from read_file (exact text), or give "
+                        f"`start_line`.")
+            if n_hits > 1:
+                return (f"✗ edit_file hunk #{i}: `old` appears {n_hits} times in {path} "
+                        f"— add `start_line` (the read_file line number where this "
+                        f"occurrence begins) so I edit the right one, or include more "
+                        f"surrounding lines in `old`.")
+        else:
+            try:
+                sl = int(sl)
+            except (TypeError, ValueError):
+                return (f"✗ edit_file hunk #{i}: start_line must be an integer line "
+                        f"number from read_file (got {sl!r}).")
+            if sl < 1:
+                return (f"✗ edit_file hunk #{i}: start_line must be ≥ 1 (got {sl}).")
+        for j, o in enumerate(old_list):
+            edit_lines.append(f"{sl + j}:-{o}")
+        for nw in new_list:
+            edit_lines.append(f"+{nw}")
 
-    block = f"=== EDIT: {path} ===\n" + "\n".join(blocks) + "\n=== END EDIT ==="
+    block = (f"=== EDIT: {path} ===\n[edit]\n" + "\n".join(edit_lines)
+             + "\n[/edit]\n=== END EDIT ===")
     from workflows.code import _extract_code_blocks, _apply_extracted_code
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])
@@ -505,7 +558,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
         n = result[path].count("\n") + 1
-        return (f"✓ Applied {len(blocks)} hunk(s) to {path}. File is now {n} lines. "
+        return (f"✓ Applied {len(hunks)} hunk(s) to {path}. File is now {n} lines. "
                 f"Re-read with read_file before another edit if you need fresh context.")
 
     # Suffix-resolved key safety net (mirror _do_replace).

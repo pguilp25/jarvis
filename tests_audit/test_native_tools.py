@@ -747,10 +747,10 @@ def test_edit_file_in_toolset_and_primary():
 def test_edit_file_changes_by_content_not_line_number():
     ctx, rel, root = _mk_ctx()
     try:
-        # no line numbers anywhere — pure content match
+        # no start_line — unique `old` located by content (4-space indent matches SRC)
         out = _disp("edit_file", {"path": rel, "hunks": [
-            {"old": ['        return "hello " + name'],
-             "new": ['        return "hi " + name']}]}, ctx)
+            {"old": ['    return "hello " + name'],
+             "new": ['    return "hi " + name']}]}, ctx)
         assert out.startswith("✓"), out
         assert 'return "hi " + name' in ctx["file_contents"][rel]
         # persisted to the sandbox too
@@ -779,7 +779,8 @@ def test_edit_file_delete_with_empty_new():
     ctx, rel, root = _mk_ctx()
     try:
         out = _disp("edit_file", {"path": rel, "hunks": [
-            {"old": ['        """Return a greeting for name."""'], "new": []}]}, ctx)
+            {"start_line": 5, "old": ['    """Return a greeting for name."""'],
+             "new": []}]}, ctx)
         assert out.startswith("✓"), out
         assert "Return a greeting for name" not in ctx["file_contents"][rel]
     finally:
@@ -820,3 +821,27 @@ def test_edit_alias_routes_to_edit_file():
             assert "edit_file" in out, f"{wrong} → {out}"
     finally:
         _cleanup(root)
+
+
+def test_edit_file_start_line_disambiguates_repeated_old():
+    # `return False` appears twice; start_line picks WHICH one (the ckpt-79 ambiguity fix)
+    src = ('def a(x):\n    if x:\n        return False\n    return True\n\n'
+           'def b(y):\n    if y:\n        return False\n    return True\n')
+    def fresh():
+        return {"file_contents": {"m.py": src}, "sandbox": None,
+                "viewed_versions": {}, "project_root": ".", "files_changed": set()}
+    # ambiguous without start_line → rejected with guidance, file untouched
+    ctx = fresh()
+    out = _disp("edit_file", {"path": "m.py",
+                "hunks": [{"old": ['        return False'], "new": ['        return None']}]}, ctx)
+    assert out.startswith("✗") and "appears 2 times" in out
+    assert ctx["file_contents"]["m.py"] == src
+    # start_line=8 edits ONLY the second occurrence
+    ctx = fresh()
+    out = _disp("edit_file", {"path": "m.py",
+                "hunks": [{"start_line": 8, "old": ['        return False'],
+                           "new": ['        return None']}]}, ctx)
+    assert out.startswith("✓"), out
+    lines = ctx["file_contents"]["m.py"].split("\n")
+    assert lines[2].strip() == "return False"   # first occurrence untouched
+    assert lines[7].strip() == "return None"     # second occurrence changed
