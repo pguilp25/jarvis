@@ -466,9 +466,14 @@ def test_ls_annotates_py_files_with_their_symbols():
     out_d = list_dir_entries(root, "galaxy/dependency_resolution")
     assert "_is_fqcn" in out_d and "_ComputedReqKindsMixin" in out_d
     assert "AnsibleCollectionRef" not in out_d
-    # the finder file shows the class that holds the method → planner can't misplace it
+    # the finder file shows the class AND its METHOD by name → planner can't
+    # misplace is_valid_collection_name (the f327e65d bug). Methods in braces,
+    # NOT parens (parens would read as base classes).
     out_f = list_dir_entries(root, "utils/collection_loader")
     assert "class AnsibleCollectionRef" in out_f
+    assert "is_valid_collection_name" in out_f          # the method is visible here
+    assert "{is_valid_collection_name" in out_f          # braces, not parens
+    assert "is_valid_collection_name" not in out_d        # and NOT in the helper file
 
 
 def test_ls_symbol_annotation_is_best_effort_on_bad_py():

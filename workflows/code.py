@@ -2217,14 +2217,16 @@ Add #label to name results. [DISCARD: #label] to remove irrelevant ones.
                      Use for non-symbol patterns.
   [LS: folder]       Expand a folder into its immediate sub-folders (with
                      file counts) and files — the REAL filesystem. Each .py file
-                     is annotated with the classes/functions it DEFINES, so you
-                     can see WHICH file holds a symbol instead of guessing (e.g.
-                     a method belongs to the file whose class is listed, NOT to a
-                     sibling file that holds a related helper). The PROJECT TREE
-                     below starts collapsed; drill down with [LS:] until you see
-                     the EXACT path you'll name. Use it whenever you're unsure a
-                     path exists, which of two same-named files is right, or which
-                     file defines a symbol the task names. Paths are copy-paste-ready.
+                     is annotated with what it DEFINES, in the form
+                     `file.py    [class Name{method1, method2, …}; def func1, func2]`
+                     — braces list a class's METHODS, `def` lists module-level
+                     FUNCTIONS. So you can see WHICH file holds a symbol the task
+                     names instead of guessing: a method belongs to the file whose
+                     class lists it, NOT a sibling file that holds a related helper.
+                     The PROJECT TREE below starts collapsed; drill down with [LS:]
+                     until you see the EXACT path you'll name. Use it whenever
+                     you're unsure a path exists, which of two same-named files is
+                     right, or which file defines a symbol. Paths are copy-paste-ready.
   [DETAIL: section]  Code map for feature area / subsystem.
   [WEBSEARCH: query] External docs.
 

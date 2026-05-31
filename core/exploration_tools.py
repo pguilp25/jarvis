@@ -1273,7 +1273,11 @@ def list_dir_entries(project_root: str, rel: str = "") -> str:
             continue
         child_rel = f"{rel}/{name}" if rel else name
         (dirs if is_dir else files).append((child_rel, full))
-    lines = [f"=== LS: {label} ==="]
+    # Root listing IS the PROJECT TREE (matches the prose header in PLAN_PROMPT);
+    # deeper listings are [LS: folder] expansions. Same tool, consistent naming.
+    header = ("=== PROJECT TREE — top level (expand a folder with [LS: <folder>]) ==="
+              if not rel else f"=== LS: {label} ===")
+    lines = [header]
     shown = 0
     for child_rel, full in dirs:
         if shown >= _TREE_MAX_ENTRIES:
@@ -1308,33 +1312,50 @@ def build_repo_tree(project_root: str) -> str:
     return list_dir_entries(project_root, "")
 
 
-def _py_top_symbols(abspath: str, cap: int = 10) -> str:
-    """Top-level classes/functions defined in a .py file, as a one-line summary
-    — so [LS:] shows WHAT each file defines, not just its name. This is how the
-    planner distinguishes which file holds a symbol (f327e65d misplaced
-    is_valid_collection_name because nothing showed AnsibleCollectionRef lives in
-    _collection_finder.py, not dataclasses.py). Best-effort: returns "" on any
-    parse/read failure rather than raising."""
+def _pub_first(names: list) -> list:
+    """Public names first (a task usually names the public API), dunders last;
+    alphabetical within each group."""
+    return sorted(names, key=lambda n: (n.startswith("__"), n.startswith("_"), n.lower()))
+
+
+def _py_top_symbols(abspath: str, max_classes: int = 10, max_methods: int = 6,
+                    max_funcs: int = 12) -> str:
+    """One-line summary of what a .py file DEFINES — each class WITH its method
+    names, plus top-level functions. [LS:] shows this so the planner can see
+    which file holds a symbol the task names (f327e65d misplaced the METHOD
+    is_valid_collection_name because nothing showed it lives on AnsibleCollectionRef
+    in _collection_finder.py — showing only the class name wasn't enough; the
+    method itself must be visible). Public names first, dunders dropped.
+    Best-effort: "" on any parse/read failure rather than raising."""
     try:
         with open(abspath, "r", encoding="utf-8", errors="replace") as fh:
-            src = fh.read()
-        tree = ast.parse(src)
+            tree = ast.parse(fh.read())
     except Exception:
         return ""
-    classes, funcs = [], []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            classes.append(node.name)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            funcs.append(node.name)
     parts = []
-    if classes:
-        parts.append("class " + ", ".join(classes[:cap]))
+    classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+    funcs = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for cls in classes[:max_classes]:
+        methods = _pub_first([
+            b.name for b in cls.body
+            if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not (b.name.startswith("__") and b.name.endswith("__"))
+        ])
+        shown = methods[:max_methods]
+        inner = ", ".join(shown)
+        if len(methods) > max_methods:
+            inner += f", +{len(methods) - max_methods}"
+        # Braces, NOT parens: `class X(Base)` is Python base-class syntax, so
+        # parens here would read as inheritance. `{...}` clearly means "the
+        # methods this class contains".
+        parts.append(f"class {cls.name}" + (f" {{{inner}}}" if inner else ""))
+    if len(classes) > max_classes:
+        parts.append(f"+{len(classes) - max_classes} more classes")
     if funcs:
-        parts.append("def " + ", ".join(funcs[:cap]))
-    extra = (len(classes) - cap if len(classes) > cap else 0) + \
-            (len(funcs) - cap if len(funcs) > cap else 0)
-    summary = "; ".join(parts)
-    if extra > 0:
-        summary += f"; +{extra} more"
-    return summary
+        funcs = _pub_first(funcs)
+        dpart = "def " + ", ".join(funcs[:max_funcs])
+        if len(funcs) > max_funcs:
+            dpart += f", +{len(funcs) - max_funcs}"
+        parts.append(dpart)
+    return "; ".join(parts)
