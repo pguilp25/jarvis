@@ -581,8 +581,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=50,
                    help="Number of instances to run (default 50).")
-    p.add_argument("--parallel", type=int, default=5,
-                   help="Concurrency for instance runs (default 5).")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Concurrent instance solves (default 1). KEEP AT 1 on the free "
+                        "API tier: endpoints are concurrency-1 / ~2-RPM, so >1 solve at "
+                        "once → 429s → forced fallback to weaker models → worse AND "
+                        "slower results. Raise only with paid/high-RPM keys.")
     p.add_argument("--predictions", default="predictions.jsonl",
                    help="Output JSONL path (default predictions.jsonl).")
     p.add_argument("--model-name", default=DEFAULT_MODEL_NAME,
