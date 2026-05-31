@@ -70,7 +70,7 @@ def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     assert names == {"read_file", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "depends_on",
-                     "edit_file", "create_file", "replace_lines", "finish"}
+                     "edit_file", "create_file", "replace_lines", "run_code", "finish"}
 
 
 def test_every_schema_is_wellformed():

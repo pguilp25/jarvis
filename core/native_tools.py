@@ -213,10 +213,26 @@ CODER_TOOLS = [
         }, "required": ["path", "start_line", "end_line", "new_content"]},
     }},
     {"type": "function", "function": {
+        "name": "run_code",
+        "description": (
+            "RUN a shell command against your EDITED code and see what it actually does "
+            "— the only way to catch a bug that READS fine but BEHAVES wrong (valid code, "
+            "wrong logic). Runs in your sandbox (your edits are live) with the repo's deps "
+            "+ pytest available; read-only + no network. Use it to VERIFY before finish: "
+            "write a tiny check that exercises your change and asserts the expected "
+            "behaviour — e.g. python -c \"from pkg.mod import Thing; t=Thing(); "
+            "assert t.method(...) == expected\" — or run the module's existing tests: "
+            "python -m pytest path/to/test_file.py -q. If exit≠0, the OUTPUT is your "
+            "edit's real behaviour; fix it and re-run. Don't finish on an unverified edit."),
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "shell command, e.g. python -c \"...\" or python -m pytest <path> -q"},
+        }, "required": ["command"]},
+    }},
+    {"type": "function", "function": {
         "name": "finish",
         "description": (
             "Call ONLY when the edit is complete and you've verified it does what the "
-            "step asked. Ends the task."),
+            "step asked — ideally by run_code, not just by reading. Ends the task."),
         "parameters": {"type": "object", "properties": {
             "summary": {"type": "string", "description": "one line: what you changed"},
         }, "required": []},
@@ -784,6 +800,41 @@ def _do_dependson(args: dict, ctx: dict) -> str:
     return extract_dependencies(sym, ctx.get("project_root", ""))
 
 
+def _do_run(args: dict, ctx: dict) -> str:
+    """Run a shell command against the coder's EDITED sandbox and return the
+    output — so the coder can OBSERVE its change's runtime behaviour instead of
+    SIMULATING it in its head (the static gates prove a patch parses + names
+    resolve; only running proves it DOES the right thing). cwd = the sandbox dir
+    where edits land; the bwrap sandbox is read-only/no-net but binds the venv
+    (the repo's deps + pytest), so `python -c …` / `python -m pytest …` work."""
+    from core.safe_exec import run_sandboxed
+    cmd = (args.get("command") or "").strip()
+    if not cmd:
+        return ("✗ run_code needs a `command` — e.g. python -c \"<a check that "
+                "constructs the object, calls your changed code, and asserts the "
+                "expected result>\", or python -m pytest <path::test> -q.")
+    sb = ctx.get("sandbox")
+    cwd = str(getattr(sb, "sandbox_dir", "") or "") if sb is not None else ""
+    if not cwd:
+        cwd = ctx.get("project_root", "")
+    if not cwd:
+        return "✗ run_code: no sandbox to run in."
+    try:
+        res = run_sandboxed(cmd, cwd=cwd, timeout=90, project_root=cwd)
+    except Exception as e:
+        return f"✗ run_code failed to launch: {str(e)[:160]}"
+    if res.get("blocked"):
+        return (f"✗ run_code blocked: {str(res.get('reason', ''))[:200]} "
+                f"(read-only/no-net sandbox; write-ops and network are off).")
+    code = res.get("exit_code", -1)
+    out = (res.get("output") or "").strip()
+    timed = " (TIMED OUT at 90s)" if res.get("timed_out") else ""
+    head = (f"✓ ran in your edited sandbox — exit 0{timed}" if code == 0
+            else f"✗ ran in your edited sandbox — exit {code}{timed} "
+                 f"(your edit's behaviour, NOT a tool error — read the output)")
+    return f"{head}\n{out[:4000] or '(no output)'}"
+
+
 def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
     """Env-gated (JARVIS_DEBUG_EDITS=<path>) trace of every edit call + its result —
     so we can see EXACTLY what new_content the coder emitted and why it was rejected.
@@ -829,6 +880,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         return await _do_semantic(args, ctx)
     if name == "depends_on":
         return _do_dependson(args, ctx)
+    if name == "run_code":
+        return await asyncio.get_event_loop().run_in_executor(None, _do_run, args, ctx)
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
     # A weak/native model often reaches for a name from another idiom (the text
@@ -851,13 +904,16 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         "edit": "edit_file", "replace": "edit_file", "edit_lines": "edit_file",
         "modify": "edit_file", "patch": "edit_file", "apply": "edit_file",
         "search_replace": "edit_file", "str_replace": "edit_file",
+        "run": "run_code", "run_test": "run_code", "run_tests": "run_code",
+        "pytest": "run_code", "test": "run_code", "bash": "run_code",
+        "shell": "run_code", "exec": "run_code", "python": "run_code",
         "done": "finish", "stop": "finish", "complete": "finish", "end": "finish",
     }
     suggestion = _ALIAS.get((name or "").strip().lower().lstrip("[").rstrip("]:"))
     hint = (f" Did you mean '{suggestion}'?" if suggestion else "")
     return (f"✗ Unknown tool '{name}'.{hint} Available: read_file, find_refs, "
             f"find_callers, search_text, file_purpose, semantic_search, depends_on, "
-            f"edit_file, create_file, replace_lines, finish.")
+            f"edit_file, create_file, replace_lines, run_code, finish.")
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────
@@ -1094,8 +1150,11 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     result_str = str(out)
             # Loop-breaker: if the SAME tool call keeps getting rejected, escalate
             # so the coder changes approach instead of spinning the same failing
-            # edit until the budget runs out. (Audit #46.)
-            if isinstance(result_str, str) and result_str.startswith("✗"):
+            # edit until the budget runs out. (Audit #46.) EXCLUDE run_code: a
+            # non-zero exit is legitimate behavioural FEEDBACK to iterate on, not a
+            # malformed call — counting it would cut off the fix loop we just added.
+            if (isinstance(result_str, str) and result_str.startswith("✗")
+                    and name != "run_code"):
                 _sig = (name, raw_args)
                 _fail_counts[_sig] = _fail_counts.get(_sig, 0) + 1
                 if _fail_counts[_sig] == 2:
