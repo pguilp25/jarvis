@@ -8628,8 +8628,15 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     if is_new_project or not project_root:
         file_list_str = "(none — new project)"
     else:
-        from core.exploration_tools import build_repo_tree
+        from core.exploration_tools import build_repo_tree, build_symbol_definitions
         tree = build_repo_tree(project_root)
+        # Authoritative symbol→file map for the symbols the TASK names (grep of
+        # the real repo). Without it the planner guesses a symbol's file and
+        # mis-locates it when a related symbol lives elsewhere (f327e65d put
+        # is_valid_collection_name in dataclasses.py; it's in _collection_finder.py).
+        sym_defs = build_symbol_definitions(task, project_root)
+        if sym_defs:
+            tree = tree + "\n\n" + sym_defs
         if files:
             hint = "\n".join(f"  {f}" for f in sorted(files)[:60])
             file_list_str = (
