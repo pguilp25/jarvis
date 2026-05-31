@@ -629,6 +629,16 @@ def test_native_prompt_has_anti_over_elaboration_rule():
     assert "pick exactly one" in low, "native prompt must say pick ONE of offered alternatives"
 
 
+def test_native_prompt_has_thinking_toolkit_reflexes():
+    """ckpt 73: the coder CoT encodes Claude's tacit faculties as triggered reflexes —
+    a live state-model ('be the interpreter') and calibrated uncertainty ('calibrate'
+    exact tokens), plus parallel-consistency and type-snap. Pin them."""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    low = IMPLEMENT_NATIVE_PROMPT.lower()
+    for reflex in ("be the interpreter", "calibrate", "siblings move together", "type-snap", "hard contract"):
+        assert reflex in low, f"native prompt missing reflex: {reflex!r}"
+
+
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
 def test_replace_lines_syntax_gate_rejects_unparseable():
     """A native edit that makes a previously-parseable .py file fail to compile
