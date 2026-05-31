@@ -1283,7 +1283,14 @@ def list_dir_entries(project_root: str, rel: str = "") -> str:
     for child_rel, _full in files:
         if shown >= _TREE_MAX_ENTRIES:
             break
-        lines.append(_fmt_tree_line(child_rel, False, None))
+        line = _fmt_tree_line(child_rel, False, None)
+        # Annotate .py files with what they DEFINE, so the planner can see which
+        # file holds a symbol instead of guessing (the f327e65d wrong-file bug).
+        if child_rel.endswith(".py"):
+            syms = _py_top_symbols(_full)
+            if syms:
+                line = f"{line}    [{syms}]"
+        lines.append(line)
         shown += 1
     total = len(dirs) + len(files)
     if total == 0:
@@ -1301,85 +1308,33 @@ def build_repo_tree(project_root: str) -> str:
     return list_dir_entries(project_root, "")
 
 
-# Identifiers that look like symbols but aren't worth locating (builtins,
-# keywords, common type names) — grepping `def True` etc. is noise.
-_SYMBOL_STOPWORDS = {
-    "True", "False", "None", "self", "cls", "str", "int", "bool", "float",
-    "dict", "list", "set", "tuple", "bytes", "object", "type", "len", "print",
-    "super", "property", "staticmethod", "classmethod", "return", "import",
-    "None", "and", "not", "for", "the", "all", "any", "def", "class",
-}
-
-
-def build_symbol_definitions(task_text: str, project_root: str,
-                             max_symbols: int = 30) -> str:
-    """Authoritative SYMBOL → DEFINITION FILE map for the symbols the TASK names.
-
-    The Pro spec names methods/classes/functions (often in backticks) but rarely
-    their file. With no ground truth, the planner GUESSES the file — and guesses
-    wrong when a symbol lives in a different module than its related helpers
-    (f327e65d: it put `is_valid_collection_name` in dataclasses.py because the
-    `_is_fqcn` helpers are there, but the method is in _collection_finder.py).
-    This greps the REAL repo for each named symbol's `def`/`class` definition and
-    hands the planner the truth, so it can't misplace a step's file. Empty string
-    if nothing resolves (no section shown)."""
-    if not task_text or not project_root:
-        return ""
-    cands: set = set()
-    # backtick-quoted identifiers (the spec's convention), incl. dotted A.b → a, b
-    for m in re.findall(r'`([A-Za-z_][A-Za-z0-9_.]*)`', task_text):
-        for part in m.split("."):
-            if len(part) >= 3 and re.match(r'^[A-Za-z_]\w*$', part):
-                cands.add(part)
-    cands -= _SYMBOL_STOPWORDS
-    if not cands:
-        return ""
-    names = sorted(cands)[:max_symbols]
-    alt = "|".join(re.escape(n) for n in names)
-    pattern = rf'^\s*(?:async\s+def|def|class)\s+(?:{alt})\b'
+def _py_top_symbols(abspath: str, cap: int = 10) -> str:
+    """Top-level classes/functions defined in a .py file, as a one-line summary
+    — so [LS:] shows WHAT each file defines, not just its name. This is how the
+    planner distinguishes which file holds a symbol (f327e65d misplaced
+    is_valid_collection_name because nothing showed AnsibleCollectionRef lives in
+    _collection_finder.py, not dataclasses.py). Best-effort: returns "" on any
+    parse/read failure rather than raising."""
     try:
-        r = subprocess.run(
-            ["rg", "-n", "--no-heading", "-S",
-             "-g", "*.py", "-g", "!*.pyc", "-g", "!.jarvis_sandbox/**",
-             pattern, project_root],
-            capture_output=True, text=True, timeout=30,
-        )
+        with open(abspath, "r", encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
     except Exception:
         return ""
-    # symbol -> [rel_path:line, ...] (dedup, cap per symbol)
-    found: dict = {}
-    def_re = re.compile(r'^\s*(?:async\s+def|def|class)\s+(\w+)')
-    root = os.path.realpath(project_root)
-    for line in r.stdout.splitlines():
-        # rg line: <abs_path>:<lineno>:<code>
-        parts = line.split(":", 2)
-        if len(parts) < 3:
-            continue
-        fpath, lineno, code = parts
-        m = def_re.match(code)
-        if not m:
-            continue
-        sym = m.group(1)
-        if sym not in cands:
-            continue
-        try:
-            rel = os.path.relpath(os.path.realpath(fpath), root)
-        except ValueError:
-            rel = fpath
-        loc = f"{rel}:{lineno}"
-        bucket = found.setdefault(sym, [])
-        if loc not in bucket and len(bucket) < 4:
-            bucket.append(loc)
-    if not found:
-        return ""
-    lines = ["SYMBOL DEFINITIONS — where the task's named symbols ACTUALLY live "
-             "(grep of the real repo). A step that touches a symbol MUST name the "
-             "file it's defined in below — do NOT assume a related symbol shares "
-             "its file:"]
-    for sym in sorted(found):
-        locs = found[sym]
-        tag = "  " + sym + " → " + (", ".join(locs)
-                                    + ("  ⚠ multiple — pick the right one"
-                                       if len(locs) > 1 else ""))
-        lines.append(tag)
-    return "\n".join(lines)
+    classes, funcs = [], []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            classes.append(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append(node.name)
+    parts = []
+    if classes:
+        parts.append("class " + ", ".join(classes[:cap]))
+    if funcs:
+        parts.append("def " + ", ".join(funcs[:cap]))
+    extra = (len(classes) - cap if len(classes) > cap else 0) + \
+            (len(funcs) - cap if len(funcs) > cap else 0)
+    summary = "; ".join(parts)
+    if extra > 0:
+        summary += f"; +{extra} more"
+    return summary

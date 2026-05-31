@@ -2216,12 +2216,15 @@ Add #label to name results. [DISCARD: #label] to remove irrelevant ones.
   [SEARCH: pattern]  Ripgrep regex/text search (⚠ not edit syntax).
                      Use for non-symbol patterns.
   [LS: folder]       Expand a folder into its immediate sub-folders (with
-                     file counts) and files — the REAL filesystem. The PROJECT
-                     TREE below starts collapsed at the top level; drill down
-                     with [LS:] until you see the EXACT path you'll name. Use
-                     this whenever you're unsure a path exists or which of two
-                     same-named files (e.g. two `dataclasses.py`) is the right
-                     one. Paths it prints are copy-paste-ready.
+                     file counts) and files — the REAL filesystem. Each .py file
+                     is annotated with the classes/functions it DEFINES, so you
+                     can see WHICH file holds a symbol instead of guessing (e.g.
+                     a method belongs to the file whose class is listed, NOT to a
+                     sibling file that holds a related helper). The PROJECT TREE
+                     below starts collapsed; drill down with [LS:] until you see
+                     the EXACT path you'll name. Use it whenever you're unsure a
+                     path exists, which of two same-named files is right, or which
+                     file defines a symbol the task names. Paths are copy-paste-ready.
   [DETAIL: section]  Code map for feature area / subsystem.
   [WEBSEARCH: query] External docs.
 
@@ -8628,15 +8631,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     if is_new_project or not project_root:
         file_list_str = "(none — new project)"
     else:
-        from core.exploration_tools import build_repo_tree, build_symbol_definitions
+        from core.exploration_tools import build_repo_tree
         tree = build_repo_tree(project_root)
-        # Authoritative symbol→file map for the symbols the TASK names (grep of
-        # the real repo). Without it the planner guesses a symbol's file and
-        # mis-locates it when a related symbol lives elsewhere (f327e65d put
-        # is_valid_collection_name in dataclasses.py; it's in _collection_finder.py).
-        sym_defs = build_symbol_definitions(task, project_root)
-        if sym_defs:
-            tree = tree + "\n\n" + sym_defs
         if files:
             hint = "\n".join(f"  {f}" for f in sorted(files)[:60])
             file_list_str = (

@@ -445,40 +445,39 @@ def test_ls_refuses_traversal_and_guides_on_missing_or_file():
     assert "FILE, not a folder" in out_file and "[CODE:" in out_file
 
 
-# ── symbol→file map (ckpt 82): the planner must know which file defines a symbol ─
-# Root cause of the f327e65d 30-round search loop: the task named a method but not
-# its file; the planner guessed the wrong file (where a *related* helper lived).
+# ── [LS:] shows what each .py file DEFINES (ckpt 83) ───────────────────────────
+# Root cause of the f327e65d 30-round search loop: the planner couldn't tell which
+# file defines a symbol, so it put is_valid_collection_name in dataclasses.py when
+# that method lives on AnsibleCollectionRef in _collection_finder.py. Fix folds the
+# symbols INTO the existing [LS:] tool — not a separate map — so navigating reveals
+# what's in each file.
 
-def test_symbol_definitions_maps_symbol_to_its_real_file():
-    import os
-    from core.exploration_tools import build_symbol_definitions
-    root = _mk_repo() if False else None
-    import tempfile
+def test_ls_annotates_py_files_with_their_symbols():
+    import os, tempfile
+    from core.exploration_tools import list_dir_entries
     root = tempfile.mkdtemp()
-    # helper in one file, the method that USES it in ANOTHER (the f327 shape)
     os.makedirs(os.path.join(root, "galaxy/dependency_resolution"), exist_ok=True)
     os.makedirs(os.path.join(root, "utils/collection_loader"), exist_ok=True)
     with open(os.path.join(root, "galaxy/dependency_resolution/dataclasses.py"), "w") as f:
-        f.write("def _is_fqcn(s):\n    return True\n")
+        f.write("def _is_fqcn(s):\n    return True\n\nclass _ComputedReqKindsMixin:\n    pass\n")
     with open(os.path.join(root, "utils/collection_loader/_collection_finder.py"), "w") as f:
         f.write("class AnsibleCollectionRef:\n    def is_valid_collection_name(self, n):\n        return True\n")
-    task = ("Remove `_is_fqcn` and update `is_valid_collection_name` on "
-            "`AnsibleCollectionRef` to reject keywords.")
-    out = build_symbol_definitions(task, root)
-    # each symbol must point to the file it's REALLY defined in
-    assert "_is_fqcn → galaxy/dependency_resolution/dataclasses.py" in out
-    assert "is_valid_collection_name → utils/collection_loader/_collection_finder.py" in out
-    assert "AnsibleCollectionRef → utils/collection_loader/_collection_finder.py" in out
-    # the method must NOT be attributed to dataclasses.py (the original bug)
-    assert "is_valid_collection_name → galaxy/dependency_resolution/dataclasses.py" not in out
+    # the helper file shows its defs/class — and NOT AnsibleCollectionRef
+    out_d = list_dir_entries(root, "galaxy/dependency_resolution")
+    assert "_is_fqcn" in out_d and "_ComputedReqKindsMixin" in out_d
+    assert "AnsibleCollectionRef" not in out_d
+    # the finder file shows the class that holds the method → planner can't misplace it
+    out_f = list_dir_entries(root, "utils/collection_loader")
+    assert "class AnsibleCollectionRef" in out_f
 
 
-def test_symbol_definitions_empty_when_nothing_resolves():
-    import tempfile, os
-    from core.exploration_tools import build_symbol_definitions
+def test_ls_symbol_annotation_is_best_effort_on_bad_py():
+    import os, tempfile
+    from core.exploration_tools import list_dir_entries, _py_top_symbols
     root = tempfile.mkdtemp()
-    with open(os.path.join(root, "a.py"), "w") as f:
-        f.write("x = 1\n")
-    # backticked things that aren't defs/classes → no section
-    assert build_symbol_definitions("set `True` and `400` and `xyz_nope`", root) == ""
-    assert build_symbol_definitions("", root) == ""
+    with open(os.path.join(root, "broken.py"), "w") as f:
+        f.write("def (((:\n  not python\n")
+    # unparseable file → no annotation, but listing must not crash
+    out = list_dir_entries(root, "")
+    assert "broken.py" in out
+    assert _py_top_symbols(os.path.join(root, "broken.py")) == ""
