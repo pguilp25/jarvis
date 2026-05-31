@@ -2215,15 +2215,24 @@ Add #label to name results. [DISCARD: #label] to remove irrelevant ones.
                      edit that changes its contract will ripple."
   [SEARCH: pattern]  Ripgrep regex/text search (⚠ not edit syntax).
                      Use for non-symbol patterns.
+  [LS: folder]       Expand a folder into its immediate sub-folders (with
+                     file counts) and files — the REAL filesystem. The PROJECT
+                     TREE below starts collapsed at the top level; drill down
+                     with [LS:] until you see the EXACT path you'll name. Use
+                     this whenever you're unsure a path exists or which of two
+                     same-named files (e.g. two `dataclasses.py`) is the right
+                     one. Paths it prints are copy-paste-ready.
   [DETAIL: section]  Code map for feature area / subsystem.
   [WEBSEARCH: query] External docs.
 
   PICK BY INTENT:
     • Named method/class — where is it defined?     → [REFS: name]
+    • Which file holds this symbol / which dir?      → [SEARCH: symbol] or [LS: folder]
     • Type-resolved cross-module callers?           → [DEPENDENCY: #tag]
     • Looking for code by intent ("error msgs")?    → [PURPOSE: …]
     • Don't know the category name?                 → [SEMANTIC: query]
     • Need to see a specific file?                  → [CODE: path]
+    • Unsure a folder/path exists?                  → [LS: folder]
     • Large file — only certain lines?              → [CODE:] then [VIEW:] or [KEEP:]
     • Specific text pattern (not a symbol)?         → [SEARCH: pattern]
     • External library docs?                        → [WEBSEARCH: query]
@@ -2253,7 +2262,12 @@ TASK: {task}
 [END USER REQUEST] — everything below is JARVIS framing / facts / context
 ══════════════════════════════════════════════════════════════════════
 
-PROJECT FILES (these exist on disk — use exact paths in every FILES: line):
+PROJECT TREE — the REAL filesystem, starting collapsed at the top level
+(folders show file counts). This is GROUND TRUTH: every FILES: path you write
+must be one you can SEE here or after expanding. Drill into any folder with
+[LS: <folder>] to reveal its sub-folders/files; never invent or guess a
+directory — if two files share a name (e.g. two `dataclasses.py` in different
+folders), [LS:] the parents or [SEARCH:] the symbol to pick the right one.
 {file_list}
 
 PROJECT OVERVIEW:
@@ -8605,9 +8619,28 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     ]
 
     cot = PLAN_COT_NEW if is_new_project else PLAN_COT_EXISTING
-    file_list_str = (
-        "\n".join(f"  {f}" for f in sorted(files)) if files else "(none — new project)"
-    )
+    # GROUND the file list in the REAL filesystem: a collapsed tree (top-level
+    # folders + root files) the planner EXPANDS with [LS:]. The old list was
+    # regex-scraped from Phase-1 research PROSE, so it could carry a path a
+    # model merely TYPED (e.g. a wrong galaxy/collection/dataclasses.py) and the
+    # planner would "copy" a file that doesn't exist. The research files are now
+    # shown as UNVERIFIED candidates to confirm against the tree, not as truth.
+    if is_new_project or not project_root:
+        file_list_str = "(none — new project)"
+    else:
+        from core.exploration_tools import build_repo_tree
+        tree = build_repo_tree(project_root)
+        if files:
+            hint = "\n".join(f"  {f}" for f in sorted(files)[:60])
+            file_list_str = (
+                tree
+                + "\n\nRESEARCH FLAGGED THESE (candidates only — each was scraped from "
+                  "model prose and MAY name a path that doesn't exist; CONFIRM every one "
+                  "against the tree above, or with [LS:]/[SEARCH:], before you put it in a "
+                  "FILES: line):\n" + hint
+            )
+        else:
+            file_list_str = tree
     plan_prompt = PLAN_PROMPT.format(
         task=task,
         file_list=file_list_str,

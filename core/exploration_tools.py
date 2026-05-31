@@ -1170,3 +1170,132 @@ def _format_callers(name: str, callers: list[tuple[str, int, str]]) -> str:
         if len(by_file[f]) > 5:
             out.append(f"    … and {len(by_file[f]) - 5} more in this file")
     return "\n".join(out)
+
+
+# ──────────────────── FILE TREE (planner navigation) ────────────────
+# The planner used to receive a `{file_list}` regex-scraped from the
+# Phase-1 research AIs' PROSE — so the list reflected what models TYPED,
+# not what's on disk. A model that mentioned a wrong path (e.g.
+# `galaxy/collection/dataclasses.py` when the code is in
+# `galaxy/dependency_resolution/dataclasses.py`) seeded a non-existent
+# path the planner then "copied," handing the coder a contradictory
+# "modify a file that doesn't exist" step. These helpers ground path
+# selection in the REAL filesystem: the planner gets a COLLAPSED tree
+# (top-level folders + root files) and EXPANDS folders with [LS:] until
+# it sees the exact, copy-paste-ready path. It cannot invent a directory
+# it has never seen.
+
+_TREE_SKIP_DIRS = {
+    ".git", ".jarvis_sandbox", "__pycache__", "node_modules", ".venv",
+    "venv", ".env", ".mypy_cache", ".pytest_cache", ".tox", ".idea",
+    ".vscode", ".eggs", "dist", "build", ".cache", ".ruff_cache",
+    "site-packages", ".next", ".gradle", "target", ".hg", ".svn",
+}
+_TREE_SKIP_EXT = {
+    ".pyc", ".pyo", ".so", ".o", ".class", ".obj", ".a", ".dll",
+    ".dylib", ".lock",
+}
+_TREE_MAX_ENTRIES = 300       # cap children shown per directory
+_TREE_COUNT_CAP = 50_000      # stop counting a subtree past this many files
+
+
+def _tree_visible(name: str, is_dir: bool) -> bool:
+    """Whether a directory entry should be shown (skip VCS/build/cache noise
+    and compiled artifacts; keep hidden dirs we care about like .github)."""
+    if is_dir:
+        if name in _TREE_SKIP_DIRS:
+            return False
+        if name.startswith(".") and name not in (".github",):
+            return False
+        return True
+    return os.path.splitext(name)[1] not in _TREE_SKIP_EXT
+
+
+def _count_tree_files(path: str) -> int:
+    """Recursive count of visible files under `path` (skips noise dirs).
+    Bounded by _TREE_COUNT_CAP so a pathological tree can't stall a prompt."""
+    n = 0
+    for _root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if _tree_visible(d, True)]
+        n += sum(1 for f in files if _tree_visible(f, False))
+        if n >= _TREE_COUNT_CAP:
+            return _TREE_COUNT_CAP
+    return n
+
+
+def _safe_join(project_root: str, rel: str) -> Optional[str]:
+    """Resolve project_root/rel and confirm it stays INSIDE project_root
+    (realpath, so `..` and escaping symlinks are caught). None on escape."""
+    root = os.path.realpath(project_root)
+    target = os.path.realpath(os.path.join(root, rel))
+    if target == root or target.startswith(root + os.sep):
+        return target
+    return None
+
+
+def _fmt_tree_line(rel_path: str, is_dir: bool, count: Optional[int]) -> str:
+    if is_dir:
+        label = rel_path.rstrip("/") + "/"
+        if count is None:
+            return f"  {label}"
+        cnt = (f"{count}+ files" if count >= _TREE_COUNT_CAP
+               else f"{count} file{'s' if count != 1 else ''}")
+        return f"  {label:<52} {cnt}"
+    return f"  {rel_path}"
+
+
+def list_dir_entries(project_root: str, rel: str = "") -> str:
+    """List the IMMEDIATE children of project_root/rel — folders first (with
+    recursive file counts), then files. Real filesystem, so every path shown
+    is exact and copy-paste-ready. Backs the planner's [LS:] expand tool and
+    the initial collapsed tree (rel="")."""
+    rel = (rel or "").strip().strip("/").replace("\\", "/")
+    label = rel or "(project root)"
+    base = _safe_join(project_root, rel)
+    if base is None:
+        return f"=== LS: {rel} ===\n  ✗ path escapes the project root — refused."
+    if not os.path.exists(base):
+        return (f"=== LS: {label} ===\n  ✗ no such folder. Start from the top: "
+                f"[LS: ] shows the top-level folders, then expand one at a time.")
+    if not os.path.isdir(base):
+        return (f"=== LS: {label} ===\n  ✗ that's a FILE, not a folder — "
+                f"read it with [CODE: {rel}].")
+    try:
+        names = sorted(os.listdir(base))
+    except OSError as e:
+        return f"=== LS: {label} ===\n  ✗ cannot list: {str(e)[:120]}"
+    dirs: list = []
+    files: list = []
+    for name in names:
+        full = os.path.join(base, name)
+        is_dir = os.path.isdir(full)
+        if not _tree_visible(name, is_dir):
+            continue
+        child_rel = f"{rel}/{name}" if rel else name
+        (dirs if is_dir else files).append((child_rel, full))
+    lines = [f"=== LS: {label} ==="]
+    shown = 0
+    for child_rel, full in dirs:
+        if shown >= _TREE_MAX_ENTRIES:
+            break
+        lines.append(_fmt_tree_line(child_rel, True, _count_tree_files(full)))
+        shown += 1
+    for child_rel, _full in files:
+        if shown >= _TREE_MAX_ENTRIES:
+            break
+        lines.append(_fmt_tree_line(child_rel, False, None))
+        shown += 1
+    total = len(dirs) + len(files)
+    if total == 0:
+        lines.append("  (empty)")
+    elif total > shown:
+        lines.append(f"  … {total - shown} more entr"
+                     f"{'ies' if total - shown != 1 else 'y'} — expand a subfolder to narrow.")
+    lines.append("→ expand a folder with [LS: <its path>]; read a file with [CODE: <its path>].")
+    return "\n".join(lines)
+
+
+def build_repo_tree(project_root: str) -> str:
+    """The INITIAL collapsed view handed to the planner: top-level folders
+    (with recursive file counts) + root files. It drills down via [LS:]."""
+    return list_dir_entries(project_root, "")

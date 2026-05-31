@@ -3648,6 +3648,9 @@ async def call_with_tools(
         # DEPENDENCY now, which is the canonical "who depends on this" tool.
         lsp_tags      = []
         knowledge_tags = _detector.valid_args("KNOWLEDGE")
+        # LS: expand a folder into its immediate children (real filesystem),
+        # so the model selects paths it has SEEN, not invented ones.
+        ls_tags       = _detector.valid_args("LS")        if project_root else []
         # RUN is extracted OUTSIDE the detector (bracket-balanced) — its free-form
         # shell command routinely contains `]` and needs no [tool use] wrapper.
         from core.review_verify import extract_run_cmds
@@ -3670,6 +3673,7 @@ async def call_with_tools(
             code_tags, web_tags, detail_tags, file_tags, refs_tags,
             purpose_tags, semantic_tags, dependson_tags, lsp_tags,
             knowledge_tags, keep_tags, view_tags, dependency_tags, run_tags,
+            ls_tags,
         ]
         _total_tags = sum(len(lst) for lst in _all_tag_lists)
         if _total_tags > MAX_TAGS_PER_ROUND:
@@ -3689,7 +3693,8 @@ async def call_with_tools(
         has_tags = bool(code_tags or web_tags or detail_tags or file_tags
                         or refs_tags or purpose_tags or semantic_tags or lsp_tags
                         or knowledge_tags or keep_tags or view_tags
-                        or dependency_tags or dependson_tags or discard_tags)
+                        or dependency_tags or dependson_tags or discard_tags
+                        or ls_tags)
         _dbg(f"has_tags={has_tags} has_stop={has_stop} "
              f"purpose={len(purpose_tags)} file={len(file_tags)} code={len(code_tags)} "
              f"refs={len(refs_tags)} view={len(view_tags)} detail={len(detail_tags)} "
@@ -4595,6 +4600,9 @@ async def call_with_tools(
                 f"Prefer DEPENDENCY when REFS misses sites due to import aliases or type indirection.\n"
             )
         def _run_knowledge(tag): return _run_knowledge_lookups([tag])
+        def _run_ls(tag):
+            from core.exploration_tools import list_dir_entries
+            return list_dir_entries(project_root, tag) + "\n"
 
         if code_tags and project_root:
             new_tags, cached = _cached_or_run("SEARCH", code_tags)
@@ -4664,6 +4672,13 @@ async def call_with_tools(
             round_output += cached
             for t in new_tags:
                 r = await _locked_lookup("KNOWLEDGE", t, _run_knowledge)
+                round_output += r
+
+        if ls_tags and project_root:
+            new_tags, cached = _cached_or_run("LS", ls_tags)
+            round_output += cached
+            for t in new_tags:
+                r = await _locked_lookup("LS", t, _run_ls)
                 round_output += r
 
         if dependency_tags and project_root:

@@ -377,3 +377,69 @@ def test_path_escapes_root_helper():
     assert _path_escapes_root("/etc/passwd", "/proj")
     assert not _path_escapes_root("pkg/mod.py", "/proj")
     assert not _path_escapes_root("a/b/../c.py", "/proj")   # stays inside
+
+
+# ── LS tree tool (ckpt 78): planner navigates the REAL filesystem ──────────────
+# Replaces the regex-scraped-from-prose file list that let a planner "copy" a
+# path that doesn't exist (e.g. galaxy/collection/dataclasses.py when the code
+# is in galaxy/dependency_resolution/dataclasses.py).
+
+def test_ls_is_a_known_tag_not_a_wrong_tool():
+    from core.tool_detector import KNOWN_TAG_TYPES, COMMON_WRONG_TOOLS
+    assert "LS" in KNOWN_TAG_TYPES
+    assert "LS" not in COMMON_WRONG_TOOLS   # promoted to a real tool
+
+
+def test_ls_tag_validates_paths_rejects_prose():
+    d = TagDetector("[tool use][LS: lib/ansible/galaxy/dependency_resolution][/tool use]")
+    assert d.valid_args("LS") == ["lib/ansible/galaxy/dependency_resolution"]
+    d2 = TagDetector("[tool use][LS: is there a galaxy folder anywhere here][/tool use]")
+    assert d2.valid_args("LS") == []        # sentence-shaped → rejected
+
+
+def _mk_repo():
+    import tempfile, os
+    root = tempfile.mkdtemp()
+    # two same-named files in different folders — the exact ambiguity that bit us
+    for p in ("galaxy/collection/api.py",
+              "galaxy/dependency_resolution/dataclasses.py",
+              "utils/log.py", "README.md"):
+        full = os.path.join(root, p)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        open(full, "w").write("x = 1\n")
+    # noise that must be hidden
+    os.makedirs(os.path.join(root, ".git/objects"), exist_ok=True)
+    open(os.path.join(root, ".git/objects/abc"), "w").write("blob")
+    os.makedirs(os.path.join(root, "__pycache__"), exist_ok=True)
+    open(os.path.join(root, "galaxy/collection/api.cpython-311.pyc"), "w").write("z")
+    return root
+
+
+def test_tree_top_level_collapsed_with_counts_and_no_noise():
+    from core.exploration_tools import build_repo_tree
+    out = build_repo_tree(_mk_repo())
+    assert "galaxy/" in out and "utils/" in out and "README.md" in out
+    assert "file" in out                       # folders carry counts
+    assert ".git" not in out and "__pycache__" not in out   # noise hidden
+    assert "api.py" not in out                 # collapsed — not expanded yet
+
+
+def test_ls_expands_to_real_children_and_disambiguates():
+    from core.exploration_tools import list_dir_entries
+    root = _mk_repo()
+    out = list_dir_entries(root, "galaxy")
+    # the real sub-folders are revealed; the planner can now SEE which is which
+    assert "galaxy/collection/" in out
+    assert "galaxy/dependency_resolution/" in out
+    deeper = list_dir_entries(root, "galaxy/dependency_resolution")
+    assert "galaxy/dependency_resolution/dataclasses.py" in deeper
+    assert "api.cpython-311.pyc" not in list_dir_entries(root, "galaxy/collection")
+
+
+def test_ls_refuses_traversal_and_guides_on_missing_or_file():
+    from core.exploration_tools import list_dir_entries
+    root = _mk_repo()
+    assert "escapes the project root" in list_dir_entries(root, "../../../etc")
+    assert "no such folder" in list_dir_entries(root, "galaxy/nope")
+    out_file = list_dir_entries(root, "README.md")
+    assert "FILE, not a folder" in out_file and "[CODE:" in out_file

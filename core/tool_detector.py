@@ -57,7 +57,7 @@ from typing import Iterable
 KNOWN_TAG_TYPES = (
     "CODE", "VIEW", "KEEP", "REFS", "SEARCH", "WEBSEARCH",
     "DETAIL", "PURPOSE", "SEMANTIC", "LSP", "KNOWLEDGE", "DISCARD",
-    "DEPENDENCY", "DEPENDSON",
+    "DEPENDENCY", "DEPENDSON", "LS",
 )
 
 # Common WRONG tool names a model reaches for out of habit from other
@@ -66,7 +66,7 @@ KNOWN_TAG_TYPES = (
 # Restricted to this set so arbitrary `[Word: ...]` prose is NOT flagged.
 COMMON_WRONG_TOOLS = {
     "READ", "OPEN", "CAT", "GET", "GREP", "FIND", "RG",
-    "LS", "LIST", "GLOB", "WRITE", "EDIT", "REPLACE", "GO", "BASH",
+    "LIST", "GLOB", "WRITE", "EDIT", "REPLACE", "GO", "BASH",
 }
 
 # Per-tag regex. Each pattern uses DOTALL so multi-line args
@@ -219,6 +219,14 @@ def _validate_arg(tag_type: str, clean_arg: str) -> "str | None":
         # without leading `#`. Tags come from the inline VIEW annotation.
         if not re.match(r'^#?[0-9a-fA-F]{3,8}$', clean_arg):
             return f"arg {clean_arg!r} not a hex tag (expected #xxx form)"
+        return None
+    if tag_type == "LS":
+        # [LS: dir/path] — a folder path to expand (no ranges). Permissive:
+        # letters/digits/_/./-/slashes; reject sentence-shaped args.
+        if len(clean_arg.split()) >= 4:
+            return f"arg {clean_arg!r} reads as prose, not a folder path"
+        if not re.match(r'^[\w./\-]+$', clean_arg):
+            return f"arg {clean_arg!r} not a folder path"
         return None
     return f"unknown tag type {tag_type!r}"
 

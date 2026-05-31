@@ -1015,6 +1015,17 @@ runtime needs the closing fence to extract.
     - One STEP per file unless tightly coupled.
     - Each STEP starts with `### STEP N: <imperative verb> ...`
       and has a `FILES: path/to/file.py` line.
+    - CONFIRM EVERY `FILES:` PATH IS REAL before you write it. The
+      path must be one you have SEEN — in the PROJECT TREE, in an
+      [LS:] expansion, or in a [CODE:]/[SEARCH:]/[REFS:] result.
+      NEVER type a path from memory or by analogy. If a step
+      MODIFIES existing code, the file must already exist (a path
+      that isn't on disk will be treated as a NEW empty file and
+      hand the coder a contradiction — "edit a file that doesn't
+      exist"). If the task names a bare filename (e.g.
+      "`dataclasses.py`") and the repo has more than one, find the
+      one that actually contains the symbol: [SEARCH: <symbol>] or
+      [LS:] the candidate folders, then name THAT exact path.
     - INDEPENDENT-CHANGE RULE: a STEP captures exactly one
       independently-failable unit. Don't bundle two unrelated
       edits.
