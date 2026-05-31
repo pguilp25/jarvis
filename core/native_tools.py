@@ -219,11 +219,14 @@ CODER_TOOLS = [
             "— the only way to catch a bug that READS fine but BEHAVES wrong (valid code, "
             "wrong logic). Runs in your sandbox (your edits are live) with the repo's deps "
             "+ pytest available; read-only + no network. Use it to VERIFY before finish: "
-            "write a tiny check that exercises your change and asserts the expected "
-            "behaviour — e.g. python -c \"from pkg.mod import Thing; t=Thing(); "
-            "assert t.method(...) == expected\" — or run the module's existing tests: "
-            "python -m pytest path/to/test_file.py -q. If exit≠0, the OUTPUT is your "
-            "edit's real behaviour; fix it and re-run. Don't finish on an unverified edit."),
+            "write a tiny check that exercises your change and PRINTS what it produces, "
+            "so you SEE the real behaviour (build a picture of what the code actually "
+            "does) — e.g. python -c \"from pkg.mod import Thing; t=Thing(); "
+            "r=t.method(...); print('got:', r); assert r == expected\" — or run the "
+            "module's existing tests: python -m pytest path/to/test_file.py -q. exit 0 "
+            "= success (a passing assert prints nothing — that's a PASS); exit≠0 = the "
+            "output is your edit's real behaviour, fix it and re-run. Don't finish on an "
+            "unverified edit."),
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string", "description": "shell command, e.g. python -c \"...\" or python -m pytest <path> -q"},
         }, "required": ["command"]},
@@ -829,10 +832,27 @@ def _do_run(args: dict, ctx: dict) -> str:
     code = res.get("exit_code", -1)
     out = (res.get("output") or "").strip()
     timed = " (TIMED OUT at 90s)" if res.get("timed_out") else ""
-    head = (f"✓ ran in your edited sandbox — exit 0{timed}" if code == 0
-            else f"✗ ran in your edited sandbox — exit {code}{timed} "
-                 f"(your edit's behaviour, NOT a tool error — read the output)")
-    return f"{head}\n{out[:4000] or '(no output)'}"
+    # Keep the TAIL, not the head: a Python traceback's exception line AND
+    # pytest's PASS/FAIL summary both live at the END — head-truncation would
+    # drop exactly the verdict. A small model scans the top, so also lift the
+    # single most useful last line up front.
+    _MAX = 3500
+    shown = out if len(out) <= _MAX else "…(earlier output trimmed)…\n" + out[-_MAX:]
+    last = next((l.strip() for l in reversed(out.splitlines()) if l.strip()), "")
+    if code == 0:
+        if not out:
+            # A passing check is SILENT (assert raised nothing) — say so plainly,
+            # or a small model reads "no output" as "nothing happened / failed".
+            return ("✓ ran in your edited sandbox — exit 0, NO error raised: your "
+                    "command SUCCEEDED (every assert/check passed). This is your "
+                    "edit's real behaviour. To SEE a value rather than just pass/fail, "
+                    "add a print(...) to your command and run again.")
+        return (f"✓ ran in your edited sandbox — exit 0 (success). This output IS your "
+                f"edit's real behaviour:\n{shown}")
+    return (f"✗ ran in your edited sandbox — exit {code}{timed}. This is YOUR EDIT'S "
+            f"real runtime behaviour, NOT a tool error.\n"
+            f"WHAT WENT WRONG (last line): {last[:200] or '(no output)'}\n"
+            f"--- full output (tail) ---\n{shown or '(no output)'}")
 
 
 def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
