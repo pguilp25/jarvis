@@ -635,8 +635,11 @@ def test_native_prompt_has_thinking_toolkit_reflexes():
     exact tokens), plus parallel-consistency and type-snap. Pin them."""
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
     low = IMPLEMENT_NATIVE_PROMPT.lower()
-    for reflex in ("be the interpreter", "calibrate", "siblings move together", "type-snap", "hard contract"):
+    for reflex in ("be the interpreter", "assume-and-check", "siblings move together", "type-snap", "hard contract"):
         assert reflex in low, f"native prompt missing reflex: {reflex!r}"
+    # the calibration substitute must NOT rely on the model feeling its uncertainty
+    assert "you can't feel the difference between knowing and guessing" in low
+    assert "collide" in low, "missing the collide-with-the-example principle"
 
 
 # ── syntax + unreachable gates (parity with the text coder's parse gate) ───────
