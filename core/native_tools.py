@@ -51,16 +51,17 @@ from core.cli import status, warn
 # Models built for native function-calling — use the structured loop, not text.
 NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss-120b"}
 
-# A/B EXPERIMENT (env-gated, default OFF): render read_file with REAL leading
-# whitespace and tell the coder to write real spaces in new_content, instead of
-# the `LINENO:INDENT|content` count format. Rationale: the count-format was a
-# weak-TEXT-model indent fix (v12 reverted whitespace because text coders
-# mis-typed spaces). gpt-oss is a NATIVE-function model trained on real, indented
-# code — emitting indent *counts* fights that training. This flag tests whether
-# gpt-oss handles indentation more reliably with its native representation. Set
-# JARVIS_NATIVE_WS=1 to enable. The applier already accepts raw-whitespace
-# new_content (edit_block `_expand_indent` passthrough), so no applier change.
-_WS_MODE = bool(os.environ.get("JARVIS_NATIVE_WS"))
+# WHITESPACE read view (default ON for the native coder; JARVIS_NATIVE_WS=0 to
+# A/B-disable). The READ format must MATCH the WRITE format: edit_file is the
+# primary edit tool and it COPIES real code lines (old/new are verbatim lines
+# with real leading spaces), so read_file shows REAL indentation — the model
+# copies the exact spaces it sees instead of converting a `LINENO:INDENT|count`
+# into spaces in its head (that count→spaces conversion was a top source of
+# IndentationErrors: f327 had 6/16 edit rejects from bad indent). The earlier
+# count format was aligned with replace_lines (which WRITES `8|code`); under
+# edit_file that alignment flipped. replace_lines still works (its applier
+# accepts raw whitespace too), it's just no longer the primary path.
+_WS_MODE = os.environ.get("JARVIS_NATIVE_WS", "1") != "0"
 
 
 def is_native_tool_model(model_id: str) -> bool:
@@ -988,17 +989,23 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
     short = model_id.split('/')[-1]
     if _WS_MODE:
-        # Authoritative override of the prompt's `INDENT|` count instructions.
-        # Appended LAST so it wins. read_file now shows real leading spaces.
+        # Authoritative override of any `INDENT|` count instructions in the base
+        # prompt. Appended LAST so it wins. read_file shows REAL indentation, which
+        # matches how edit_file works (you COPY lines) — so indentation is a
+        # copy job, not a count-to-spaces conversion.
         system = system + (
-            "\n\n## INDENTATION — WHITESPACE MODE (overrides any `N|` count rule above)\n"
-            "read_file shows each line as `LINENO:<real leading spaces><code>` — the "
-            "indentation is ACTUAL spaces, not a count. In replace_lines `new_content`, "
-            "write each line with its REAL leading spaces, exactly as a normal code file "
-            "looks (NO `N|` count prefix, NO `LINENO:` prefix). Copy a kept line's leading "
-            "spaces verbatim from the view; for a new line, indent it to match the scope it "
-            "belongs to (a block body is indented one level deeper than its `def`/`if`/`for` "
-            "header — never at the header's own level). A blank line is truly empty.")
+            "\n\n## INDENTATION — read_file shows REAL spaces (overrides any `N|` count rule above)\n"
+            "Every read_file line is `LINENO: <the code with its ACTUAL leading spaces>` — "
+            "the indentation you see IS the indentation. So in edit_file:\n"
+            "  • `old` lines: copy them CHARACTER-FOR-CHARACTER from the read view, leading "
+            "spaces included (drop only the `LINENO: ` prefix). Never re-type or re-indent "
+            "them — paste exactly, so the content-match can't fail on whitespace.\n"
+            "  • `new` lines: write the real leading spaces too. For a CHANGED line, keep the "
+            "same indentation as the line it replaces. For a NEW line, indent it to line up "
+            "with the surrounding code you can SEE (a block body sits one level — usually 4 "
+            "spaces — deeper than its `def`/`if`/`for`/`class` header, never at the header's "
+            "level). A blank line is empty.\n"
+            "Do NOT write `N|` counts anywhere — that's the old format; use real spaces.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())

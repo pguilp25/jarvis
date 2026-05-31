@@ -85,23 +85,26 @@ def test_every_schema_is_wellformed():
             assert req in params["properties"], (fn["name"], req)
 
 
-# ── read_file: n| format + ranges + skeleton ────────────────────────────────
-def test_read_file_prefix_format():
+# ── read_file: REAL-whitespace format (ckpt 88, aligned with edit_file copy) ──
+def test_read_file_whitespace_format():
     ctx, rel, root = _mk_ctx()
     try:
         out = _disp("read_file", {"path": rel}, ctx)
-        assert ":0|" in out          # LINENO:INDENT| with 0 indent at module level
         assert "greet" in out
+        # NEW format is `LINENO: <real spaces><code>` — NOT the `N|` count format
+        assert ":0|" not in out and ":4|" not in out and ":8|" not in out
     finally:
         _cleanup(root)
 
 
-def test_read_file_shows_indent_count():
+def test_read_file_shows_real_indentation():
     ctx, rel, root = _mk_ctx()
     try:
         out = _disp("read_file", {"path": rel}, ctx)
-        # body lines are indented 4/8 spaces → INDENT count appears
-        assert ":4|" in out or ":8|" in out
+        # a method body line carries its ACTUAL 8 leading spaces (copy-verbatim)
+        assert "        self.n = 0" in out
+        # a module-level def is at column 0
+        assert "def greet(name):" in out
     finally:
         _cleanup(root)
 
