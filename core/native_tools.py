@@ -865,9 +865,14 @@ def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
         return
     try:
         with open(path, "a", encoding="utf-8") as f:
+            _payload = (args.get("command")            # run_code
+                        or args.get("new_content")      # replace_lines
+                        or args.get("content")          # create_file
+                        or (str(args.get("hunks")) if args.get("hunks") else "")  # edit_file
+                        or "")
             f.write(f"\n{'='*70}\nTOOL {tool}  args: start={args.get('start_line')} "
                     f"end={args.get('end_line')} path={args.get('path')}\n"
-                    f"--- new_content ---\n{args.get('new_content', args.get('content',''))}\n"
+                    f"--- payload (command/new_content/hunks) ---\n{_payload}\n"
                     f"--- RESULT ---\n{result}\n")
     except Exception:
         pass
@@ -901,7 +906,9 @@ async def _dispatch(name: str, args: dict, ctx: dict):
     if name == "depends_on":
         return _do_dependson(args, ctx)
     if name == "run_code":
-        return await asyncio.get_event_loop().run_in_executor(None, _do_run, args, ctx)
+        res = await asyncio.get_event_loop().run_in_executor(None, _do_run, args, ctx)
+        _debug_edit_trace("run_code", args, res)
+        return res
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
     # A weak/native model often reaches for a name from another idiom (the text
