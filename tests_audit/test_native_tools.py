@@ -70,7 +70,7 @@ def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     assert names == {"read_file", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "depends_on",
-                     "create_file", "replace_lines", "finish"}
+                     "edit_file", "create_file", "replace_lines", "finish"}
 
 
 def test_every_schema_is_wellformed():
@@ -724,5 +724,99 @@ def test_create_file_syntax_gate_rejects_unparseable():
         assert out.startswith("✗"), out
         assert "broken.py" not in ctx["files_changed"]
         assert ctx["sandbox"].load_file("broken.py") in (None, "")
+    finally:
+        _cleanup(root)
+
+
+# ── edit_file: content-anchored JSON hunks (ckpt 79) ───────────────────────────
+# The primary edit tool — replaces fragile line-range replace_lines with the text
+# coder's content-matched SEARCH/REPLACE, expressed as native JSON {old,new} hunks
+# so gpt-oss produces it reliably. Context lines anchor by content, not line #.
+
+def test_edit_file_in_toolset_and_primary():
+    names = [t["function"]["name"] for t in CODER_TOOLS]
+    assert "edit_file" in names
+    # edit_file is listed BEFORE replace_lines (the model prefers earlier tools)
+    assert names.index("edit_file") < names.index("replace_lines")
+    schema = next(t for t in CODER_TOOLS if t["function"]["name"] == "edit_file")
+    props = schema["function"]["parameters"]["properties"]
+    assert set(props) == {"path", "hunks"}
+    assert props["hunks"]["type"] == "array"
+
+
+def test_edit_file_changes_by_content_not_line_number():
+    ctx, rel, root = _mk_ctx()
+    try:
+        # no line numbers anywhere — pure content match
+        out = _disp("edit_file", {"path": rel, "hunks": [
+            {"old": ['        return "hello " + name'],
+             "new": ['        return "hi " + name']}]}, ctx)
+        assert out.startswith("✓"), out
+        assert 'return "hi " + name' in ctx["file_contents"][rel]
+        # persisted to the sandbox too
+        assert 'return "hi " + name' in ctx["sandbox"].load_file(rel)
+    finally:
+        _cleanup(root)
+
+
+def test_edit_file_insert_keeps_anchor():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("edit_file", {"path": rel, "hunks": [
+            {"old": ['    def bump(self):'],
+             "new": ['    def reset(self):',
+                     '        self.n = 0',
+                     '',
+                     '    def bump(self):']}]}, ctx)
+        assert out.startswith("✓"), out
+        src = ctx["file_contents"][rel]
+        assert "def reset(self):" in src and "def bump(self):" in src  # anchor preserved
+    finally:
+        _cleanup(root)
+
+
+def test_edit_file_delete_with_empty_new():
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("edit_file", {"path": rel, "hunks": [
+            {"old": ['        """Return a greeting for name."""'], "new": []}]}, ctx)
+        assert out.startswith("✓"), out
+        assert "Return a greeting for name" not in ctx["file_contents"][rel]
+    finally:
+        _cleanup(root)
+
+
+def test_edit_file_rejects_unfound_old_unchanged():
+    ctx, rel, root = _mk_ctx()
+    before = ctx["file_contents"][rel]
+    try:
+        out = _disp("edit_file", {"path": rel, "hunks": [
+            {"old": ['        return "this line is not in the file at all"'],
+             "new": ['        return "x"']}]}, ctx)
+        assert out.startswith("✗"), out
+        assert ctx["file_contents"][rel] == before     # untouched
+    finally:
+        _cleanup(root)
+
+
+def test_edit_file_empty_hunks_rejected():
+    ctx, rel, root = _mk_ctx()
+    try:
+        assert _disp("edit_file", {"path": rel, "hunks": []}, ctx).startswith("✗")
+        assert _disp("edit_file", {"path": rel}, ctx).startswith("✗")
+        # a hunk with empty `old` can't anchor
+        out = _disp("edit_file", {"path": rel, "hunks": [{"old": [], "new": ["x"]}]}, ctx)
+        assert out.startswith("✗") and "old" in out.lower()
+    finally:
+        _cleanup(root)
+
+
+def test_edit_alias_routes_to_edit_file():
+    # a model reaching for a wrong verb is steered to edit_file, not replace_lines
+    ctx, rel, root = _mk_ctx()
+    try:
+        for wrong in ("edit", "replace", "str_replace", "patch"):
+            out = _disp(wrong, {}, ctx)
+            assert "edit_file" in out, f"{wrong} → {out}"
     finally:
         _cleanup(root)

@@ -153,26 +153,55 @@ CODER_TOOLS = [
             "indentation, NO line-number prefixes). Use this for files that don't "
             "exist yet — a new module, script, or test file (greenfield builds, or "
             "adding a file to an existing project). To change a file that ALREADY "
-            "exists, use replace_lines instead — create_file refuses to clobber."),
+            "exists, use edit_file instead — create_file refuses to clobber."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path of the new file"},
             "content": {"type": "string", "description": "the full contents of the new file"},
         }, "required": ["path", "content"]},
     }},
     {"type": "function", "function": {
+        "name": "edit_file",
+        "description": (
+            "Your PRIMARY edit tool. Change an existing file by giving `hunks` — a list "
+            "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
+            "line(s) to find, copied VERBATIM from read_file (real indentation, no "
+            "LINENO/INDENT prefixes); include enough surrounding context lines that "
+            "`old` is UNIQUE in the file. `new` is what those lines become. The match "
+            "is by CONTENT, not line numbers, so a stale line number can never make the "
+            "edit land in the wrong place — and copying the real lines keeps you focused "
+            "on exactly what you're changing.\n"
+            "  • CHANGE lines: old=[the current lines], new=[the replacements].\n"
+            "  • INSERT: old=[the line you insert AFTER], new=[that same line, then your "
+            "new line(s)].\n"
+            "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
+            "Multiple hunks in one call edit several spots at once. The result is "
+            "parse-checked; a rejection tells you what went wrong so you can fix and "
+            "retry."),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "repo-relative path to edit"},
+            "hunks": {
+                "type": "array",
+                "description": "one or more content-anchored edits",
+                "items": {"type": "object", "properties": {
+                    "old": {"type": "array", "items": {"type": "string"},
+                            "description": "exact existing line(s), copied verbatim from read_file, unique in the file"},
+                    "new": {"type": "array", "items": {"type": "string"},
+                            "description": "replacement line(s); empty array to delete"},
+                }, "required": ["old", "new"]},
+            },
+        }, "required": ["path", "hunks"]},
+    }},
+    {"type": "function", "function": {
         "name": "replace_lines",
         "description": (
-            "Your EDIT. Replace lines start_line..end_line (inclusive, 1-based, from "
-            "your most recent read_file) of `path` with new_content. Each line of "
-            "new_content should be `INDENT|code` — INDENT is the leading-space count "
-            "(copy it from the read_file view; for a new line, count the spaces it "
-            "needs). A BLANK line has indent 0 — write it as `0|`, never the "
-            "surrounding indent (an indent count on an empty line just adds trailing "
-            "whitespace). NO LINENO prefix on new content. Raw real indentation also works. "
-            "To INSERT after line N without deleting it, set start_line=end_line=N and "
-            "make new_content the current line N followed by your new line(s). The "
-            "result is parse-checked; a rejection tells you the actual current line so "
-            "you can correct and retry."),
+            "SECONDARY edit tool — prefer edit_file. Use ONLY for a clean whole-range "
+            "swap where copying the old lines is pointless. Replace lines "
+            "start_line..end_line (inclusive, 1-based, from your most recent read_file) "
+            "of `path` with new_content. Each new_content line is `INDENT|code` (INDENT "
+            "= leading-space count from the read_file view) or real whitespace; NO "
+            "LINENO prefix. To INSERT after line N, set start_line=end_line=N and make "
+            "new_content the current line N followed by your new line(s). Line numbers "
+            "go stale after any edit — that's why edit_file (content-matched) is safer."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
             "start_line": {"type": "integer"},
@@ -257,6 +286,45 @@ async def _do_read(args: dict, ctx: dict) -> str:
     return out
 
 
+def _post_edit_syntax_gate(path: str, new_content: str, before, *,
+                           tool: str, resend: str) -> "str | None":
+    """Shared parse / dead-code / dup gate for native edits. Returns a REJECTION
+    string (the edit must NOT be written) or None (safe to write). Only flags a
+    problem THIS edit introduced — a pre-existing breakage passes through so the
+    coder isn't sent chasing an unrelated error. `resend` is the tool-specific
+    "try again" hint appended to each rejection."""
+    if not path.endswith(".py"):
+        return None
+    from workflows.code import (_check_syntax, _unreachable_after_jump,
+                                _duplicate_adjacent_stmts)
+    ok_after, _serr = _check_syntax(path, new_content)
+    if not ok_after and (before is None or _check_syntax(path, before)[0]):
+        return (f"✗ {tool} NOT applied to {path}: your change makes the file fail to "
+                f"parse, so it was NOT written (the file is unchanged). Fix the error "
+                f"below and {resend}.\n{_serr}")
+    if ok_after:
+        new_dead = _unreachable_after_jump(new_content)
+        old_dead = _unreachable_after_jump(before) if before else {}
+        if len(new_dead) > len(old_dead):
+            where = "; ".join(f"line {ln}: `{txt}`"
+                              for ln, txt in sorted(new_dead.items())[:3])
+            return (f"✗ {tool} NOT applied to {path}: your edit leaves UNREACHABLE "
+                    f"code — {where} comes right after a return/raise at the same "
+                    f"indent, so it never runs (the file is unchanged). If that logic "
+                    f"should run on the success path, DEDENT it OUT of the guard "
+                    f"block, then {resend}.")
+        new_dup = _duplicate_adjacent_stmts(new_content)
+        old_dup = _duplicate_adjacent_stmts(before) if before else {}
+        if len(new_dup) > len(old_dup):
+            where = "; ".join(f"line {ln}: `{txt}`"
+                              for ln, txt in sorted(new_dup.items())[:3])
+            return (f"✗ {tool} NOT applied to {path}: your edit creates DUPLICATE "
+                    f"adjacent code — {where} repeats the statement right before it "
+                    f"(the file is unchanged). You likely re-emitted an anchor block "
+                    f"AND your new copy. Keep ONE; {resend}.")
+    return None
+
+
 def _do_replace(args: dict, ctx: dict) -> str:
     # Reuse the proven [REPLACE LINES] machinery (applier + validation gate +
     # actual-line reject feedback) by building the text block the runtime
@@ -317,45 +385,11 @@ def _do_replace(args: dict, ctx: dict) -> str:
         # the same (now-unchanged) lines and retries. Only block errors THIS edit
         # introduced — if the file was already broken, let it through rather than
         # send the coder chasing a pre-existing error in unrelated code.
-        if path.endswith(".py"):
-            from workflows.code import (_check_syntax, _unreachable_after_jump,
-                                        _duplicate_adjacent_stmts)
-            ok_after, _serr = _check_syntax(path, result[path])
-            if not ok_after and (before is None or _check_syntax(path, before)[0]):
-                return (f"✗ replace_lines NOT applied to {path}: your new_content makes "
-                        f"the file fail to parse, so it was NOT written (the file is "
-                        f"unchanged). Fix the error below and re-send the SAME line "
-                        f"range {s_i}-{e_i}.\n{_serr}")
-            # Catch the over-indentation slip: valid Python where the edit buried
-            # real logic as DEAD CODE after a return/raise (e.g. merge body indented
-            # into a guard's if-block → success path returns None). Only flag code
-            # THIS edit made newly-unreachable.
-            if ok_after:
-                new_dead = _unreachable_after_jump(result[path])
-                old_dead = _unreachable_after_jump(before) if before else {}
-                if len(new_dead) > len(old_dead):
-                    where = "; ".join(f"line {ln}: `{txt}`"
-                                      for ln, txt in sorted(new_dead.items())[:3])
-                    return (f"✗ replace_lines NOT applied to {path}: your edit leaves "
-                            f"UNREACHABLE code — {where} comes right after a "
-                            f"return/raise at the same indent, so it never runs (the "
-                            f"file is unchanged). If that logic should run on the "
-                            f"success path, DEDENT it OUT of the guard block, then "
-                            f"re-send the SAME line range {s_i}-{e_i}.")
-                # Catch the insert footgun: re-emitting an anchor block AND your own
-                # copy → two structurally-identical adjacent statements (the
-                # 1a9e74bf duplicated `yield --enable-features` bug). Only flag dups
-                # THIS edit introduced.
-                new_dup = _duplicate_adjacent_stmts(result[path])
-                old_dup = _duplicate_adjacent_stmts(before) if before else {}
-                if len(new_dup) > len(old_dup):
-                    where = "; ".join(f"line {ln}: `{txt}`"
-                                      for ln, txt in sorted(new_dup.items())[:3])
-                    return (f"✗ replace_lines NOT applied to {path}: your edit creates "
-                            f"DUPLICATE adjacent code — {where} repeats the statement "
-                            f"right before it (the file is unchanged). You likely "
-                            f"re-emitted an anchor block AND your new copy. Keep ONE; "
-                            f"re-send the SAME line range {s_i}-{e_i}.")
+        _gate = _post_edit_syntax_gate(
+            path, result[path], before, tool="replace_lines",
+            resend=f"re-send the SAME line range {s_i}-{e_i}")
+        if _gate:
+            return _gate
         sb = ctx.get("sandbox")
         if sb is not None:
             try:
@@ -395,6 +429,105 @@ def _do_replace(args: dict, ctx: dict) -> str:
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
         "no change produced (range may be invalid)"
     return f"✗ NOT applied to {path}: {reason}"
+
+
+def _do_edit(args: dict, ctx: dict) -> str:
+    """CONTENT-ANCHORED edit (the primary edit tool). Instead of a line range,
+    the model gives JSON `hunks` — each {old:[lines], new:[lines]}. `old` is the
+    EXACT existing lines (copied from read_file, enough to be unique = the
+    context that anchors the change and focuses it); `new` is what they become.
+    We translate each hunk to the text coder's proven [SEARCH]/[REPLACE] block
+    (matched by CONTENT, not line numbers — so a stale number can't misfire) and
+    apply via the same _extract/_apply path replace_lines uses. To DELETE, make
+    `new` empty; to INSERT, set `old` to the line you insert after and `new` to
+    that line plus the additions."""
+    path = args.get("path", "")
+    hunks = args.get("hunks")
+    if not path:
+        return "✗ edit_file needs a path."
+    if not hunks or not isinstance(hunks, list):
+        return ("✗ edit_file needs a non-empty `hunks` array. Each hunk is "
+                "{\"old\": [exact existing line(s) copied from read_file], "
+                "\"new\": [replacement line(s)]}.")
+
+    def _as_lines(v):
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            return "\n".join(str(x) for x in v)
+        return str(v)
+
+    blocks = []
+    for i, h in enumerate(hunks, 1):
+        if not isinstance(h, dict):
+            return (f"✗ edit_file hunk #{i} is not an object — each hunk must be "
+                    f"{{\"old\": [...], \"new\": [...]}}.")
+        old_s = _as_lines(h.get("old"))
+        new_s = _as_lines(h.get("new"))
+        if not old_s.strip():
+            return (f"✗ edit_file hunk #{i}: `old` is empty. Put the EXACT existing "
+                    f"line(s) to find here (copy them from read_file, with enough "
+                    f"context to be unique). To insert, set `old` to the line you're "
+                    f"inserting after and `new` to that line plus your additions.")
+        blocks.append(f"[SEARCH]\n{old_s}\n[/SEARCH]\n[REPLACE]\n{new_s}\n[/REPLACE]")
+
+    block = f"=== EDIT: {path} ===\n" + "\n".join(blocks) + "\n=== END EDIT ==="
+    from workflows.code import _extract_code_blocks, _apply_extracted_code
+    before = ctx["file_contents"].get(path)
+    _before_all = dict(ctx["file_contents"])
+    ext = _extract_code_blocks(block)
+    result, matched, attempted, skips = _apply_extracted_code(
+        ext, ctx["file_contents"], ctx.get("sandbox"),
+        viewed_versions=ctx.get("viewed_versions"))
+    _seen: set = set()
+    skips = [x for x in (list(ext.get("malformed_edits", [])) + list(skips))
+             if not (str(x).strip() in _seen or _seen.add(str(x).strip()))]
+
+    if path in result:
+        if before is not None and result[path] == before:
+            return (f"✗ edit_file was a NO-OP on {path}: the `new` lines are identical "
+                    f"to `old`. Nothing changed — re-check your hunk, or call finish if "
+                    f"the file is already correct.")
+        _gate = _post_edit_syntax_gate(
+            path, result[path], before, tool="edit_file",
+            resend="re-send the corrected hunk")
+        if _gate:
+            return _gate
+        sb = ctx.get("sandbox")
+        if sb is not None:
+            try:
+                sb.write_file(path, result[path])
+            except Exception as ex:
+                return (f"✗ edit_file: change computed but FAILED to write the sandbox "
+                        f"for {path} ({str(ex)[:120]}). It did not persist; retry.")
+        ctx["file_contents"][path] = result[path]
+        if isinstance(ctx.get("viewed_versions"), dict):
+            ctx["viewed_versions"][path] = result[path]
+        ctx.setdefault("files_changed", set()).add(path)
+        n = result[path].count("\n") + 1
+        return (f"✓ Applied {len(blocks)} hunk(s) to {path}. File is now {n} lines. "
+                f"Re-read with read_file before another edit if you need fresh context.")
+
+    # Suffix-resolved key safety net (mirror _do_replace).
+    _changed = {k: v for k, v in result.items()
+                if k != path and v != _before_all.get(k)}
+    if _changed:
+        for k, v in _changed.items():
+            if ctx.get("sandbox") is not None:
+                try:
+                    ctx["sandbox"].write_file(k, v)
+                except Exception:
+                    pass
+            ctx["file_contents"][k] = v
+            if isinstance(ctx.get("viewed_versions"), dict):
+                ctx["viewed_versions"][k] = v
+            ctx.setdefault("files_changed", set()).add(k)
+        return (f"✓ Applied (your path '{path}' resolved to {', '.join(_changed)}). "
+                f"Use that exact path for further edits.")
+    reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
+        ("the `old` text wasn't found in the file — copy it VERBATIM from read_file "
+         "(exact spaces/punctuation), and include enough lines to be unique")
+    return f"✗ edit_file NOT applied to {path}: {reason}"
 
 
 def _do_create(args: dict, ctx: dict) -> str:
@@ -569,6 +702,10 @@ def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
 async def _dispatch(name: str, args: dict, ctx: dict):
     if name == "read_file":
         return await _do_read(args, ctx)
+    if name == "edit_file":
+        res = _do_edit(args, ctx)
+        _debug_edit_trace("edit_file", args, res)
+        return res
     if name == "replace_lines":
         res = _do_replace(args, ctx)
         _debug_edit_trace("replace_lines", args, res)
@@ -608,15 +745,16 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         "purpose": "file_purpose", "summary": "file_purpose", "gist": "file_purpose",
         "semantic": "semantic_search",
         "write": "create_file", "new_file": "create_file", "touch": "create_file",
-        "edit": "replace_lines", "replace": "replace_lines",
-        "modify": "replace_lines", "patch": "replace_lines", "apply": "replace_lines",
+        "edit": "edit_file", "replace": "edit_file", "edit_lines": "edit_file",
+        "modify": "edit_file", "patch": "edit_file", "apply": "edit_file",
+        "search_replace": "edit_file", "str_replace": "edit_file",
         "done": "finish", "stop": "finish", "complete": "finish", "end": "finish",
     }
     suggestion = _ALIAS.get((name or "").strip().lower().lstrip("[").rstrip("]:"))
     hint = (f" Did you mean '{suggestion}'?" if suggestion else "")
     return (f"✗ Unknown tool '{name}'.{hint} Available: read_file, find_refs, "
             f"find_callers, search_text, file_purpose, semantic_search, depends_on, "
-            f"create_file, replace_lines, finish.")
+            f"edit_file, create_file, replace_lines, finish.")
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────
@@ -811,7 +949,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             reason = "no-tool-call" if final.strip() else "empty-turn"
             status(f"  [native:{short}] round {rnd}: no tool call ({reason})")
             break
-        n_edit = sum(1 for tc in tcs if tc.get("function", {}).get("name") == "replace_lines")
+        n_edit = sum(1 for tc in tcs if tc.get("function", {}).get("name")
+                     in ("edit_file", "replace_lines"))
         names = ",".join(tc.get("function", {}).get("name", "?") for tc in tcs)
         status(f"  [native:{short}] round {rnd}: {len(tcs)} tool call(s) [{names}]"
                + (f", {n_edit} edit(s)" if n_edit else ""))
