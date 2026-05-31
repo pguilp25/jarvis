@@ -518,6 +518,19 @@ def _do_edit(args: dict, ctx: dict) -> str:
                         f"number from read_file (got {sl!r}).")
             if sl < 1:
                 return (f"✗ edit_file hunk #{i}: start_line must be ≥ 1 (got {sl}).")
+            # Verify `old` actually exists in THIS file. If not, the model is most
+            # likely editing the WRONG FILE (e.g. trying to change a class that
+            # lives in another module) — say so plainly instead of the line-range
+            # applier's "stale view? line N" wording, which sends it chasing
+            # numbers. This is the f327e65d failure: editing AnsibleCollectionRef
+            # in dataclasses.py when the class is in _collection_finder.py.
+            _, _n = _locate_block(cur_lines, old_list)
+            if _n == 0:
+                return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path} — "
+                        f"so this edit can't apply. Most likely you have the WRONG FILE "
+                        f"(is the code you're changing actually defined here?) — "
+                        f"[SEARCH] the symbol to find its real file, then edit THAT. "
+                        f"Otherwise re-read {path} and copy `old` verbatim.")
         for j, o in enumerate(old_list):
             edit_lines.append(f"{sl + j}:-{o}")
         for nw in new_list:
