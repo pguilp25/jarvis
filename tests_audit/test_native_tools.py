@@ -901,3 +901,36 @@ def test_edit_file_pure_insert_with_empty_old():
             "project_root": ".", "files_changed": set()}
     assert _disp("edit_file", {"path": "m.py", "hunks": [{"old": [], "new": ["x"]}]},
                  ctx2).startswith("✗")
+
+
+# ── comprehension GPS (ckpt 90): harness computes the blast-radius the weak ──
+# model can't hold, and hands back the exact remaining edit (not a dead-end error).
+
+def test_dangling_ref_reject_points_at_the_use_site():
+    # Remove a helper's DEFINITION but leave a call to it → the reject must name
+    # WHERE it's still used + that the def was removed (f327's 5x NameError).
+    src = ("def _is_fqcn(s):\n    return True\n\n"
+           "def is_valid(name):\n    return _is_fqcn(name)\n")
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    # delete the def of _is_fqcn (lines 1-2), leaving the call on line 5
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 1, "old": ["def _is_fqcn(s):", "    return True"], "new": []}]}, ctx)
+    assert out.startswith("✗"), out
+    assert "_is_fqcn" in out and "REMOVED its definition" in out
+    assert "still USED" in out and "_is_fqcn(name)" in out   # points at the dangling call
+    assert ctx["file_contents"]["m.py"] == src               # not applied
+
+
+def test_orphaned_block_reject_names_the_header():
+    # Delete a try-block's body leaving `try:` empty → reject must say the BODY
+    # was deleted and the header kept (f327's empty-block SyntaxError), not the
+    # generic indent hint.
+    src = "def f():\n    try:\n        risky()\n    except Exception:\n        pass\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 3, "old": ["        risky()"], "new": []}]}, ctx)
+    assert out.startswith("✗"), out
+    assert "DELETED the body" in out and "try" in out
+    assert ctx["file_contents"]["m.py"] == src

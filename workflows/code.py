@@ -9508,6 +9508,35 @@ def _dedup_against_seen(extracted: dict, seen_keys: set[str]) -> dict:
     return extracted
 
 
+def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
+    """Turn an undefined-name error from a dead-end into a GPS: locate WHERE the
+    name is still used in the new file, and detect whether the edit REMOVED its
+    definition. Weak models can't hold a symbol's whole blast-radius in their
+    head — so the deterministic harness computes it and hands back the exact
+    remaining edit. (f327: removed `_is_fqcn`'s def but left a call → NameError;
+    this points at the call line so the fix is a local edit, not a hunt.)"""
+    import re as _re
+    mod_lines = modified.split("\n")
+    word = _re.compile(rf'(?<![\w.]){_re.escape(name)}(?![\w])')
+    defpat = _re.compile(rf'^\s*(?:async\s+def|def|class)\s+{_re.escape(name)}\b')
+    uses = []
+    for i, ln in enumerate(mod_lines, 1):
+        if word.search(ln) and not defpat.match(ln):
+            uses.append((i, ln.strip()))
+    def_re = _re.compile(
+        rf'^\s*(?:async\s+def|def|class)\s+{_re.escape(name)}\b'
+        rf'|^\s*{_re.escape(name)}\s*=(?!=)', _re.M)
+    removed_def = bool(def_re.search(original)) and not bool(def_re.search(modified))
+    head = (f"`{name}`: you REMOVED its definition but it's still USED"
+            if removed_def else f"`{name}` is used but defined/imported nowhere")
+    if uses:
+        shown = "; ".join(f"line {ln}: `{txt[:64]}`" for ln, txt in uses[:3])
+        head += f" at {shown}"
+        if len(uses) > 3:
+            head += f" (+{len(uses) - 3} more)"
+    return head
+
+
 def _undefined_names_introduced(original: str, modified: str) -> set[str]:
     """Names the edit USES but binds NOWHERE in the module (would NameError
     at runtime). Returns only names NEWLY introduced by the edit — names
@@ -10144,6 +10173,24 @@ def _apply_extracted_code(
                 for ln in range(max(1, lineno - 1), min(len(body_lines), lineno) + 1)
             )
             _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
+            # Orphaned-header GPS: "expected an indented block after 'try'/'if'/…"
+            # means the edit DELETED a compound block's body but kept its header.
+            # Name that precisely instead of the generic indent hint — the fix is
+            # "remove the header too, or give it a body", not a re-indent.
+            _orphan = re.search(
+                r"expected an indented block after '?(\w+)'? statement on line (\d+)",
+                emsg)
+            if _orphan:
+                _kw, _kwline = _orphan.group(1), _orphan.group(2)
+                hint = (f"You DELETED the body of the `{_kw}:` block at line {_kwline} "
+                        f"but kept the `{_kw}` header, leaving it empty. Either remove "
+                        f"the `{_kw}` line (and its sibling clauses) too, or give it a "
+                        f"body. A block can never be empty in Python.")
+            else:
+                hint = ("Most often this is a nested-block indent slip — a body line "
+                        "not deeper than its `if`/`for`/`def`/`else` keyword. Re-issue "
+                        "with each nested level +4 deeper than its parent (keyword at "
+                        "INDENT N → body at N+4).")
             all_ambiguous_skips.append(
                 f"- ✗ {_en} REJECTED — {fp}: the result does NOT parse — "
                 f"{type(parse_err).__name__} at line {lineno}: {emsg}. The file "
@@ -10151,10 +10198,7 @@ def _apply_extracted_code(
                 f"`from sandbox (edited)` header on a later re-read: it reflects an "
                 f"EARLIER edit that DID land, never this rejected one. This message "
                 f"is authoritative — re-issue the fix, do not assume it applied.) "
-                f"Most often this is a nested-block indent "
-                f"slip — a body line not deeper than its `if`/`for`/`def`/`else` "
-                f"keyword. Re-issue with each nested level +4 deeper than its "
-                f"parent (keyword at INDENT N → body at N+4).\n{ctx}"
+                f"{hint}\n{ctx}"
             )
             continue
 
@@ -10167,12 +10211,19 @@ def _apply_extracted_code(
                 total_matched = max(0, total_matched - 1)
                 names = ", ".join(sorted(new_undef))
                 _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
+                # GPS, not a stop-sign: for each unbound name, say WHERE it's still
+                # used and whether the edit removed its def — so the coder makes a
+                # local fix instead of hunting the blast-radius it can't track.
+                _detail = " | ".join(
+                    _dangling_ref_guidance(n, original, new_content)
+                    for n in sorted(new_undef))
                 all_ambiguous_skips.append(
-                    f"- ✗ {_en} REJECTED — {fp}: introduces name(s) bound "
-                    f"nowhere in the module — {names} — which would raise "
-                    f"NameError at runtime. The file was left UNCHANGED. Either "
-                    f"add the missing import/definition in the same edit, or use "
-                    f"a name that already exists."
+                    f"- ✗ {_en} REJECTED — {fp}: introduces name(s) bound nowhere "
+                    f"(NameError at runtime); file left UNCHANGED. {_detail}. "
+                    f"FIX one of: (a) if you meant to REMOVE the name, also update "
+                    f"each use-site above to the replacement (the symbol the step "
+                    f"routes through); (b) if you still need it, KEEP/restore its "
+                    f"definition or add the import. Re-issue in ONE edit."
                 )
 
         # Check 3 — INDENT verification (advisory; the parse gate already
