@@ -880,3 +880,21 @@ def test_edit_file_old_not_found_message_is_stale_aware():
         {"start_line": 1, "old": ["this line is not present"], "new": ["z = 9"]}]},
         base(False))
     assert r_fresh.startswith("✗") and "WRONG FILE" in r_fresh
+
+
+def test_edit_file_pure_insert_with_empty_old():
+    # Adding new code: model leaves old empty, gives start_line + new. Must insert
+    # AFTER start_line (not reject 'old is empty' → the f327 5x reject).
+    src = "class C:\n    def a(self):\n        return 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 3, "old": [], "new": ["", "    def b(self):", "        return 2"]}]}, ctx)
+    assert out.startswith("✓"), out
+    body = ctx["file_contents"]["m.py"]
+    assert "def a(self)" in body and "def b(self)" in body and body.count("return 1") == 1
+    # but empty old with NO start_line is still a clear reject
+    ctx2 = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+            "project_root": ".", "files_changed": set()}
+    assert _disp("edit_file", {"path": "m.py", "hunks": [{"old": [], "new": ["x"]}]},
+                 ctx2).startswith("✗")

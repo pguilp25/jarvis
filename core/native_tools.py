@@ -171,8 +171,8 @@ CODER_TOOLS = [
             "a stale number can't misfire AND a line that repeats isn't ambiguous. "
             "Copying the real lines keeps you focused on exactly what you change.\n"
             "  • CHANGE lines: old=[current lines], new=[replacements].\n"
-            "  • INSERT: old=[the line you insert AFTER], new=[that same line, then your "
-            "new line(s)].\n"
+            "  • INSERT new code: give start_line = the line to add AFTER, new=[your new "
+            "line(s)], and leave old empty.\n"
             "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
             "Multiple hunks edit several spots in one call. Parse-checked; a rejection "
             "says exactly what to fix."),
@@ -510,10 +510,24 @@ def _do_edit(args: dict, ctx: dict) -> str:
         old_list = _as_list(h.get("old"))
         new_list = _as_list(h.get("new"))
         if not any(o.strip() for o in old_list):
-            return (f"✗ edit_file hunk #{i}: `old` is empty. Put the EXACT existing "
-                    f"line(s) to change/anchor on here (copy them from read_file). To "
-                    f"insert, set `old` to the line you're inserting after and `new` to "
-                    f"that line plus your additions.")
+            # PURE INSERT ergonomics: the model naturally leaves `old` empty when
+            # ADDING new code (a method/function) and gives start_line + new. Don't
+            # reject — treat it as "insert `new` AFTER start_line" by anchoring on
+            # that existing line (keep it, then add). (f327: 5× 'old is empty'.)
+            sl_raw = h.get("start_line")
+            try:
+                sl_i = int(sl_raw)
+            except (TypeError, ValueError):
+                sl_i = 0
+            if new_list and 1 <= sl_i <= len(cur_lines):
+                anchor = cur_lines[sl_i - 1]
+                old_list = [anchor]
+                new_list = [anchor] + new_list   # keep the anchor, add new below it
+            else:
+                return (f"✗ edit_file hunk #{i}: `old` is empty. To CHANGE code, put the "
+                        f"exact existing line(s) in `old`. To INSERT new code, give "
+                        f"`start_line` = the line you want to add AFTER and put the new "
+                        f"line(s) in `new` (leave `old` empty).")
         sl = h.get("start_line")
         if sl is None:
             # No number given — resolve from content; reject if it's not unique.
