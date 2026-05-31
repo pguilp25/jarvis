@@ -9206,6 +9206,33 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         if _dep_text:
             for fp in referenced_files_outside_scope(_dep_text, _scope, _proj_files):
                 _add_req(fp, require_sibling=True)
+        # (c2) SOURCE-IMPORT CLOSURE (planning #6): for each in-scope SOURCE file,
+        # parse ITS OWN imports and pull the imported PROJECT files into scope.
+        # Every other signal is TEST-driven (b) or tool-surfaced (c); NONE close
+        # over a source file's own deps — so a module an edited file imports (and
+        # must change with it) was silently missed (openlibrary-dbbd9d: a scoped
+        # file imports utils.py, utils.py also needed the change, but no test
+        # imported it and no [DEPENDENCY:] surfaced it → never in scope).
+        # modules_to_files resolves ONLY against project files, so stdlib/3rd-party
+        # drop out; a direct source import is a strong signal, so no sibling gate.
+        for _sf in list(_scope):
+            if not _sf.endswith(".py") or "test" in _sf.lower():
+                continue
+            _sfsrc = _read_proj(_sf)
+            if not _sfsrc:
+                continue
+            try:
+                _cands = set(imported_modules(_sfsrc))
+                # `from pkg import sub` may import a SUBMODULE, not a symbol —
+                # try pkg.sub so it resolves to pkg/sub.py (the dbbd9d shape).
+                for _mod, _syms in imported_symbols(_sfsrc).items():
+                    for _s in _syms:
+                        _cands.add(f"{_mod}.{_s}")
+                for _hf in modules_to_files(_cands, _resolve_pool):
+                    if _hf != _sf and "test" not in _hf.lower():
+                        _add_req(_hf)
+            except Exception:
+                continue
         # (d) #4 lint + attach gaps (cap so the note stays readable). CONTRACT
         # gaps (a test imports a symbol that doesn't exist yet) go FIRST and
         # uncapped — they're the hardest-to-recover-from miss (ImportError = 0
