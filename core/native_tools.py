@@ -24,11 +24,12 @@ exact executor so behaviour is identical:
 
 (The coder has no [RUN:] — that's planner/reviewer-only, so neither does this.)
 
-INDENT n| FORMAT: read_file renders each line as `LINENO:INDENT|content` (the same
-prefix view the text coder sees), so the model reads indentation as a COUNT, not by
-eyeballing spaces. replace_lines' new_content uses the same `INDENT|code` convention
-(reused indent-expander turns `8|x` → 8 spaces + `x`); raw indentation also passes
-through verbatim. This is the weak-model indent-reliability fix, carried into native.
+INDENT FORMAT (ckpt 88): read_file renders each line as `LINENO: <code with REAL
+leading spaces>` and edit_file's old/new are real code lines — ONE format across read
+and write, so getting indentation right is a COPY job, not a count→spaces conversion.
+(Earlier the read used a `LINENO:INDENT|count` view aligned with replace_lines' `8|x`
+write form; edit_file copies verbatim, so the whole native path moved to real
+whitespace. The applier still accepts `N|` counts too, for back-compat.)
 
 Edit tool = `replace_lines(path, start, end, new_content)` (line-range, NOT the
 anchor-based [edit] diff): native models produce clean structured args, and it
@@ -199,9 +200,9 @@ CODER_TOOLS = [
             "SECONDARY edit tool — prefer edit_file. Use ONLY for a clean whole-range "
             "swap where copying the old lines is pointless. Replace lines "
             "start_line..end_line (inclusive, 1-based, from your most recent read_file) "
-            "of `path` with new_content. Each new_content line is `INDENT|code` (INDENT "
-            "= leading-space count from the read_file view) or real whitespace; NO "
-            "LINENO prefix. To INSERT after line N, set start_line=end_line=N and make "
+            "of `path` with new_content. Write new_content with REAL leading spaces, "
+            "exactly like the read_file view shows them (NO `LINENO:` prefix, NO `N|` "
+            "count). To INSERT after line N, set start_line=end_line=N and make "
             "new_content the current line N followed by your new line(s). Line numbers "
             "go stale after any edit — that's why edit_file (content-matched) is safer."),
         "parameters": {"type": "object", "properties": {
