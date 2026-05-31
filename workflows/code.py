@@ -8786,16 +8786,23 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             "Write tags, wait, then proceed.\n"
         )
 
-    # Per-draft file votes feed the DETERMINISTIC post-plan scope backstop below
-    # (union/majority). We deliberately do NOT inject a scope block into the
-    # merger prompt: that (ckpt-22/23) made the prompt too heavy and degraded
-    # glm-5.1's structured-plan emission → empty plans → bad salvage path →
-    # django/pylint regressions. Keep the merger prompt LEAN; surface scope via
-    # the lightweight post-plan note instead.
+    # Per-draft file votes feed the post-plan scope backstop AND a LEAN consensus
+    # line into the merger prompt. (History: a HEAVY scope block — ckpt-22/23 —
+    # degraded glm-5.1's plan emission → empty plans; so this is ONE short line,
+    # not a block: just the files ≥2 drafts independently agreed on, so the merger
+    # can't silently drop a file all the drafts named. Appended last for recency.)
     from core.plan_scope import union_file_scopes, majority_files
     _per_draft = [_extract_files_from_plan(p.get("answer", ""), files or [])
                   for p in plans]
     _scope_union, _scope_votes = union_file_scopes(_per_draft)
+    _consensus = majority_files(_scope_votes, len(plans))
+    _consensus_line = ""
+    if _consensus:
+        _consensus_line = (
+            "\n\nCONSENSUS FILES — ≥2 of the candidate plans independently said these "
+            "need changing:\n  " + ", ".join(_consensus[:12]) +
+            "\nYour merged plan MUST cover each of these (one STEP each) UNLESS you can "
+            "say in one line why it's wrong — do not silently drop a file the drafts agreed on.")
 
     merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
         n_plans=len(plans),
@@ -8804,7 +8811,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         verify_block=verify_block,
         all_plans_text=all_plans_text[:30000],
         preloaded_research=preloaded_research,
-    )
+    ) + _consensus_line
     merger_result = await _call_with_tools(
         "mistral/large", merge_prompt, project_root,
         detailed_map=detailed_map, purpose_map=purpose_map,
@@ -8818,14 +8825,11 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         read_only_role=True,
         allow_run=True)
 
-    if not merger_result.get("answer"):
-        _wlog.phase_warn("Merger returned EMPTY — falling back to longest Layer-1 plan")
-        best = max(plans, key=lambda p: len(p["answer"]))
-        _wlog.save_final_plan(best["answer"], merger_model=f"FALLBACK:{best['model']}")
-        _wlog.phase_end("plan", mode_label, fallback=True, chars=len(best["answer"]))
-        return best["answer"], research_cache
-
-    best_plan = merger_result["answer"]
+    # NO DRAFT BACKUP (user directive): the merger is the SOLE author. An empty
+    # merger does NOT fall back to a raw Layer-1 draft — it flows to the
+    # forced-commit RETRY below (re-prompt the merger to commit a plan). If that
+    # also fails, we fail loudly rather than ship a draft.
+    best_plan = merger_result.get("answer") or ""
     # Strip leftover tool-loop signal tags. The tool loop strips fully-formed
     # two-tag signals before returning, but a bare half (e.g. an isolated
     # `[CONFIRM_DONE]` produced after the model already stopped) can still
@@ -8950,73 +8954,34 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # present but THIN stub (astropy-8872: a 174-char "### STEP" plan starved
     # the coder, which then reasoned in circles and emitted no [edit] at all).
     if (not has_plan_block and not has_step_header) or len(_merger_body) < MIN_PLAN_CHARS:
-        warn(
-            f"  Merger plan is unusable ({len(_merger_body):,} chars of actionable "
-            f"content, structured={has_plan_block or has_step_header}). Selecting "
-            f"the richest plan from all layers instead."
-        )
-        _wlog.phase_warn(
-            "Merger plan unusable — selecting richest plan across layers",
-            merger_chars=len(_merger_body),
-        )
-        # SUBSTANCE OVER STRUCTURE (v15 fix, astropy-8872): the old code scored
-        # candidates by structure markers ONLY and tie-broke by length, so a
-        # 174-char plan with a bare `### STEP` header beat a 2,939-char rich
-        # raw-prose Layer-1 plan. Now we rank by ACTIONABLE CONTENT across the
-        # raw Layer-1 plans plus the merger output: strip thinking, drop
-        # anything below the usefulness floor, and prefer the longest body with
-        # a structure bonus as a tie-breaker. (Layer 2 was removed 2026-05-27,
-        # so `improved` no longer exists — the merger IS the improver now.)
-        # SALVAGE: a reasoning model can derive the whole (correct) plan inside
-        # <think> and emit a thin visible body — _strip_think would then zero it
-        # and the run would discard a correct plan (pylint-4551, where the merger
-        # named the right files only inside its thinking). Recover it and let it
-        # compete as a ranking candidate.
+        # NO DRAFT BACKUP (user directive): the forced-commit retry above already
+        # gave the merger a clean second attempt. We do NOT substitute a raw
+        # Layer-1 draft. Last resort = recover the MERGER'S OWN reasoning (it may
+        # have derived the plan inside <think> and emitted a thin visible body —
+        # that's still the merger's work, not a draft). If even that is unusable,
+        # FAIL loudly rather than ship a degraded plan.
         from core.tool_call import _salvage_plan_from_think
-        _merger_salvaged = _salvage_plan_from_think(best_plan)
-        pool = (list(plans)
-                + [{"model": "merger", "answer": best_plan},
-                   {"model": "merger(salvaged-from-think)", "answer": _merger_salvaged}])
-        ranked = []
-        for d in pool:
-            # rank by ACTIONABLE content (no thinking, no tool directives) so a
-            # think dump or a directive flood can't win on raw volume.
-            body = _actionable(d.get("answer") or "")
-            if len(body) < MIN_PLAN_CHARS:
-                continue
-            bonus = 0
-            if "=== PLAN ===" in body:
-                bonus += 600
-            if re.search(r"###\s*STEP\s*\d+", body, re.IGNORECASE):
-                bonus += 600
-            if "## IMPLEMENTATION STEPS" in body.upper():
-                bonus += 300
-            ranked.append((len(body) + bonus, len(body), bonus, body, d))
-        if ranked:
-            ranked.sort(key=lambda t: -t[0])
-            _, picked_chars, picked_bonus, picked_body, picked = ranked[0]
-            warn(
-                f"  Using richest plan from {picked['model']} "
-                f"({picked_chars:,} chars, structure_bonus={picked_bonus})"
-            )
-            best_plan = picked_body
+        _salv = _salvage_plan_from_think(best_plan) or _strip_think(best_plan)
+        if len(_actionable(_salv)) >= MIN_PLAN_CHARS:
+            warn(f"  Merger visible plan thin — recovered the merger's OWN reasoning "
+                 f"({len(_salv):,} chars). (No draft fallback.)")
+            _wlog.phase_warn("Merger plan thin — using merger's own salvaged reasoning",
+                             merger_chars=len(_merger_body))
+            best_plan = _salv
+            for _pat in (r"\[DONE\]", r"\[CONFIRM_DONE\]",
+                         r"\[FORCE\s+DONE\]", r"\[CONFIRM_FORCE_DONE\]",
+                         r"\[STOP\]", r"\[CONFIRM_STOP\]",
+                         r"\[CONTINUE\]", r"\[CONFIRM_CONTINUE\]"):
+                best_plan = re.sub(_pat, "", best_plan, flags=re.IGNORECASE)
+            best_plan = best_plan.rstrip()
         else:
-            # Nothing clears the floor — prefer the salvaged merger reasoning,
-            # else the merger output minus thinking (least-bad over a stub).
-            stripped = _merger_salvaged or _strip_think(best_plan)
-            warn(
-                f"  No plan clears the {MIN_PLAN_CHARS}-char floor; passing "
-                f"{'salvaged merger reasoning' if _merger_salvaged else 'merger output minus thinking'} "
-                f"to coder ({len(stripped):,} chars)."
-            )
-            best_plan = stripped or best_plan
-        # Strip stray signal tags on whatever we chose.
-        for _pat in (r"\[DONE\]", r"\[CONFIRM_DONE\]",
-                     r"\[FORCE\s+DONE\]", r"\[CONFIRM_FORCE_DONE\]",
-                     r"\[STOP\]", r"\[CONFIRM_STOP\]",
-                     r"\[CONTINUE\]", r"\[CONFIRM_CONTINUE\]"):
-            best_plan = re.sub(_pat, "", best_plan, flags=re.IGNORECASE)
-        best_plan = best_plan.rstrip()
+            _wlog.phase_warn(
+                "Merger produced NO usable plan after the forced-commit retry — "
+                "FAILING (no raw-draft backup, per config).",
+                merger_chars=len(_merger_body))
+            raise RuntimeError(
+                "planner: merger produced no usable plan after retry; no draft "
+                "backup (by design). Instance fails rather than ship a degraded plan.")
 
     # ── PLAN SANITIZE (bug-hunt #6) ──────────────────────────────────────
     # A plan must DESCRIBE the change in prose, never carry live protocol
