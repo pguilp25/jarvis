@@ -485,7 +485,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             return [str(x) for x in v]
         return str(v).split("\n")
 
-    edit_lines = []
+    resolved = []   # (start_line, old_list, new_list) per hunk, validated
     for i, h in enumerate(hunks, 1):
         if not isinstance(h, dict):
             return (f"✗ edit_file hunk #{i} is not an object — each hunk must be "
@@ -531,6 +531,16 @@ def _do_edit(args: dict, ctx: dict) -> str:
                         f"(is the code you're changing actually defined here?) — "
                         f"[SEARCH] the symbol to find its real file, then edit THAT. "
                         f"Otherwise re-read {path} and copy `old` verbatim.")
+        resolved.append((sl, old_list, new_list))
+
+    # The numbered [edit] applier requires lines top-to-bottom in FILE order.
+    # The model may send hunks in any order, so sort by start_line ourselves
+    # (stable, so same-line hunks keep their given order) instead of rejecting
+    # with "edit lines out of order" and making it retry — that retry-loop is a
+    # top cause of round pile-up.
+    resolved.sort(key=lambda t: t[0])
+    edit_lines = []
+    for sl, old_list, new_list in resolved:
         for j, o in enumerate(old_list):
             edit_lines.append(f"{sl + j}:-{o}")
         for nw in new_list:

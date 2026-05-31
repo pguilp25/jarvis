@@ -845,3 +845,18 @@ def test_edit_file_start_line_disambiguates_repeated_old():
     lines = ctx["file_contents"]["m.py"].split("\n")
     assert lines[2].strip() == "return False"   # first occurrence untouched
     assert lines[7].strip() == "return None"     # second occurrence changed
+
+
+def test_edit_file_sorts_out_of_order_hunks():
+    # The numbered [edit] applier needs file order; the model may send hunks in
+    # any order. _do_edit must sort them (not reject 'out of order' → retry loop).
+    src = "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None,
+           "viewed_versions": {}, "project_root": ".", "files_changed": set()}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 5, "old": ["e = 5"], "new": ["e = 50"]},   # later line FIRST
+        {"start_line": 1, "old": ["a = 1"], "new": ["a = 10"]},   # earlier line SECOND
+    ]}, ctx)
+    assert out.startswith("✓"), out
+    lines = ctx["file_contents"]["m.py"].split("\n")
+    assert lines[0] == "a = 10" and lines[4] == "e = 50"
