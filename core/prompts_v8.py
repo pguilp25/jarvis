@@ -1039,6 +1039,23 @@ runtime needs the closing fence to extract.
       Right: STEP 1: Fix the off-by-one slice. STEP 2: Add the
              None guard (or out-of-scope, see EDGE CASES).
              → Each STEP fails or passes independently.
+    - EVERY STEP MUST LEAVE THE CODE RUNNABLE. The coder applies
+      steps one at a time and each is parse-/NameError-checked, so a
+      step that leaves the code broken (calls a symbol it just
+      deleted, uses a name not yet defined) CANNOT pass — it is not
+      "independently-failable", it is impossible. The classic trap:
+      REMOVING a symbol and REWIRING its callers are ONE atomic unit,
+      never separate steps.
+        Wrong: STEP 1 "remove helper `_is_fqcn`"; STEP 3 "update its
+               caller". → After STEP 1 the caller calls a deleted
+               function → NameError → STEP 1 can never land.
+        Right: order changes so every intermediate state runs —
+               ADD the replacement → REWIRE all callers to it →
+               REMOVE the old symbol LAST; or do remove+rewire in ONE
+               step. Before a step that DELETES or RENAMES a symbol,
+               account for EVERY reference to it (use [REFS:]/[SEARCH:])
+               and make sure they're handled in this step or an
+               EARLIER one — never a later one.
     - SELF-CONTAINED: don't write "the function from STEP 1" —
       name the function, file, line. The coder may see only one
       STEP at a time.
