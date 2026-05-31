@@ -447,6 +447,23 @@ def _locate_block(cur_lines: list, old_list: list) -> "tuple[int | None, int]":
     return (hits[0] if hits else None), len(hits)
 
 
+def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
+    """`old` matched nowhere in the file. Two very different causes — name the
+    likely one. If we've already edited this file, the model is almost certainly
+    copying `old` from a STALE earlier read (the file moved under it); telling it
+    'wrong file' would wrongly send it away from the right file. If we HAVEN'T
+    touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug)."""
+    if path in ctx.get("files_changed", set()):
+        return (f"✗ edit_file hunk #{i}: the `old` line(s) aren't in {path} — but you've "
+                f"already EDITED {path}, so your `old` is STALE (copied from a read taken "
+                f"BEFORE that edit). read_file {path} AGAIN and copy `old` from the CURRENT "
+                f"view — do not reuse line text from an earlier read in this conversation.")
+    return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Likely the WRONG "
+            f"FILE — is the code you're changing actually defined here? [SEARCH] the symbol "
+            f"to find the file it's defined in, then edit THAT. Otherwise re-read {path} and "
+            f"copy `old` verbatim.")
+
+
 def _do_edit(args: dict, ctx: dict) -> str:
     """CONTENT-ANCHORED edit (the primary edit tool), expressed as JSON `hunks` —
     each {start_line, old:[lines], new:[lines]}. `old` = the EXACT existing lines
@@ -502,9 +519,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # No number given — resolve from content; reject if it's not unique.
             sl, n_hits = _locate_block(cur_lines, old_list)
             if n_hits == 0:
-                return (f"✗ edit_file hunk #{i}: the `old` text wasn't found in {path} "
-                        f"— copy it VERBATIM from read_file (exact text), or give "
-                        f"`start_line`.")
+                return _old_not_found_msg(i, path, ctx)
             if n_hits > 1:
                 return (f"✗ edit_file hunk #{i}: `old` appears {n_hits} times in {path} "
                         f"— add `start_line` (the read_file line number where this "
@@ -526,11 +541,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # in dataclasses.py when the class is in _collection_finder.py.
             _, _n = _locate_block(cur_lines, old_list)
             if _n == 0:
-                return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path} — "
-                        f"so this edit can't apply. Most likely you have the WRONG FILE "
-                        f"(is the code you're changing actually defined here?) — "
-                        f"[SEARCH] the symbol to find its real file, then edit THAT. "
-                        f"Otherwise re-read {path} and copy `old` verbatim.")
+                return _old_not_found_msg(i, path, ctx)
         resolved.append((sl, old_list, new_list))
 
     # The numbered [edit] applier requires lines top-to-bottom in FILE order.
@@ -1084,6 +1095,24 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 _fail_counts.pop((name, raw_args), None)   # success clears the streak
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
+            # STALE-READ guard: once an edit LANDS, any earlier read_file view of
+            # that file still sitting in the history is outdated — and the coder
+            # was copying `old` from those stale views (f327: 12 'old not found'
+            # rejects after 3 edits applied). Mark them so it re-reads instead.
+            if (name in ("edit_file", "replace_lines")
+                    and isinstance(result_str, str) and result_str.startswith("✓")):
+                _ep = (args.get("path") or "") if isinstance(args, dict) else ""
+                if _ep:
+                    for _m in messages[:-1]:
+                        _c = _m.get("content")
+                        if (_m.get("role") == "tool" and isinstance(_c, str)
+                                and "=== Code:" in _c and _ep in _c
+                                and "⟪STALE" not in _c):
+                            _m["content"] = (
+                                f"⟪STALE — {_ep} was EDITED after this read; its line "
+                                f"numbers and content below are OUTDATED. Do NOT copy "
+                                f"`old` from here — read_file {_ep} again for the current "
+                                f"view.⟫\n" + _c)
         if _stuck:
             reason = "stuck-repeating"
             break

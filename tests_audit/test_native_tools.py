@@ -860,3 +860,23 @@ def test_edit_file_sorts_out_of_order_hunks():
     assert out.startswith("✓"), out
     lines = ctx["file_contents"]["m.py"].split("\n")
     assert lines[0] == "a = 10" and lines[4] == "e = 50"
+
+
+def test_edit_file_old_not_found_message_is_stale_aware():
+    # `old` matches nowhere: if we already edited the file, it's a STALE read
+    # (re-read), NOT the wrong file. Misnaming it 'wrong file' sent the coder away
+    # from the correct file (f327: 12 such rejects after edits landed).
+    src = "x = 1\ny = 2\n"
+    base = lambda changed: {"file_contents": {"m.py": src}, "sandbox": None,
+                            "viewed_versions": {}, "project_root": ".",
+                            "files_changed": ({"m.py"} if changed else set())}
+    # already edited → STALE guidance, re-read
+    r_edited = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 1, "old": ["this line is not present"], "new": ["z = 9"]}]},
+        base(True))
+    assert r_edited.startswith("✗") and "STALE" in r_edited and "WRONG FILE" not in r_edited
+    # never edited → WRONG-FILE guidance, search for the symbol
+    r_fresh = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 1, "old": ["this line is not present"], "new": ["z = 9"]}]},
+        base(False))
+    assert r_fresh.startswith("✗") and "WRONG FILE" in r_fresh
