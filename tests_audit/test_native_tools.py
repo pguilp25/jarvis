@@ -866,23 +866,44 @@ def test_edit_file_sorts_out_of_order_hunks():
 
 
 def test_edit_file_old_not_found_message_is_stale_aware():
-    # `old` matches nowhere: if we already edited the file, it's a STALE read
-    # (re-read), NOT the wrong file. Misnaming it 'wrong file' sent the coder away
-    # from the correct file (f327: 12 such rejects after edits landed).
+    # `old` matches nowhere: if we already edited the file, the `old` is from a view
+    # taken BEFORE that edit — NOT the wrong file. Trust-the-view (ckpt 111): the
+    # guidance must point the coder at the in-context DIFF / a targeted range, and
+    # must NOT tell it to re-read the whole file (that re-read is what blew f631's
+    # context window). It must still be distinguishable from the wrong-file case.
     src = "x = 1\ny = 2\n"
     base = lambda changed: {"file_contents": {"m.py": src}, "sandbox": None,
                             "viewed_versions": {}, "project_root": ".",
                             "files_changed": ({"m.py"} if changed else set())}
-    # already edited → STALE guidance, re-read
+    # already edited → stale-view guidance pointing at the diff, NOT a full re-read
     r_edited = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 1, "old": ["this line is not present"], "new": ["z = 9"]}]},
         base(True))
-    assert r_edited.startswith("✗") and "STALE" in r_edited and "WRONG FILE" not in r_edited
-    # never edited → WRONG-FILE guidance, search for the symbol
+    assert r_edited.startswith("✗")
+    assert "EDITED" in r_edited and "WRONG FILE" not in r_edited
+    assert "diff" in r_edited.lower()                       # points at the in-context diff
+    assert "stale" in r_edited.lower()                      # still flags the stale copy
+    assert "read_file m.py with" in r_edited                # only a targeted range, if needed
+    # never edited → WRONG-FILE guidance + copy-exactly / range; never "re-read whole"
     r_fresh = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 1, "old": ["this line is not present"], "new": ["z = 9"]}]},
         base(False))
     assert r_fresh.startswith("✗") and "WRONG FILE" in r_fresh
+    assert "range" in r_fresh.lower()                       # offers a targeted range
+    assert "re-read" not in r_fresh.lower()                 # never tells it to re-read the file
+
+
+def test_read_short_circuit_escalates_on_repeat():
+    # A full re-read of an in-context file is declined with ℹ; repeating it must
+    # escalate (no silent spin to the round budget).
+    ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(),
+           "view_at": {"m.py": "step 1 (loaded at the start)"}}
+    r1 = _disp("read_file", {"path": "m.py"}, ctx)
+    assert r1.startswith("ℹ") and "⚠" not in r1                # first decline: gentle
+    r2 = _disp("read_file", {"path": "m.py"}, ctx)
+    assert r2.startswith("ℹ") and "⚠" in r2 and "STOP" in r2   # second: escalated
+    assert not r2.startswith("✗")                              # still inert to the fail-counter
 
 
 def test_edit_file_pure_insert_with_empty_old():
@@ -934,3 +955,58 @@ def test_orphaned_block_reject_names_the_header():
     assert out.startswith("✗"), out
     assert "DELETED the body" in out and "try" in out
     assert ctx["file_contents"]["m.py"] == src
+
+
+# ── trust-the-view: short-circuit redundant re-reads + stamp diffs with WHEN ──
+# (ckpt 112) f631 re-read a 900-line file 5× → blew the 131072-token context
+# window mid-step → the method-creation step aborted and the def was lost.
+
+def test_read_file_short_circuits_a_full_reread():
+    # A full read records the view; a SECOND full read is refused (not re-dumped),
+    # but a targeted RANGE read is still allowed.
+    ctx, rel, root = _mk_ctx()
+    try:
+        first = _disp("read_file", {"path": rel}, ctx)
+        assert "greet" in first                              # real content returned
+        assert rel in ctx.get("view_at", {})                # view recorded
+        second = _disp("read_file", {"path": rel}, ctx)
+        assert second.startswith("ℹ") and "ALREADY in your context" in second
+        assert "def greet" not in second                    # did NOT re-dump the file
+        rng = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 3}, ctx)
+        assert not rng.startswith("ℹ")                       # range read still works
+    finally:
+        _cleanup(root)
+
+
+def test_read_file_short_circuit_after_edit_points_to_diff():
+    # After an edit, the file is in context (diff + unchanged remainder); a full
+    # re-read is refused and points at the edit's diff — never a re-read.
+    src = "a = 1\nb = 2\nc = 3\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "round": 4, "step_num": 2}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 2, "old": ["b = 2"], "new": ["b = 20"]}]}, ctx)
+    assert out.startswith("✓") and "step 2, round 4" in out  # diff stamped with WHEN
+    assert "m.py" in ctx.get("view_at", {})
+    r = _disp("read_file", {"path": "m.py"}, ctx)
+    assert r.startswith("ℹ") and "ALREADY in your context" in r
+    assert "diff after your edit" in r and "step 2, round 4" in r
+
+
+def test_seeded_view_at_short_circuits_injected_target():
+    # The caller seeds view_at for files injected into the prompt → a redundant
+    # full read of an injected target is short-circuited.
+    ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(),
+           "view_at": {"m.py": "step 1 (loaded at the start)"}}
+    r = _disp("read_file", {"path": "m.py"}, ctx)
+    assert r.startswith("ℹ") and "step 1 (loaded at the start)" in r
+
+
+def test_edit_diff_stamped_with_round_when_no_step():
+    src = "a = 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "round": 7}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 1, "old": ["a = 1"], "new": ["a = 2"]}]}, ctx)
+    assert out.startswith("✓") and "round 7" in out and "step" not in out.split("\n")[0]

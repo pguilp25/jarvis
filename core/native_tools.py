@@ -86,8 +86,13 @@ CODER_TOOLS = [
             "returned as `LINENO:INDENT|content` — LINENO is the 1-based line number, "
             "INDENT is the leading-space COUNT, then the code. A huge file comes back "
             "as a skeleton (top-level defs); pass start_line/end_line to expand a "
-            "region. ALWAYS read a file right before you edit it so your replace_lines "
-            "line numbers are current."),
+            "region. TRUST YOUR VIEW: a file you've already been shown — the step's "
+            "injected file(s), one you read, or one you edited (its diff IS the live "
+            "state) — is already in your context; do NOT re-read it (a full re-read is "
+            "refused — it wastes context and risks acting on a stale copy). edit_file "
+            "matches by CONTENT, so your line numbers never go stale. Use this only for "
+            "a file you have NOT seen, or pass start_line/end_line for a SPECIFIC region "
+            "you have not seen since your last edit."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative file path"},
             "start_line": {"type": "integer", "description": "first line, 1-based (optional)"},
@@ -272,6 +277,28 @@ if _TRACE_MODE:
 
 
 # ── Tool dispatch ────────────────────────────────────────────────────────────
+def _view_stamp(ctx: dict) -> str:
+    """A human 'when' for a file view/edit — 'step S, round R' (round alone if no
+    step is set). Stamped onto every diff and view so the coder can ORDER multiple
+    views of the same file and know which one is current (its latest)."""
+    r = ctx.get("round")
+    s = ctx.get("step_num")
+    if s is not None and r is not None:
+        return f"step {s}, round {r}"
+    if r is not None:
+        return f"round {r}"
+    return "this step"
+
+
+def _note_view(ctx: dict, path: str) -> None:
+    """Record that the coder now has {path}'s CURRENT full state in its context —
+    set by a full read_file and by every applied edit (the edit's diff + the
+    unchanged remainder = a current view). Used to short-circuit redundant
+    full re-reads (the #1 context-blowup + thrash cause: f631 re-read a 900-line
+    file 5× and blew the 131072-token window)."""
+    ctx.setdefault("view_at", {})[path] = _view_stamp(ctx)
+
+
 async def _do_read(args: dict, ctx: dict) -> str:
     # Reuse the text coder's [CODE:]/[VIEW:] executor: skeleton for huge files,
     # range expansion, the `LINENO:INDENT|content` prefix view, AND recording
@@ -287,6 +314,34 @@ async def _do_read(args: dict, ctx: dict) -> str:
         return ("✗ read_file: give BOTH start_line and end_line for a range, or "
                 "NEITHER to read the whole file (you provided only "
                 f"{'start_line' if s is not None else 'end_line'}).")
+    # TRUST-THE-VIEW short-circuit: a FULL re-read (no range) of a file already in
+    # the coder's context just re-stacks the whole file — the dominant context-
+    # exhaustion + round-thrash cause (f631: 5 full re-reads of configfiles.py →
+    # 131072-token blow-out → the create-method step aborted mid-edit). If we've
+    # already shown this file (its initial injected block, a prior full read, or
+    # the diff after an edit), DON'T re-dump it: point to the view it has and
+    # offer a targeted range for any part it genuinely hasn't seen.
+    if s is None and e is None and path in ctx.get("view_at", {}):
+        _when = ctx["view_at"][path]
+        _edited = path in ctx.get("files_changed", set())
+        _src = ("the diff after your edit" if _edited else "your read of it")
+        # Soft progress pressure: a full re-read returns this ℹ (not a ✗, so it
+        # doesn't trip the reject loop-breaker) — but if the coder keeps asking,
+        # escalate so it can't spin full-reads silently to the round budget.
+        _rc = ctx.setdefault("_reread_count", {})
+        _rc[path] = _rc.get(path, 0) + 1
+        _extra = ("" if _rc[path] < 2 else
+                  f" ⚠ You have now requested a FULL read of {path} {_rc[path]}× and I "
+                  f"keep declining — STOP. Either edit from the view you have, or request a "
+                  f"SPECIFIC start_line/end_line range. A full re-read will never return.")
+        return (
+            f"ℹ {path} is ALREADY in your context — last shown at {_when} ({_src}). "
+            f"That IS its current, live state; TRUST it. I am NOT re-reading the whole "
+            f"file: re-reading what you already have wastes your context window and "
+            f"risks you acting on an out-of-date copy. PROCEED — make your edit from the "
+            f"view you have. If you need a SPECIFIC part of {path} you have NOT seen "
+            f"since {_when}, call read_file with start_line AND end_line for just those "
+            f"lines (not the whole file)." + _extra)
     if s is not None and e is not None:
         try:
             s_i, e_i = int(s), int(e)
@@ -333,6 +388,11 @@ async def _do_read(args: dict, ctx: dict) -> str:
         cur = sb.load_file(path)
         if cur is not None:
             ctx["file_contents"][path] = cur
+    # A successful FULL read means the coder now holds the whole current file —
+    # record it so a later full re-read is short-circuited. (A RANGE read shows
+    # only a slice, so it must NOT mark the file as fully in-context.)
+    if s is None and e is None and isinstance(out, str) and not out.startswith("✗"):
+        _note_view(ctx, path)
     return out
 
 
@@ -449,17 +509,21 @@ def _do_replace(args: dict, ctx: dict) -> str:
                         f"sandbox for {path} ({str(ex)[:120]}). The change did not "
                         f"persist; retry.")
         ctx["file_contents"][path] = result[path]
-        # The edit shifted line numbers; the old read snapshot is now stale.
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
+        _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
-        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced. Below is {path} AFTER your "
-                f"edit — its CURRENT, live state. Copy your next edit's `old` line(s) from "
-                f"here (matched by content, not numbers, so your view can't be stale); do "
-                f"NOT read_file again unless you need a part of {path} not shown below.\n"
+        _when = _view_stamp(ctx)
+        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — change made at {_when}. "
+                f"The diff below is the ONLY change to {path} since your last view; "
+                f"EVERYTHING ELSE in {path} is UNCHANGED. Your earlier view + this diff = "
+                f"its CURRENT, live state — TRUST it, your view is NOT stale. Do NOT "
+                f"read_file {path} again; copy your next edit's `old` line(s) from this diff "
+                f"or your earlier view. Only for a part of {path} you have NOT seen, read it "
+                f"with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
     # _match_fp can suffix-resolve it to another key — mutating file_contents
@@ -478,6 +542,7 @@ def _do_replace(args: dict, ctx: dict) -> str:
             if isinstance(ctx.get("viewed_versions"), dict):
                 ctx["viewed_versions"][k] = v
             ctx.setdefault("files_changed", set()).add(k)
+            _note_view(ctx, k)   # keep view_at in step with the suffix-resolved key
         _keys = ", ".join(_changed)
         return (f"✓ Applied (your path '{path}' resolved to {_keys}). Use that exact "
                 f"path for further edits so line numbers anchor cleanly.")
@@ -508,14 +573,20 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
     'wrong file' would wrongly send it away from the right file. If we HAVEN'T
     touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug)."""
     if path in ctx.get("files_changed", set()):
-        return (f"✗ edit_file hunk #{i}: the `old` line(s) aren't in {path} — but you've "
-                f"already EDITED {path}, so your `old` is STALE (copied from a read taken "
-                f"BEFORE that edit). read_file {path} AGAIN and copy `old` from the CURRENT "
-                f"view — do not reuse line text from an earlier read in this conversation.")
-    return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Likely the WRONG "
-            f"FILE — is the code you're changing actually defined here? [SEARCH] the symbol "
-            f"to find the file it's defined in, then edit THAT. Otherwise re-read {path} and "
-            f"copy `old` verbatim.")
+        _when = ctx.get("view_at", {}).get(path, "your last edit")
+        return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
+                f"You already EDITED {path} ({_when}), so this `old` was copied from a view "
+                f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: if the "
+                f"line is in the region you changed, copy `old` from the LATEST diff of "
+                f"{path} in your context above; if it's in a part you have NOT seen since "
+                f"the edit, read_file {path} with that exact start_line/end_line range. Do "
+                f"not reuse stale line text from an earlier full read.")
+    return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Two causes: "
+            f"(1) WRONG FILE — the code may be defined elsewhere; [SEARCH] the symbol to find "
+            f"its real file, then edit THAT. (2) Your `old` doesn't match {path}'s text — copy "
+            f"it EXACTLY (character-for-character) from the view of {path} you already have. If "
+            f"you need a region of {path} you have NOT seen, read_file it with a start_line/"
+            f"end_line range — don't re-dump the whole file.")
 
 
 def _do_edit(args: dict, ctx: dict) -> str:
@@ -659,6 +730,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
+        _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         # Hand back the before/after diff with the file's CURRENT line numbers, so
         # the coder sees exactly what changed AND has fresh, correct numbers to
@@ -667,11 +739,16 @@ def _do_edit(args: dict, ctx: dict) -> str:
         # blind). The coder no longer needs read_file between consecutive edits.
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
-        return (f"✓ Applied {len(hunks)} hunk(s) to {path}. Below is {path} AFTER your edit "
-                f"— its CURRENT, live state (your `old` was matched by CONTENT, so line "
-                f"numbers don't matter and your view can't be stale). For your next change "
-                f"to this file, copy the exact `old` line(s) from here; do NOT read_file "
-                f"again unless you need a part of {path} not shown below.\n"
+        _when = _view_stamp(ctx)
+        return (f"✓ Applied {len(hunks)} hunk(s) to {path} — change made at {_when}. "
+                f"The diff below is the ONLY change to {path} since your last view of it; "
+                f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
+                f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
+                f"(your `old` was matched by CONTENT, so line numbers never mattered). Do "
+                f"NOT read_file {path} again. For your next change here, copy the exact "
+                f"`old` line(s) from this diff (changed region) or from your earlier view "
+                f"(unchanged region); only if you need a part of {path} you have NOT seen, "
+                f"read_file it with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).
@@ -688,6 +765,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             if isinstance(ctx.get("viewed_versions"), dict):
                 ctx["viewed_versions"][k] = v
             ctx.setdefault("files_changed", set()).add(k)
+            _note_view(ctx, k)   # keep view_at in step with the suffix-resolved key
         return (f"✓ Applied (your path '{path}' resolved to {', '.join(_changed)}). "
                 f"Use that exact path for further edits.")
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
@@ -759,6 +837,7 @@ def _do_create(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = produced
         ctx.setdefault("files_changed", set()).add(path)
+        _note_view(ctx, path)   # you just wrote it — it's in context, no read needed
         n = produced.count("\n") + 1
         return f"✓ Created: {path} ({n} lines)."
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
@@ -1185,6 +1264,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 "import, a typo.)")
         return {"role": "user", "content": body}
     for rnd in range(1, max_rounds + 1):
+        ctx["round"] = rnd   # so tools can stamp diffs/views with WHEN they happened
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
             msg = await _call_tools_with_retry(model_id, messages, CODER_TOOLS, max_tokens)
@@ -1282,24 +1362,30 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 _fail_counts.pop((name, raw_args), None)   # success clears the streak
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
-            # STALE-READ guard: once an edit LANDS, any earlier read_file view of
-            # that file still sitting in the history is outdated — and the coder
-            # was copying `old` from those stale views (f327: 12 'old not found'
-            # rejects after 3 edits applied). Mark them so it re-reads instead.
+            # SUPERSEDED marker: once an edit LANDS, mark any earlier read_file view
+            # of that file in the history — but do NOT tell the coder to re-read (the
+            # old blanket "⟪STALE — read it again⟫" banner is exactly what drove the
+            # full re-reads that blew the context window: f631). Instead point to the
+            # post-edit diff: the changed region is in the diff above; the REST of this
+            # view is still accurate. So the coder copies `old` from the right place
+            # without re-dumping the whole file. (Marks once; the precise mismatch case
+            # is still caught by _old_not_found_msg.)
             if (name in ("edit_file", "replace_lines")
                     and isinstance(result_str, str) and result_str.startswith("✓")):
                 _ep = (args.get("path") or "") if isinstance(args, dict) else ""
                 if _ep:
+                    _when = ctx.get("view_at", {}).get(_ep, "a later round")
                     for _m in messages[:-1]:
                         _c = _m.get("content")
                         if (_m.get("role") == "tool" and isinstance(_c, str)
                                 and "=== Code:" in _c and _ep in _c
-                                and "⟪STALE" not in _c):
+                                and "⟪SUPERSEDED" not in _c):
                             _m["content"] = (
-                                f"⟪STALE — {_ep} was EDITED after this read; its line "
-                                f"numbers and content below are OUTDATED. Do NOT copy "
-                                f"`old` from here — read_file {_ep} again for the current "
-                                f"view.⟫\n" + _c)
+                                f"⟪SUPERSEDED — {_ep} was edited after this read ({_when}). "
+                                f"For the region you changed, use the diff in that edit's "
+                                f"result above; the REST of this view is still accurate. "
+                                f"Don't re-read the whole file — your view + the diff is "
+                                f"current.⟫\n" + _c)
         # TRACE grounding (JARVIS_TRACE): if the coder filled a trace this round,
         # check its `@ file:line | code` citations against the REAL files. An
         # imagined flow gets a concrete re-trace nudge — the SAME enforcement the

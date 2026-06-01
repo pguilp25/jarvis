@@ -12074,10 +12074,12 @@ async def _implement_one_step(
         _nat_user = (
             f"{step_instructions}\n{iface_block}\n{_create_note}"
             f"=== FILE(S) — current content as LINENO:INDENT|code (already loaded) ===\n{_file_block}\n\n"
-            f"These files are already loaded — call replace_lines on them directly "
-            f"(no need to read_file first). Use read_file only for OTHER files, or to "
-            f"re-check line numbers after an edit shifts them. When the change is done "
-            f"and you've verified it, call finish."
+            f"These files are already loaded — edit them directly (no need to read_file "
+            f"first). After each edit you get a diff = the file's new live state; TRUST "
+            f"it and keep editing from it — do NOT re-read a file you've already been "
+            f"shown (edit_file matches by content, so your line numbers never go stale). "
+            f"Use read_file only for OTHER files you haven't seen, or a specific line "
+            f"range you need. When the change is done and you've verified it, call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
@@ -12085,7 +12087,14 @@ async def _implement_one_step(
                 # FIRST replace_lines lands (no wasted "read first" round).
                 "viewed_versions": dict(_nat_targets),
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
-                "files_changed": set()}
+                "files_changed": set(),
+                # The step's target files are injected into the prompt in FULL, so
+                # they're already in the coder's context — seed view_at so a redundant
+                # full re-read of them is short-circuited (trust-the-view). step_num
+                # lets every diff/view be stamped with WHEN it changed.
+                "step_num": step_num,
+                "view_at": {fp: f"step {step_num} (loaded at the start)"
+                            for fp in _nat_targets}}
         async def _native_pass(_model):
             _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
