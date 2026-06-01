@@ -9179,6 +9179,56 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                             f"line they're re-exported there).")
             except Exception:
                 continue
+        # (b2) SPEC-NAMED SYMBOL → DEFINITION FILE. The requirements/interface NAME
+        # the symbols the change must touch (e.g. `is_valid_collection_name`). Locate
+        # each named symbol's DEFINITION in the repo; if the spec names it but no plan
+        # step covers its definition file, that file is almost certainly in scope.
+        # This is the STRONGER-than-bare-import signal the reverted closure (note
+        # above) asked for: it catches MODIFY-EXISTING contracts (symbol already
+        # defined, in ANY package) where the test-import check — which only fires on
+        # MISSING symbols in the SAME package — is blind. (The f327 miss: requirements
+        # say the method `is_valid_collection_name` must reject keywords, but its file
+        # `_collection_finder.py` was never scoped.) General: any spec-named symbol,
+        # any language's def keyword, confident single-home only (caps keep it quiet).
+        try:
+            import subprocess as _sp2
+            _ENGLISH = {"the","and","for","not","none","true","false","with","from",
+                        "this","that","return","value","object","string","method",
+                        "function","class","should","which","where","given","name",
+                        "test","tests","file","files","line","code","type","types"}
+            _cands = set(re.findall(r'`([A-Za-z_][A-Za-z0-9_]{2,})`', task))            # backtick spans
+            _cands |= set(re.findall(r'\b([a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b', task))     # snake_case
+            _cands |= set(re.findall(r'\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b', task)) # CamelCase
+            _cands = [s for s in _cands if s.lower() not in _ENGLISH][:12]
+            _DEFKW = r'(?:def|class|func|function|fn|type|struct|trait|interface)'
+            _added_spec = 0
+            for _sym in _cands:
+                if _added_spec >= 6:
+                    break
+                _pat = _DEFKW + r'\s+' + re.escape(_sym) + r'\b'
+                try:
+                    _r = _sp2.run(["rg", "-l", "--no-messages", "-e", _pat, project_root],
+                                  capture_output=True, text=True, timeout=15)
+                    _hits = [os.path.relpath(h.strip(), project_root)
+                             for h in _r.stdout.splitlines() if h.strip()]
+                except Exception:
+                    _hits = []
+                _hits = [h for h in _hits if "test" not in h.lower()]
+                # none → symbol must be CREATED (handled by the missing-symbol path /
+                # the coder); >2 homes → ambiguous, low confidence → skip.
+                if not _hits or len(_hits) > 2:
+                    continue
+                for _df in _hits:
+                    if _df not in _scope_set and _df not in _required:
+                        _add_req(_df)
+                        _added_spec += 1
+                        _contract_gaps.append(
+                            f"SPEC SYMBOL: the requirements name `{_sym}`, defined in "
+                            f"{_df}, but no plan step touches that file. If the change "
+                            f"must modify `{_sym}`, add a STEP for {_df}.")
+                        warn(f"  SPEC-SYMBOL scope: `{_sym}` -> {_df} (not in plan)")
+        except Exception:
+            pass
         # (c) #3 callers the planners' REFS/DEPENDENCY already surfaced (siblings)
         _dep_text = "\n".join(str(v) for k, v in research_cache.items()
                               if re.search(r'refs|dependency', str(k), re.I))
