@@ -64,6 +64,13 @@ NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss
 # accepts raw whitespace too), it's just no longer the primary path.
 _WS_MODE = os.environ.get("JARVIS_NATIVE_WS", "1") != "0"
 
+# TRACE-to-test for the CODER (flag-gated, A/B; default OFF). The semantic fails
+# are CODER errors (right files, wrong logic), and the coder is who run_codes — so
+# the trace→edge→discriminating-test→run_code→fix loop belongs HERE, in one agent.
+# The trace's "ONE edge → MINIMAL change" is also a scope-corset against the
+# over-editing regression. Enabled with JARVIS_TRACE.
+_TRACE_MODE = bool(os.environ.get("JARVIS_TRACE"))
+
 
 def is_native_tool_model(model_id: str) -> bool:
     return model_id in NATIVE_TOOL_MODELS
@@ -241,6 +248,30 @@ CODER_TOOLS = [
         }, "required": []},
     }},
 ]
+
+# TRACE-to-test tool — flag-gated (JARVIS_TRACE) so the DEFAULT tool surface is
+# unchanged. A "format-enforcer": it does no computation, it returns a strict
+# template that makes the coder TRACE the real flow to the behavioural EDGE
+# (citing real lines) and design a test that CATCHES the bug — which it then
+# run_codes. Turns "understand the nuance" into a procedure + bounds scope to the
+# edge (anti-over-edit).
+_TRACE_TOOL = {"type": "function", "function": {
+    "name": "trace_to_test",
+    "description": (
+        "BEFORE editing a behaviour you're unsure of, call this to think it through. "
+        "It returns a strict template to fill: GOAL → a line-grounded FLOW trace (each "
+        "step cites the EXACT code line @ file:line — read_file first; imagined lines are "
+        "rejected) → the EDGE where correct vs the naive impl diverges → a TEST that "
+        "CATCHES the bug (adversarial setup + the assertion that fails for a naive impl). "
+        "Then run_code that test, make the MINIMAL change so it passes — nothing more. "
+        "Use it for any subtle/conditional requirement; it stops you from guessing a "
+        "plausible-wrong implementation."),
+    "parameters": {"type": "object", "properties": {
+        "target": {"type": "string", "description": "the behaviour/symbol to trace to a test"},
+    }, "required": ["target"]},
+}}
+if _TRACE_MODE:
+    CODER_TOOLS.append(_TRACE_TOOL)
 
 
 # ── Tool dispatch ────────────────────────────────────────────────────────────
@@ -909,6 +940,9 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         res = await asyncio.get_event_loop().run_in_executor(None, _do_run, args, ctx)
         _debug_edit_trace("run_code", args, res)
         return res
+    if name == "trace_to_test":
+        from core.exploration_tools import build_trace_template
+        return build_trace_template(args.get("target", ""))
     if name == "finish":
         return ("__FINISH__", args.get("summary", ""))
     # A weak/native model often reaches for a name from another idiom (the text
@@ -934,6 +968,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         "run": "run_code", "run_test": "run_code", "run_tests": "run_code",
         "pytest": "run_code", "test": "run_code", "bash": "run_code",
         "shell": "run_code", "exec": "run_code", "python": "run_code",
+        "trace": "trace_to_test", "design_test": "trace_to_test",
+        "plan": "trace_to_test", "think": "trace_to_test",
         "done": "finish", "stop": "finish", "complete": "finish", "end": "finish",
     }
     suggestion = _ALIAS.get((name or "").strip().lower().lstrip("[").rstrip("]:"))
@@ -1090,6 +1126,19 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "spaces — deeper than its `def`/`if`/`for`/`class` header, never at the header's "
             "level). A blank line is empty.\n"
             "Do NOT write `N|` counts anywhere — that's the old format; use real spaces.")
+    if _TRACE_MODE:
+        # Force the trace→test→run→minimal-edit loop for subtle behaviour, so the
+        # coder UNDERSTANDS the flow instead of guessing a plausible-wrong impl, and
+        # bounds the change to the edge (anti-over-edit).
+        system = system + (
+            "\n\n## FOR ANY SUBTLE / CONDITIONAL BEHAVIOUR — trace_to_test FIRST\n"
+            "If the step's correctness hinges on a nuance (an order, a condition, an edge "
+            "— 'X must not override Y', 'when A present, B is suppressed'), do NOT guess. "
+            "Call trace_to_test(target) and fill its template: trace the REAL flow to the "
+            "EDGE (cite real lines via read_file), name where correct vs naive diverges, and "
+            "write a test that CATCHES the naive bug. Then run_code that test, and make the "
+            "MINIMAL change so it passes — only the edge, nothing extra. Understand-then-"
+            "verify beats guess-then-hope.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
