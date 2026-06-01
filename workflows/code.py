@@ -9224,10 +9224,16 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 # (f631: the spec names `changelog_after_upgrade`, declared in
                 # configdata.yml as `changelog_after_upgrade:`, which the plan omitted).
                 _pat_def = _DEFKW + r'\s+' + re.escape(_sym) + r'\b'
-                _pat_decl = r'^\s*' + re.escape(_sym) + r'\s*[:=]'
+                _pats = ["-e", _pat_def]
+                # The liberal declaration pattern (^TOKEN[:=]) catches config keys but
+                # is NOISY for short/common tokens (e.g. `minor` matched an unrelated
+                # `minor:`/`minor =` in sql.py — a false positive). Apply it ONLY to
+                # config-key-shaped tokens: dotted, long (>=12), or multi-segment
+                # snake_case (>=2 '_'). Short tokens get the def-pattern only.
+                if ("." in _sym) or len(_sym) >= 12 or _sym.count("_") >= 2:
+                    _pats += ["-e", r'^\s*' + re.escape(_sym) + r'\s*[:=]']
                 try:
-                    _r = _sp2.run(["rg", "-l", "--no-messages", "-e", _pat_def,
-                                   "-e", _pat_decl, project_root],
+                    _r = _sp2.run(["rg", "-l", "--no-messages"] + _pats + [project_root],
                                   capture_output=True, text=True, timeout=15)
                     _hits = [os.path.relpath(h.strip(), project_root)
                              for h in _r.stdout.splitlines() if h.strip()]

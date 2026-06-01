@@ -856,6 +856,8 @@ it. Use [REFS: name] first.
 
 ## When to commit
 
+SCOPE-COMPLETENESS CHECK (in [think], before you open `=== PLAN ===`): list every thing the requirements/interface NAME — each code SYMBOL (function/method/class/attribute), each CONFIG OPTION/KEY/SETTING (often declared in a config/data file, NOT a .py — e.g. a key in configdata.yml, a route in urls.py — the easiest file to forget), and each FILE named directly. For EACH, name the file it lives in (`[REFS:]` if unsure) and confirm a `### STEP` touches that file. A named symbol/option whose file has no STEP is the #1 plan miss — add the step now, before you commit.
+
 Open `=== PLAN ===` once you can name file:line for every unmet requirement and your VERIFICATION trace runs without gaps. If round 1 found nothing, investigate first and open the plan in round 2 — never ship hollow placeholders.
 
 Fire one more lookup only if you can name the specific question AND its answer would change a STEP. 'What if I'm missing something?' is procrastination — commit. 70% grounded beats 95% speculation.
@@ -1271,7 +1273,22 @@ Do all of this in ONE pass:
          test won't expect. Ground "fully" in the test, not in ambition.
      In every shape: drop wrong or ungrounded steps; pull the better parts of
      the other drafts; KEEP every file the change genuinely requires.
-  3. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
+  3. SCOPE-COMPLETENESS CHECK — do this in [think], EVERY time, before you WRITE.
+     The #1 plan failure is omitting a file the change needs. So enumerate, explicitly:
+       (a) every CODE SYMBOL the requirements/interface NAME (function/method/class/
+           attribute) → which FILE defines it? ([REFS:] if unsure.)
+       (b) every CONFIG OPTION / SETTING / KEY the spec names (a dotted option, a
+           `*_after_*`/`*_enabled` flag, an enum of allowed values) → which file
+           DECLARES it? This is often a config/data file, NOT a .py (e.g. a key
+           lives in configdata.yml, a route in urls.py) — the easiest file to forget.
+       (c) every FILE the spec names directly.
+     Then for EACH of those, ask: does a `### STEP` touch its file? Any "no" is a
+     scope hole — ADD a step (modify it, or create the symbol in the right file). A
+     named symbol/option whose file has no step is the classic miss; close it HERE,
+     not in the coder. Put the (symbol/option/file → file → covered? Y/N) list in
+     [think] (it's stripped from the plan); the plan that comes out must have a step
+     for every "N".
+  4. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
 
 
 ═══ Judge AND improver — not a re-investigator ═══
