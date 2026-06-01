@@ -9200,14 +9200,34 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             _cands |= set(re.findall(r'\b([a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b', task))     # snake_case
             _cands |= set(re.findall(r'\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b', task)) # CamelCase
             _cands = [s for s in _cands if s.lower() not in _ENGLISH][:12]
+            # (i) FILE PATHS named directly in the spec (e.g. `configdata.yml`, `app.py`)
+            # — any extension, not just code. If the file exists and no plan step covers
+            # it, require it. Generalizes "named symbol" to "named artifact".
+            for _pt in re.findall(r'`([\w./-]+\.(?:py|yml|yaml|html|cfg|json|toml|ini|txt|md|rst|asciidoc|js|ts|go|rs|java|c|cpp|h))`', task):
+                _pp = _pt.lstrip("./")
+                for _mf in [f for f in _resolve_pool if f == _pp or f.endswith("/" + _pp)][:2]:
+                    if _mf not in _scope_set and _mf not in _required:
+                        _add_req(_mf)
+                        _contract_gaps.append(
+                            f"SPEC FILE: the requirements name `{_pt}` ({_mf}), but no "
+                            f"plan step touches it. Add a STEP for {_mf}.")
+                        warn(f"  SPEC-FILE scope: {_pt} -> {_mf} (not in plan)")
             _DEFKW = r'(?:def|class|func|function|fn|type|struct|trait|interface)'
             _added_spec = 0
             for _sym in _cands:
                 if _added_spec >= 6:
                     break
-                _pat = _DEFKW + r'\s+' + re.escape(_sym) + r'\b'
+                # Follow the named anchor to where it's DECLARED — generalized beyond
+                # code symbols: a code definition (def/class/...) OR a config-option /
+                # constant / yaml-key declaration (TOKEN at line-start followed by : or =).
+                # This catches the config-file dependency a symbol-only search misses
+                # (f631: the spec names `changelog_after_upgrade`, declared in
+                # configdata.yml as `changelog_after_upgrade:`, which the plan omitted).
+                _pat_def = _DEFKW + r'\s+' + re.escape(_sym) + r'\b'
+                _pat_decl = r'^\s*' + re.escape(_sym) + r'\s*[:=]'
                 try:
-                    _r = _sp2.run(["rg", "-l", "--no-messages", "-e", _pat, project_root],
+                    _r = _sp2.run(["rg", "-l", "--no-messages", "-e", _pat_def,
+                                   "-e", _pat_decl, project_root],
                                   capture_output=True, text=True, timeout=15)
                     _hits = [os.path.relpath(h.strip(), project_root)
                              for h in _r.stdout.splitlines() if h.strip()]
