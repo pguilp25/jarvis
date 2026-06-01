@@ -30,9 +30,8 @@ _CAP = {
     "zai/glm-4.7-flash": 1,            # z.ai free ≈ 1 concurrent (1302 otherwise)
     "zai/glm-4.5-flash": 1,
     "mistral/codestral": 1,            # Mistral free is rpm-limited → serialize
-    "mistral/magistral": 1,
     "mistral/devstral":  1,
-    "mistral/large":     1,
+    "mistral/medium":     1,
     "pollinations/minimax-m2.7": 2,    # hobby tier — keep concurrency low
     "pollinations/glm-5.1":      2,
     "pollinations/qwen-coder":   2,
@@ -54,8 +53,7 @@ _RATE_LIMITS = {
     "zai/glm-4.5-flash": (1, 60.0),
     "mistral/codestral": (2, 60.0),
     "mistral/devstral":  (2, 60.0),
-    "mistral/magistral": (2, 60.0),
-    "mistral/large":     (2, 60.0),
+    "mistral/medium":     (2, 60.0),
 }
 _call_times: dict[str, deque] = {}   # model -> deque of recent call START times
 

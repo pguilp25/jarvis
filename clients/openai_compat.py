@@ -41,8 +41,7 @@ PROVIDERS = {
         "models": {
             "mistral/codestral": "codestral-latest",        # dedicated free coder
             "mistral/devstral":  "devstral-small-latest",
-            "mistral/magistral": "magistral-medium-latest", # reasoning model — planner
-            "mistral/large":     "mistral-large-latest",
+            "mistral/medium":    "mistral-medium-latest",   # current flagship (newer/better than large; replaced the non-existent magistral)
         },
     },
     "pollinations": {

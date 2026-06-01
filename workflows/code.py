@@ -8620,7 +8620,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         "zai/glm-4.7-flash",          # LEAD — GLM (z.ai, 203k ctx)
         "nvidia/deepseek-v4-flash",   # DeepSeek (→ OR :free, fails fast)
         "nvidia/minimax-m2.5",        # MiniMax (→ OR :free, fails fast)
-        "mistral/magistral",          # Mistral reasoning
+        "mistral/medium",          # Mistral reasoning
     ]
 
     cot = PLAN_COT_NEW if is_new_project else PLAN_COT_EXISTING
@@ -8827,7 +8827,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         preloaded_research=preloaded_research,
     ) + _consensus_line
     merger_result = await _call_with_tools(
-        "mistral/large", merge_prompt, project_root,
+        "mistral/medium", merge_prompt, project_root,
         detailed_map=detailed_map, purpose_map=purpose_map,
         research_cache=research_cache,
         log_label="merging plans (final)",
@@ -8940,7 +8940,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 "candidates disagree, choose the best approach and state your "
                 "choice. Output ONLY the plan — no preamble, no investigation.")
             _forced_raw = await _raw_call(
-                "mistral/large", _force_prompt,
+                "mistral/medium", _force_prompt,
                 system="You are a senior engineer writing a precise, minimal "
                        "implementation plan. You already have all the context you "
                        "need — do not ask for more, decide and write the plan.",
@@ -12022,7 +12022,7 @@ async def _implement_one_step(
         #   primary — qwen3-480b 429-saturated, pollinations-qwen 0-edits. gpt-oss native
         #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
-                        ("mistral/large","text"), ("nvidia/gpt-oss-nim","native"),
+                        ("mistral/medium","text"), ("nvidia/gpt-oss-nim","native"),
                         ("nvidia/glm-5.1","text")]
         for _m, _mode in _CODER_CHAIN:
             try:

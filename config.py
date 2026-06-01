@@ -52,8 +52,7 @@ MODELS = {
     # Mistral La Plateforme (free Experiment tier — Codestral = dedicated coder)
     "mistral/codestral":     {"window": 256_000, "tpm": None, "provider": "mistral"},
     "mistral/devstral":      {"window": 128_000, "tpm": None, "provider": "mistral"},
-    "mistral/magistral":     {"window": 128_000, "tpm": None, "provider": "mistral"},  # reasoning → planner
-    "mistral/large":         {"window": 128_000, "tpm": None, "provider": "mistral"},
+    "mistral/medium":         {"window": 128_000, "tpm": None, "provider": "mistral"},
 
     # Pollinations (anonymous free tier — no key)
     "pollinations/minimax-m2.7":      {"window": 200_000, "tpm": None, "provider": "pollinations"},
@@ -148,19 +147,14 @@ NVIDIA_FALLBACKS = {
     # ── PLANNER lead (zai/glm-4.7-flash) — OR :free first → reliable → NIM last ──
     "zai/glm-4.7-flash": (
         "nvidia/deepseek-v4-flash", "nvidia/minimax-m2.5",     # OR :free (fast-fail)
-        "mistral/magistral", "pollinations/minimax-m2.7",
-        "nvidia/glm-5.1", "nvidia/kimi-k2.6",                  # NIM — last
-    ),
-    "mistral/magistral": (
-        "nvidia/minimax-m2.5", "nvidia/deepseek-v4-flash",     # OR :free
-        "zai/glm-4.7-flash", "pollinations/minimax-m2.7",
+        "mistral/medium", "pollinations/minimax-m2.7",
         "nvidia/glm-5.1", "nvidia/kimi-k2.6",                  # NIM — last
     ),
 
     # ── OR :free models (forced to OpenRouter) ──
     "nvidia/minimax-m2.5": (
         "nvidia/deepseek-v4-flash",                            # other OR
-        "mistral/magistral", "zai/glm-4.7-flash", "pollinations/minimax-m2.7",
+        "mistral/medium", "zai/glm-4.7-flash", "pollinations/minimax-m2.7",
         "nvidia/minimax-m2.7", "nvidia/kimi-k2.6",             # NIM — last
     ),
     "nvidia/deepseek-v4-flash": (
@@ -183,11 +177,11 @@ NVIDIA_FALLBACKS = {
 
     # ── deep NIM fallback targets (reached rarely; OR/reliable first, NIM last) ──
     "nvidia/minimax-m2.7": (
-        "nvidia/minimax-m2.5", "mistral/magistral", "zai/glm-4.7-flash",
+        "nvidia/minimax-m2.5", "mistral/medium", "zai/glm-4.7-flash",
         "pollinations/minimax-m2.7", "nvidia/kimi-k2.6",
     ),
     "nvidia/kimi-k2.6": (
-        "nvidia/minimax-m2.5", "mistral/magistral", "zai/glm-4.7-flash",
+        "nvidia/minimax-m2.5", "mistral/medium", "zai/glm-4.7-flash",
         "pollinations/minimax-m2.7", "nvidia/minimax-m2.7",
     ),
     "nvidia/deepseek-v4-pro": (
@@ -199,24 +193,24 @@ NVIDIA_FALLBACKS = {
         # (gpt-OR → qwen → mistral → gpt-NIM(native) → glm) is orchestrated in code
         # (_implement_one_step), since gpt-NIM must run the NATIVE loop, not text —
         # so it is NOT in this text chain. mistral/large → glm-5.1 only.
-        "mistral/large", "nvidia/glm-5.1",
+        "mistral/medium", "nvidia/glm-5.1",
     ),
     "nvidia/nemotron-super": (
-        "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/magistral", "nvidia/glm-5.1",
+        "nvidia/minimax-m2.5", "zai/glm-4.7-flash", "mistral/medium", "nvidia/glm-5.1",
     ),
     # MERGER model (2026-05-28): mistral/large is now the merger primary — it's a
     # flagship (128K ctx, no 8K throttle) that holds a structured plan better than
     # glm-5.1 did under load (glm degraded to empty/salvaged plans on the heavier
     # merger prompt → django/pylint regressions). glm-5.1 is the fallback, then
     # the off-NIM coders. (User-chosen 2026-05-28.)
-    "mistral/large": (
+    "mistral/medium": (
         "nvidia/glm-5.1", "zai/glm-4.7-flash", "nvidia/deepseek-v4-flash",
         "nvidia/minimax-m2.5", "mistral/codestral",
     ),
     "nvidia/gpt-oss-120b": (
         # Text-path fallback for gpt-oss (rare; the native coder path orchestrates
         # the real chain in code). qwen3-coder → mistral/large → glm-5.1.
-        "nvidia/qwen3-coder", "mistral/large", "nvidia/glm-5.1",
+        "nvidia/qwen3-coder", "mistral/medium", "nvidia/glm-5.1",
     ),
     # gpt-oss on NVIDIA NIM (coder chain slot 4, run NATIVE via code). If it's ever
     # reached through call_with_retry, fall to glm-5.1.
@@ -228,11 +222,11 @@ NVIDIA_FALLBACKS = {
         "mistral/devstral", "nvidia/glm-5.1", "nvidia/qwen3-coder",
     ),
     "pollinations/minimax-m2.7": (
-        "nvidia/minimax-m2.5", "mistral/magistral", "zai/glm-4.7-flash",
+        "nvidia/minimax-m2.5", "mistral/medium", "zai/glm-4.7-flash",
         "nvidia/minimax-m2.7", "nvidia/kimi-k2.6",
     ),
     "zai/glm-4.5-flash": (
-        "zai/glm-4.7-flash", "nvidia/deepseek-v4-flash", "mistral/magistral", "nvidia/glm-5.1",
+        "zai/glm-4.7-flash", "nvidia/deepseek-v4-flash", "mistral/medium", "nvidia/glm-5.1",
     ),
     "pollinations/glm-5.1": (
         "zai/glm-4.7-flash", "nvidia/deepseek-v4-flash", "mistral/codestral", "nvidia/glm-5.1",
