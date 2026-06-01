@@ -486,3 +486,34 @@ def test_ls_symbol_annotation_is_best_effort_on_bad_py():
     out = list_dir_entries(root, "")
     assert "broken.py" in out
     assert _py_top_symbols(os.path.join(root, "broken.py")) == ""
+
+
+# ── [TRACE:] tool (ckpt 99): enforced line-grounded flow-trace → discriminating test ─
+def test_trace_is_a_known_tag():
+    from core.tool_detector import TagDetector, KNOWN_TAG_TYPES
+    assert "TRACE" in KNOWN_TAG_TYPES
+    d = TagDetector("[tool use][TRACE: is_valid_collection_name keyword handling][/tool use]")
+    assert d.valid_args("TRACE") == ["is_valid_collection_name keyword handling"]
+
+
+def test_trace_template_has_the_format_slots():
+    from core.exploration_tools import build_trace_template
+    t = build_trace_template("netrc must not override Bearer")
+    for slot in ("GOAL", "FLOW", "@ <file>:<lineno>", "EDGE", "TEST",
+                 "SETUP", "ACTION", "EXPECT", "RUNNABLE", "CATCHES the bug"):
+        assert slot in t, slot
+
+
+def test_verify_trace_lines_grounds_to_real_lines():
+    import os, tempfile
+    from core.exploration_tools import verify_trace_lines
+    root = tempfile.mkdtemp()
+    with open(os.path.join(root, "m.py"), "w") as f:
+        f.write("def f():\n    x = 1\n    return x\n")
+    # real line at its real number → clean
+    assert verify_trace_lines("does a thing @ m.py:2 | x = 1", root) == ""
+    # imagined line → flagged
+    bad = verify_trace_lines("does a thing @ m.py:2 | not_a_real_line()", root)
+    assert "not grounded" in bad and "m.py:2" in bad
+    # nonexistent file → flagged
+    assert "not found" in verify_trace_lines("x @ nope.py:1 | y = 2", root)

@@ -3651,6 +3651,11 @@ async def call_with_tools(
         # LS: expand a folder into its immediate children (real filesystem),
         # so the model selects paths it has SEEN, not invented ones.
         ls_tags       = _detector.valid_args("LS")        if project_root else []
+        # TRACE: a "format-enforcer" tool (flag-gated, default OFF) — returns a strict
+        # line-grounded flow-trace → test-design template. Inert unless JARVIS_TRACE set.
+        import os as _os_tc
+        trace_tags    = (_detector.valid_args("TRACE")
+                         if (project_root and _os_tc.environ.get("JARVIS_TRACE")) else [])
         # RUN is extracted OUTSIDE the detector (bracket-balanced) — its free-form
         # shell command routinely contains `]` and needs no [tool use] wrapper.
         from core.review_verify import extract_run_cmds
@@ -3694,7 +3699,7 @@ async def call_with_tools(
                         or refs_tags or purpose_tags or semantic_tags or lsp_tags
                         or knowledge_tags or keep_tags or view_tags
                         or dependency_tags or dependson_tags or discard_tags
-                        or ls_tags)
+                        or ls_tags or trace_tags)
         _dbg(f"has_tags={has_tags} has_stop={has_stop} "
              f"purpose={len(purpose_tags)} file={len(file_tags)} code={len(code_tags)} "
              f"refs={len(refs_tags)} view={len(view_tags)} detail={len(detail_tags)} "
@@ -4603,6 +4608,16 @@ async def call_with_tools(
         def _run_ls(tag):
             from core.exploration_tools import list_dir_entries
             return list_dir_entries(project_root, tag) + "\n"
+        def _run_trace(tag):
+            # A "fake tool" that does NO computation — it returns a STRICT format the
+            # model must fill, forcing a line-grounded flow-trace that ENDS in a
+            # discriminating test. Turns "understand the code" (a leap a weak model
+            # can't make) into "follow this trace citing real lines" (local lookups it
+            # CAN do), and yields BOTH the change and the test. Each `file:line` it
+            # cites is verified to exist (see verify_trace_lines) so it can't narrate
+            # an imagined flow.
+            from core.exploration_tools import build_trace_template
+            return build_trace_template(tag)
 
         if code_tags and project_root:
             new_tags, cached = _cached_or_run("SEARCH", code_tags)
@@ -4680,6 +4695,19 @@ async def call_with_tools(
             for t in new_tags:
                 r = await _locked_lookup("LS", t, _run_ls)
                 round_output += r
+
+        if trace_tags:
+            for t in trace_tags:
+                round_output += _run_trace(t)
+        # GROUNDING CHECK: if the model emitted a FILLED trace (lines like
+        # `… @ file:line | <code>`), verify each cited line really exists — a weak
+        # model can't narrate an imagined flow past this. Flag-gated with TRACE.
+        if (_os_tc.environ.get("JARVIS_TRACE") and project_root
+                and re.search(r'@\s*[\w./\-]+\.\w+:\d+\s*\|', result or "")):
+            from core.exploration_tools import verify_trace_lines
+            _tv = verify_trace_lines(result, project_root)
+            if _tv:
+                round_output += "\n" + _tv + "\n"
 
         if dependency_tags and project_root:
             async def _run_dep(tag):

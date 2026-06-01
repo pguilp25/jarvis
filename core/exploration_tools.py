@@ -1312,6 +1312,88 @@ def build_repo_tree(project_root: str) -> str:
     return list_dir_entries(project_root, "")
 
 
+def build_trace_template(target: str) -> str:
+    """The [TRACE:] tool's output — a STRICT format the planner must fill, NOT a
+    computation. It forces a LINE-GROUNDED flow-trace that ends in a DISCRIMINATING
+    test: each step cites a real `file:line` (verified to exist, so the flow can't
+    be imagined), the trace walks to the behavioural EDGE, and the conclusion is a
+    test designed to CATCH the bug — the way a careful engineer designs a test, not
+    a happy-path confirmation. Offloads 'understand the code' into a procedure a
+    weak model can execute step-by-step, and yields the change AND the test."""
+    t = (target or "the target behaviour").strip()
+    return f"""=== TRACE: {t} — fill this EXACTLY (every `file:line` is checked to exist) ===
+
+GOAL — the precise behaviour that must be TRUE after the fix, INCLUDING the edge the
+  requirements stress (e.g. "X must not override Y", "when A is present, B is suppressed").
+  One sentence:
+  GOAL: <...>
+
+FLOW — walk the REAL execution path to the edge. ONE step per line, in order. Each step:
+  <≤8-word gloss of what happens>  @ <file>:<lineno>  | <the EXACT line copied from read_file>
+  Cite REAL lines (read_file first) — a `file:line` that isn't in the file = an IMAGINED
+  trace and will be rejected. Trace only the data/control that decides the edge, not the
+  whole function. Keep going until you reach the line where the edge behaviour is decided.
+
+EDGE — the single spot where CORRECT and the obvious-NAIVE implementation diverge, and WHY
+  a naive impl gets it wrong:
+  EDGE: <e.g. "line 230 sets the auth header unconditionally, clobbering the Bearer set at 214">
+
+TEST — design the check that CATCHES the bug (try to BREAK a naive impl, don't confirm the
+  happy path). Use the edge you found:
+  SETUP:   <construct the exact state that TRIGGERS the edge — the adversarial input, not the
+            easy case (e.g. a Request that ALREADY has a Bearer Authorization header)>
+  ACTION:  <the precise call (e.g. req.open(url, use_netrc=True))>
+  EXPECT:  <the assertion that FAILS for the naive impl and passes ONLY when the edge is
+            handled (e.g. assert headers["Authorization"].startswith("Bearer"))>
+  RUNNABLE: <SETUP+ACTION+EXPECT as a single `python -c "..."` (or pytest snippet) the coder
+            can run_code to verify before finishing>
+
+Then write the PLAN: the MINIMAL change that makes the edge satisfy EXPECT — nothing more.
+"""
+
+
+def verify_trace_lines(text: str, project_root: str) -> str:
+    """Verify the `file:line  | <code>` citations in a filled [TRACE:] are REAL —
+    each cited line must actually contain the pasted code (stripped match). Returns
+    a feedback string naming any IMAGINED citations (line absent / code mismatch),
+    or '' if all check out. This is what makes the trace GROUNDED, not hoped — a
+    weak model can't narrate a fake flow past it."""
+    if not text or not project_root:
+        return ""
+    # `... @ path/to/file.py:123 | some code` (tolerant of spacing / a leading '`')
+    pat = re.compile(r'@\s*([\w./\-]+\.\w+):(\d+)\s*\|\s*`?(.+?)`?\s*$', re.M)
+    bad = []
+    cache: dict = {}
+    for m in pat.finditer(text):
+        rel, lineno, cited = m.group(1), int(m.group(2)), m.group(3).strip()
+        if not cited:
+            continue
+        if rel not in cache:
+            ap = _safe_join(project_root, rel)
+            try:
+                cache[rel] = (open(ap, encoding="utf-8", errors="replace").read().split("\n")
+                              if ap and os.path.isfile(ap) else None)
+            except Exception:
+                cache[rel] = None
+        flines = cache[rel]
+        if flines is None:
+            bad.append(f"{rel}:{lineno} — file not found (cite a real path)")
+            continue
+        # accept the cited line if its stripped text matches AT or NEAR lineno
+        cs = cited.strip()
+        window = range(max(1, lineno - 3), min(len(flines), lineno + 3) + 1)
+        if not any(flines[i - 1].strip() == cs for i in window):
+            anywhere = any(l.strip() == cs for l in flines)
+            bad.append(f"{rel}:{lineno} — the line you pasted is "
+                       + ("at a DIFFERENT line (re-cite its real lineno)" if anywhere
+                          else "NOT in this file (imagined — read_file and cite a real line)"))
+    if not bad:
+        return ""
+    return ("⚠ TRACE not grounded — these citations don't match the real code:\n  "
+            + "\n  ".join(bad[:6])
+            + "\n  Re-trace: read_file the file and paste the EXACT line at its REAL number.")
+
+
 def _pub_first(names: list) -> list:
     """Public names first (a task usually names the public API), dunders last;
     alphabetical within each group."""

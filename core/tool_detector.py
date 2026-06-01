@@ -57,7 +57,7 @@ from typing import Iterable
 KNOWN_TAG_TYPES = (
     "CODE", "VIEW", "KEEP", "REFS", "SEARCH", "WEBSEARCH",
     "DETAIL", "PURPOSE", "SEMANTIC", "LSP", "KNOWLEDGE", "DISCARD",
-    "DEPENDENCY", "DEPENDSON", "LS",
+    "DEPENDENCY", "DEPENDSON", "LS", "TRACE",
 )
 
 # Common WRONG tool names a model reaches for out of habit from other
@@ -227,6 +227,10 @@ def _validate_arg(tag_type: str, clean_arg: str) -> "str | None":
             return f"arg {clean_arg!r} reads as prose, not a folder path"
         if not re.match(r'^[\w./\-]+$', clean_arg):
             return f"arg {clean_arg!r} not a folder path"
+        return None
+    if tag_type == "TRACE":
+        # [TRACE: <symbol or behaviour to trace to a test>] — free-form; the arg
+        # names what to trace. Any non-empty text is fine.
         return None
     return f"unknown tag type {tag_type!r}"
 

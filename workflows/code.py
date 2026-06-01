@@ -8653,6 +8653,20 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         cot_instructions=cot,
     )
 
+    # TRACE tool (flag-gated, A/B): force a line-grounded flow-trace → discriminating
+    # test for the core behaviour, so the plan rests on UNDERSTANDING (the real flow)
+    # not a plausible guess — and yields the acceptance check the coder run_codes.
+    if os.environ.get("JARVIS_TRACE") and not is_new_project:
+        plan_prompt += (
+            "\n\n══════════════════════════════════════════════════════════════════════\n"
+            "MANDATORY before you write the plan: [TRACE: <the core behaviour/symbol>]\n"
+            "══════════════════════════════════════════════════════════════════════\n"
+            "It returns a strict format to fill: GOAL → a line-grounded FLOW trace (each\n"
+            "step cites a REAL `file:line` — verified to exist, so read_file first) → the\n"
+            "EDGE where correct vs naive diverges → a TEST that CATCHES the bug. Do NOT\n"
+            "guess the design — TRACE the real code to the edge, THEN write the plan +\n"
+            "carry the test forward as the behaviour the coder must run_code-verify.\n")
+
     if plan_feedback:
         plan_prompt += (
             f"\n\n══════════════════════════════════════════════════════════════════════\n"
