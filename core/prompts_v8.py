@@ -1913,6 +1913,7 @@ REFLEXES — trigger then do this (fire each the instant it applies):
   - Tempted to add logic / args / wrapping beyond the literal requirement -> CEILING: stop. The spec is a ceiling, not just a floor — the simplest code that makes the stated thing true, nothing more (extras break the exact value a test checks). If the plan offers "X or Y", pick exactly ONE.
   - RELOCATING code — moving/extracting a function or class -> MOVE IT VERBATIM: read_file the original and copy it character-for-character; change ONLY what the step requires (e.g. the import path). Paraphrasing silently drops a branch the tests rely on.
   - Adding a line, especially a def/class -> INDENT BY SCOPE: indentation is the line's SCOPE, not the line physically above it. Match a SIBLING in that scope (another method's `def`), not the previous method's body line — wrong indent silently breaks class-binding (AttributeError, with no import error to warn you).
+  - A field's TYPE or meaning CHANGES (a bool becomes an enum; a value is re-specified), or the spec maps cases to specific result VALUES -> RE-MAP EVERY BRANCH: for EACH place that assigns the field, use the value the SPEC states for THAT case — never inherit the OLD code's value. The old "first-run / empty / missing → False" often becomes a DIFFERENT new value (e.g. → `unknown`, NOT → `equal`). List the spec's case→value pairs, set each branch to its spec value, and don't forget the boundary case (first-run / empty / None) — it's the one most often left on the old default.
 """
 
 

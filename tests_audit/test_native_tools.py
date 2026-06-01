@@ -948,6 +948,44 @@ def test_range_read_of_unseen_file_does_not_mark_it_fully_in_context():
         _cleanup(root)
 
 
+def test_unassigned_enum_members_flags_forgotten_case():
+    from core.native_tools import _unassigned_enum_members
+    # `unknown` is DEFINED but never assigned anywhere → flagged (forgotten case).
+    src = (
+        "import enum\n"
+        "class VersionChange(enum.Enum):\n"
+        "    unknown = 0\n"
+        "    equal = 1\n"
+        "    major = 2\n"
+        "def f(a, b):\n"
+        "    if a == b:\n"
+        "        return VersionChange.equal\n"
+        "    return VersionChange.major\n"
+    )
+    dead = _unassigned_enum_members(src)
+    assert "VersionChange.unknown" in dead
+    assert "VersionChange.equal" not in dead and "VersionChange.major" not in dead
+
+
+def test_unassigned_enum_members_clean_when_all_used():
+    # f631 shape: every member is referenced somewhere → no false positive.
+    from core.native_tools import _unassigned_enum_members
+    src = (
+        "import enum\n"
+        "class VersionChange(enum.Enum):\n"
+        "    unknown = 0\n"
+        "    equal = 1\n"
+        "def g(x):\n"
+        "    if x is None:\n"
+        "        return VersionChange.unknown\n"
+        "    return VersionChange.equal\n"
+    )
+    assert _unassigned_enum_members(src) == []
+    # non-enum / unparseable input never raises
+    assert _unassigned_enum_members("def h(:\n bad") == []
+    assert _unassigned_enum_members("x = 1\n") == []
+
+
 def test_read_short_circuit_escalates_on_repeat():
     # A full re-read of an in-context file is declined with ℹ; repeating it must
     # escalate (no silent spin to the round budget).

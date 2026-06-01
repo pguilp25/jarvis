@@ -290,6 +290,47 @@ def _view_stamp(ctx: dict) -> str:
     return "this step"
 
 
+def _unassigned_enum_members(src: str) -> list:
+    """Enum members DEFINED but never ASSIGNED/compared anywhere in `src` — a likely
+    UNHANDLED case (the coder defined `VersionChange.unknown` but no branch ever sets
+    a field to it). AST-based, best-effort; returns ['EnumName.member', ...]. Used as a
+    pre-finish ADVISORY (harness computes the global 'which members are dead', the coder
+    decides locally). NOTE: catches a FORGOTTEN case, not a WRONG-value case (setting a
+    branch to the wrong member is semantic — only run_code / the spec catches that)."""
+    import ast
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        return []
+    enums = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+                (isinstance(b, ast.Name) and b.id.endswith("Enum")) or
+                (isinstance(b, ast.Attribute) and b.attr.endswith("Enum"))
+                for b in node.bases):
+            members = set()
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign):
+                    members |= {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+                elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    members.add(stmt.target.id)
+            members = {m for m in members if not m.startswith("_")}
+            if members:
+                enums[node.name] = members
+    if not enums:
+        return []
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            used.add((node.value.id, node.attr))
+    out = []
+    for ename, members in enums.items():
+        for m in sorted(members):
+            if (ename, m) not in used:
+                out.append(f"{ename}.{m}")
+    return out
+
+
 def _note_view(ctx: dict, path: str) -> None:
     """Record that the coder now has {path}'s CURRENT full state in its context —
     set by a full read_file and by every applied edit (the edit's diff + the
@@ -1186,6 +1227,13 @@ _VERIFY_NUDGE = (
     "but isn't set on this path)\n"
     "  • off-by-one / wrong boundary / wrong comparison\n"
     "  • the exact TYPE or shape returned, and every case the requirement names\n"
+    "  • VALUE-MAPPING: if the spec maps cases to specific result values (enum members, "
+    "codes, statuses), check EACH branch returns the SPEC's value for that case — "
+    "especially the first-run/empty/missing/None case, which is easy to leave on the "
+    "OLD default (e.g. set to `equal` when the spec says `unknown`). If run_code is "
+    "available, ASSERT that boundary case (construct the empty/first-run input, assert "
+    "the field equals the spec's value) and RUN it — a value you ran beats one you "
+    "eyeballed.\n"
     "If you find a CONCRETE problem, fix it with replace_lines now. If the code is "
     "correct as written, call finish — do NOT change it just to change something."
 )
@@ -1249,6 +1297,21 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     def _verify_nudge_msg():
         body = _VERIFY_NUDGE.format(
             files=", ".join(sorted(ctx.get("files_changed", set()))) or "(none)")
+        # Deterministic harness advisory: across the files you changed, did you DEFINE
+        # an enum member the spec needs but never ASSIGN it anywhere? That member's case
+        # is likely unhandled. (Harness computes the global; coder confirms locally.)
+        _dead = []
+        for _p in sorted(ctx.get("files_changed", set())):
+            _c = ctx.get("file_contents", {}).get(_p)
+            if isinstance(_c, str) and _p.endswith(".py"):
+                _dead += _unassigned_enum_members(_c)
+        if _dead:
+            body += (
+                "\n\n⚠ UNHANDLED-CASE CHECK: you DEFINED these enum member(s) but never "
+                "ASSIGN them to anything: " + ", ".join(sorted(set(_dead))) + ". Each is "
+                "probably a case the spec names but your code doesn't set — find the "
+                "branch that should produce it and assign it there (or confirm it's "
+                "genuinely unused).")
         # JARVIS_TRACE: a passive system-prompt line gets 0 adoption (the coder goes
         # straight to edit→run_code and never reaches for the optional tool). This is
         # the just-in-time moment — the coder is about to finish WITH edits — so point
