@@ -120,6 +120,15 @@ from workflows.code import code_agent  # noqa: E402
 from core.state import new_state  # noqa: E402
 from core import thought_logger  # noqa: E402
 
+# In a logged / non-interactive run (nohup, redirect to a file), thought_logger's
+# per-token LIVE echo goes to the tagged stderr and floods the main log with
+# token-per-line `[tag] tok` noise — unreadable/ungreppable. The full streamed
+# thinking is still captured in the per-model thought_logger session files, so when
+# stderr is not a real terminal, turn the live echo OFF and keep the main log to
+# clean structured status lines only.
+if not _orig_stderr.isatty():
+    thought_logger.disable_live()
+
 # ─── Bypass full code indexing for SWE-bench ────────────────────────────────
 # `tools.code_index.generate_maps` LLM-summarizes the entire codebase. For
 # SWE-bench repos (astropy is 18 MB, django is larger) this spawns 60+
@@ -369,7 +378,15 @@ async def run_one_instance(
     summary_log,
 ) -> dict:
     iid = instance["instance_id"]
-    tok = _inst_tag.set(iid)
+    # Log prefix: the full instance_id is ~130 chars and was repeated on EVERY
+    # line, making the log unreadable/ungreppable. Use a short `repo:hash8` tag
+    # (e.g. "ansible:f327e65d") — still unique enough to grep one instance.
+    try:
+        _rest = iid.split("__", 1)[1]            # "<repo>-<40hex>-v<...>"
+        _short_tag = f"{_rest.split('-', 1)[0]}:{_rest.split('-', 1)[1][:8]}"
+    except Exception:
+        _short_tag = iid[:20]
+    tok = _inst_tag.set(_short_tag)
     inst_dir: Path | None = None
     patch_text = ""
     error_msg = ""
