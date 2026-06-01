@@ -668,8 +668,13 @@ the renderer/output, and any helper those call. A change that fixes one
 layer but leaves the next one unchanged is a PARTIAL fix — the #1 way
 these plans fail (e.g. "show type hints" needs extract-during-inspection
 → store → render → a formatting helper, not just the renderer). This is
-COMPLETENESS of the stated goal — cover all of it, but DON'T add scope
-the goal didn't ask for (no gold-plating; the contract bounds you).
+COMPLETENESS of the stated goal — cover all of it, INCLUDING the wiring
+that makes the change actually WORK end-to-end: the config/registration
+that makes a new option reachable, the call site that invokes new code,
+the sibling that must change in parallel. Scope the COMPLETE working
+change, not just the core logic (the coder keeps each step minimal — your
+job is to make sure no needed file is left out). Only skip genuinely
+UNRELATED refactors/cleanups.
 
 
 ## Gather all the info before you plan
@@ -1375,7 +1380,8 @@ Before opening `=== PLAN ===`, output:
        trace it from where the data originates to where the user observes it,
        and confirm the plan covers EVERY layer on that path (producer → store →
        render → helper). A plan that lands one layer and leaves the next is a
-       partial fix. (Cover all of the stated goal; don't add beyond it.)
+       partial fix. (Cover all of the stated goal end-to-end, INCLUDING the
+       wiring that makes it actually work — not just the core logic.)
     B. DISAGREEMENTS THAT MATTER — which conflicts shape the plan.
     C. CONSENSUS-IS-SUSPICIOUS — what do 3+ plans agree on that
        you'd want to verify?
