@@ -1171,7 +1171,8 @@ def _trim_history(messages: list, max_chars: int, model_id: str) -> list:
 # This injects one trace pass before finish. Fired AT MOST once per step.
 _VERIFY_NUDGE = (
     "⚠ SELF-CHECK before you finish — you edited: {files}.\n"
-    "FIRST, plan-adherence: re-read the STEP and confirm your edit does EXACTLY "
+    "FIRST, plan-adherence: re-check the STEP TEXT (in this conversation, not a file) "
+    "and confirm your edit does EXACTLY "
     "what it says. If the step treats two groups DIFFERENTLY (e.g. 'yield group A "
     "immediately, COLLECT group B and yield it at the end'), verify your code "
     "actually BRANCHES that way — don't collapse them into one path (collecting "

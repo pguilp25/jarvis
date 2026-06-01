@@ -893,6 +893,61 @@ def test_edit_file_old_not_found_message_is_stale_aware():
     assert "re-read" not in r_fresh.lower()                 # never tells it to re-read the file
 
 
+def test_view_at_invariant_holds_across_a_full_sequence():
+    """STAYS-THAT-WAY guarantee: after EVERY op, the trust-the-view invariant holds —
+    (a) if view_at[path] is set, a full read is short-circuited (never re-dumps), and
+    (b) file_contents[path] equals the sandbox (the view the coder trusts is real);
+    and every edit/create/replace leaves the touched file in view_at (the coder is
+    never told to re-read what it just changed)."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        def check():
+            for p in list(ctx.get("view_at", {})):
+                r = _disp("read_file", {"path": p}, ctx)
+                assert r.startswith("ℹ"), f"{p} in view_at but a full read was not short-circuited:\n{r}"
+                if ctx.get("sandbox") is not None:
+                    assert ctx["file_contents"][p] == ctx["sandbox"].load_file(p), \
+                        f"{p}: trusted view diverged from the sandbox"
+        # 1) full read → file enters view_at
+        out = _disp("read_file", {"path": rel}, ctx)
+        assert not out.startswith("ℹ") and rel in ctx["view_at"]; check()
+        # 2) range read of the SAME file does NOT downgrade its full-view status
+        _disp("read_file", {"path": rel, "start_line": 1, "end_line": 2}, ctx)
+        assert rel in ctx["view_at"]; check()
+        # 3) edit_file → still in view_at, content tracks the sandbox
+        e = _disp("edit_file", {"path": rel, "hunks": [
+            {"start_line": 6, "old": ['    return "hello " + name'],
+             "new": ['    return "hi " + name']}]}, ctx)
+        assert e.startswith("✓"), e
+        assert rel in ctx["view_at"]; check()
+        # 4) replace_lines on the same file → still consistent
+        rl = _disp("replace_lines", {"path": rel, "start_line": 1, "end_line": 1,
+                                      "new_content": '"""A tiny module (edited)."""'}, ctx)
+        assert rl.startswith("✓"), rl
+        assert rel in ctx["view_at"]; check()
+        # 5) create_file → the new file is in view_at (you just wrote it; no read needed)
+        c = _disp("create_file", {"path": "brand_new.py", "content": "VALUE = 42\n"}, ctx)
+        assert c.startswith("✓"), c
+        assert "brand_new.py" in ctx["view_at"]; check()
+    finally:
+        _cleanup(root)
+
+
+def test_range_read_of_unseen_file_does_not_mark_it_fully_in_context():
+    """A RANGE read shows only a slice, so it must NOT enter view_at — otherwise a
+    later FULL read the coder genuinely needs would be wrongly short-circuited."""
+    ctx, rel, root = _mk_ctx()
+    try:
+        r = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 2}, ctx)
+        assert not r.startswith("ℹ")
+        assert rel not in ctx.get("view_at", {})        # partial view ≠ full view
+        full = _disp("read_file", {"path": rel}, ctx)   # the needed full read is allowed
+        assert not full.startswith("ℹ") and "class Counter" in full
+        assert rel in ctx["view_at"]                    # now it's fully in context
+    finally:
+        _cleanup(root)
+
+
 def test_read_short_circuit_escalates_on_repeat():
     # A full re-read of an in-context file is declined with ℹ; repeating it must
     # escalate (no silent spin to the round budget).
