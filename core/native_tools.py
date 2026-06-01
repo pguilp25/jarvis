@@ -222,18 +222,13 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "run_code",
         "description": (
-            "RUN a shell command against your EDITED code and see what it actually does "
-            "— the only way to catch a bug that READS fine but BEHAVES wrong (valid code, "
-            "wrong logic). Runs in your sandbox (your edits are live) with the repo's deps "
-            "+ pytest available; read-only + no network. Use it to VERIFY before finish: "
-            "write a tiny check that exercises your change and PRINTS what it produces, "
-            "so you SEE the real behaviour (build a picture of what the code actually "
-            "does) — e.g. python -c \"from pkg.mod import Thing; t=Thing(); "
-            "r=t.method(...); print('got:', r); assert r == expected\" — or run the "
-            "module's existing tests: python -m pytest path/to/test_file.py -q. exit 0 "
-            "= success (a passing assert prints nothing — that's a PASS); exit≠0 = the "
-            "output is your edit's real behaviour, fix it and re-run. Don't finish on an "
-            "unverified edit."),
+            "OPTIONAL: run a shell command in your sandbox (your edits are live; repo deps "
+            "+ pytest; read-only + no network) if you want to check a concrete fact you're "
+            "unsure of — e.g. python -c \"from pkg.mod import Thing; print(Thing().method(...))\" "
+            "to see a real value, or python -m pytest path/to/test_file.py -q to run existing "
+            "tests. exit 0 = ok (a passing assert prints nothing); exit≠0 = the output is the "
+            "real behaviour. Not required — your main job is to TRACE the code and reason it "
+            "through (see HOW TO THINK)."),
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string", "description": "shell command, e.g. python -c \"...\" or python -m pytest <path> -q"},
         }, "required": ["command"]},
