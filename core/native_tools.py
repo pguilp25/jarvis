@@ -1155,9 +1155,23 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     _trace_nudges = 0         # grounding nudges spent on imagined trace citations
 
     def _verify_nudge_msg():
-        return {"role": "user",
-                "content": _VERIFY_NUDGE.format(
-                    files=", ".join(sorted(ctx.get("files_changed", set()))) or "(none)")}
+        body = _VERIFY_NUDGE.format(
+            files=", ".join(sorted(ctx.get("files_changed", set()))) or "(none)")
+        # JARVIS_TRACE: a passive system-prompt line gets 0 adoption (the coder goes
+        # straight to edit→run_code and never reaches for the optional tool). This is
+        # the just-in-time moment — the coder is about to finish WITH edits — so point
+        # it AT trace_to_test as the way to do the self-check. Recency makes it hard to
+        # ignore; it still finishes after one pass (NOT a gate, per the chosen design).
+        if _TRACE_MODE:
+            body += (
+                "\n\nDO THIS SELF-CHECK AS A GROUNDED TRACE — call trace_to_test(target) "
+                "and fill its template: walk the REAL flow to the EDGE citing actual "
+                "@file:line (imagined lines are rejected), name where the correct vs the "
+                "naive impl diverges, then run_code the discriminating test that a naive "
+                "impl FAILS. A test you RAN green beats a self-check you only narrated. "
+                "(Skip the trace only if this edit is purely mechanical — a rename, an "
+                "import, a typo.)")
+        return {"role": "user", "content": body}
     for rnd in range(1, max_rounds + 1):
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
