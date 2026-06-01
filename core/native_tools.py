@@ -453,8 +453,12 @@ def _do_replace(args: dict, ctx: dict) -> str:
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
         n = result[path].count("\n") + 1
-        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced. File is now {n} lines. "
-                f"Re-read with read_file if you need the new numbering before another edit.")
+        from core.edit_diff import render_diff
+        _diff = render_diff(before or "", result[path], path)
+        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — file is now {n} lines. "
+                f"Here is the change with the file's CURRENT line numbers; anchor your "
+                f"next edit's `old` from THESE numbers, do not re-read:\n"
+                + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
     # _match_fp can suffix-resolve it to another key — mutating file_contents
     # WITHOUT the write above (path not in result) → silent sandbox divergence.
@@ -654,8 +658,17 @@ def _do_edit(args: dict, ctx: dict) -> str:
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
         n = result[path].count("\n") + 1
-        return (f"✓ Applied {len(hunks)} hunk(s) to {path}. File is now {n} lines. "
-                f"Re-read with read_file before another edit if you need fresh context.")
+        # Hand back the before/after diff with the file's CURRENT line numbers, so
+        # the coder sees exactly what changed AND has fresh, correct numbers to
+        # anchor its next edit — instead of re-reading (the re-read/stale-`old`
+        # churn was the #1 cause of round pile-up: f327 burned ~16-33 edits nibbling
+        # blind). The coder no longer needs read_file between consecutive edits.
+        from core.edit_diff import render_diff
+        _diff = render_diff(before or "", result[path], path)
+        return (f"✓ Applied {len(hunks)} hunk(s) to {path} — file is now {n} lines. "
+                f"Here is the change with the file's CURRENT line numbers; copy your "
+                f"next edit's `old` from THESE numbers, do not re-read:\n"
+                + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).
     _changed = {k: v for k, v in result.items()
