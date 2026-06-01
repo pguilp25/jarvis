@@ -258,14 +258,15 @@ CODER_TOOLS = [
 _TRACE_TOOL = {"type": "function", "function": {
     "name": "trace_to_test",
     "description": (
-        "BEFORE editing a behaviour you're unsure of, call this to think it through. "
-        "It returns a strict template to fill: GOAL → a line-grounded FLOW trace (each "
-        "step cites the EXACT code line @ file:line — read_file first; imagined lines are "
-        "rejected) → the EDGE where correct vs the naive impl diverges → a TEST that "
-        "CATCHES the bug (adversarial setup + the assertion that fails for a naive impl). "
-        "Then run_code that test, make the MINIMAL change so it passes — nothing more. "
-        "Use it for any subtle/conditional requirement; it stops you from guessing a "
-        "plausible-wrong implementation."),
+        "AFTER you've edited a behaviour you're unsure of, call this to PROVE the edit "
+        "instead of hoping. It returns a strict template to fill: GOAL → a line-grounded "
+        "FLOW trace (each step cites the EXACT code line @ file:line — read_file first; "
+        "imagined lines are rejected) → the EDGE where correct vs the naive impl diverges "
+        "→ a TEST that CATCHES the bug (adversarial setup + the assertion that fails for a "
+        "naive impl). Then run_code that test against your edit: green proves the fix, red "
+        "shows exactly what the edit still gets wrong. Use it as the CLOSING step for any "
+        "subtle/conditional requirement — it turns 'I think this is right' into 'I ran the "
+        "discriminating test and it passed.'"),
     "parameters": {"type": "object", "properties": {
         "target": {"type": "string", "description": "the behaviour/symbol to trace to a test"},
     }, "required": ["target"]},
@@ -1131,14 +1132,16 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         # coder UNDERSTANDS the flow instead of guessing a plausible-wrong impl, and
         # bounds the change to the edge (anti-over-edit).
         system = system + (
-            "\n\n## FOR ANY SUBTLE / CONDITIONAL BEHAVIOUR — trace_to_test FIRST\n"
-            "If the step's correctness hinges on a nuance (an order, a condition, an edge "
-            "— 'X must not override Y', 'when A present, B is suppressed'), do NOT guess. "
-            "Call trace_to_test(target) and fill its template: trace the REAL flow to the "
-            "EDGE (cite real lines via read_file), name where correct vs naive diverges, and "
-            "write a test that CATCHES the naive bug. Then run_code that test, and make the "
-            "MINIMAL change so it passes — only the edge, nothing extra. Understand-then-"
-            "verify beats guess-then-hope.")
+            "\n\n## PROVE A SUBTLE EDIT — trace_to_test as your CLOSING step\n"
+            "When a step's correctness hinges on a nuance (an order, a condition, an edge "
+            "— 'X must not override Y', 'when A present, B is suppressed'), don't edit and "
+            "hope. AFTER you've made the edit, call trace_to_test(target) and fill its "
+            "template: trace the REAL flow (now including your edit) to the EDGE — cite "
+            "real lines via read_file; imagined citations are rejected — name where correct "
+            "vs naive diverges, and write a test that CATCHES the naive bug. Then run_code "
+            "that test against your edit: green proves it, red shows exactly what to fix "
+            "(change only the edge, nothing extra). A subtle fix you've run a discriminating "
+            "test on beats one you only reasoned about.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
@@ -1149,6 +1152,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
     _verify_nudged = False    # one forced self-check before finishing (per step)
     _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
+    _trace_nudges = 0         # grounding nudges spent on imagined trace citations
 
     def _verify_nudge_msg():
         return {"role": "user",
@@ -1270,6 +1274,25 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                 f"numbers and content below are OUTDATED. Do NOT copy "
                                 f"`old` from here — read_file {_ep} again for the current "
                                 f"view.⟫\n" + _c)
+        # TRACE grounding (JARVIS_TRACE): if the coder filled a trace this round,
+        # check its `@ file:line | code` citations against the REAL files. An
+        # imagined flow gets a concrete re-trace nudge — the SAME enforcement the
+        # planner's text loop already has, which was ABSENT here (the template was
+        # a dead-end otherwise: nothing received or verified the filled trace).
+        # Injected AFTER the tool results (API forbids a user turn between an
+        # assistant-with-tool_calls and its results); capped so it can't spam an
+        # uncooperative model.
+        if _TRACE_MODE and _trace_nudges < 2:
+            _ac = msg.get("content") or ""
+            if "@" in _ac and ":" in _ac:   # cheap prefilter for the `@file:line` form
+                from core.exploration_tools import verify_trace_lines
+                _gw = verify_trace_lines(_ac, ctx.get("project_root", ""))
+                if _gw:
+                    _trace_nudges += 1
+                    messages.append({"role": "user", "content": _gw})
+                    status(f"  [native:{short}] round {rnd}: trace citations not "
+                           f"grounded — asked to re-cite real lines")
+                    continue
         if _stuck:
             reason = "stuck-repeating"
             break

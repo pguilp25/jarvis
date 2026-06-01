@@ -1345,10 +1345,13 @@ TEST — design the check that CATCHES the bug (try to BREAK a naive impl, don't
   ACTION:  <the precise call (e.g. req.open(url, use_netrc=True))>
   EXPECT:  <the assertion that FAILS for the naive impl and passes ONLY when the edge is
             handled (e.g. assert headers["Authorization"].startswith("Bearer"))>
-  RUNNABLE: <SETUP+ACTION+EXPECT as a single `python -c "..."` (or pytest snippet) the coder
-            can run_code to verify before finishing>
+  RUNNABLE: <SETUP+ACTION+EXPECT as a single `python -c "..."` (or pytest snippet) you can
+            run_code right now against your edit>
 
-Then write the PLAN: the MINIMAL change that makes the edge satisfy EXPECT — nothing more.
+CONFIRM — run_code the RUNNABLE test against your current edit:
+  • GREEN  → the edit handles the edge; you're done.
+  • RED    → the edit still gets the edge wrong. Change ONLY the edge to satisfy EXPECT
+             (nothing extra), then re-run until green.
 """
 
 
