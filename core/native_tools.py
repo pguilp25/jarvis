@@ -172,19 +172,20 @@ CODER_TOOLS = [
         "name": "edit_file",
         "description": (
             "Your PRIMARY edit tool. Change an existing file by giving `hunks` — a list "
-            "of {\"start_line\": N, \"old\": [...], \"new\": [...]} objects. `old` is the "
-            "EXACT existing line(s), copied VERBATIM from read_file (real indentation, no "
-            "LINENO/INDENT prefixes). `start_line` is the read_file line number where "
-            "`old` begins. `new` is what those lines become. The match is by CONTENT "
-            "(verified against the file) with `start_line` to pin WHICH occurrence — so "
-            "a stale number can't misfire AND a line that repeats isn't ambiguous. "
-            "Copying the real lines keeps you focused on exactly what you change.\n"
+            "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
+            "line(s), copied VERBATIM (real indentation, no LINENO/INDENT prefixes) from "
+            "your MOST RECENT view of the file; `new` is what they become. The match is by "
+            "`old` CONTENT (verified against the file), NOT by line number — so a shifted "
+            "or older view can NEVER make an edit stale and you do not need line numbers. "
+            "Add \"start_line\": N to a hunk ONLY if a reject says `old` appears more than "
+            "once (to pick which occurrence).\n"
             "  • CHANGE lines: old=[current lines], new=[replacements].\n"
-            "  • INSERT new code: give start_line = the line to add AFTER, new=[your new "
-            "line(s)], and leave old empty.\n"
+            "  • INSERT new code: old=[the single existing line you want to add AFTER], "
+            "new=[that same line, then your new line(s)].\n"
             "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
-            "Multiple hunks edit several spots in one call. Parse-checked; a rejection "
-            "says exactly what to fix."),
+            "Multiple hunks edit several spots in one call. After applying you get a diff "
+            "= the file AFTER your change (its current state) — take your next `old` from "
+            "that, don't re-read. Parse-checked; a rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "hunks": {
@@ -455,9 +456,10 @@ def _do_replace(args: dict, ctx: dict) -> str:
         n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
-        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — file is now {n} lines. "
-                f"Here is the change with the file's CURRENT line numbers; anchor your "
-                f"next edit's `old` from THESE numbers, do not re-read:\n"
+        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced. Below is {path} AFTER your "
+                f"edit — its CURRENT, live state. Copy your next edit's `old` line(s) from "
+                f"here (matched by content, not numbers, so your view can't be stale); do "
+                f"NOT read_file again unless you need a part of {path} not shown below.\n"
                 + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
     # _match_fp can suffix-resolve it to another key — mutating file_contents
@@ -665,9 +667,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
         # blind). The coder no longer needs read_file between consecutive edits.
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
-        return (f"✓ Applied {len(hunks)} hunk(s) to {path} — file is now {n} lines. "
-                f"Here is the change with the file's CURRENT line numbers; copy your "
-                f"next edit's `old` from THESE numbers, do not re-read:\n"
+        return (f"✓ Applied {len(hunks)} hunk(s) to {path}. Below is {path} AFTER your edit "
+                f"— its CURRENT, live state (your `old` was matched by CONTENT, so line "
+                f"numbers don't matter and your view can't be stale). For your next change "
+                f"to this file, copy the exact `old` line(s) from here; do NOT read_file "
+                f"again unless you need a part of {path} not shown below.\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).
