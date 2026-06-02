@@ -265,3 +265,30 @@ def test_impl_steps__files_line_still_preferred():
     )
     out = _extract_impl_steps(plan)
     assert out[0]["files"] == ["openlibrary/catalog/marc/parse.py"], out[0]["files"]
+
+
+def test_impl_steps__v8_steps_header_and_redraft_keeps_final():
+    # The live V8 prompt emits `## STEPS` (not `## IMPLEMENTATION STEPS`). The parser must
+    # (a) recognize it, (b) on a merger REDRAFT use the LAST `## STEPS` block — keeping the
+    # corrected final STEP 1, not the discarded first draft — and (c) NOT bleed the trailing
+    # `## TESTS` / `## CONFIDENCE` sections into the last step's body. (audit pass-3 fix.)
+    plan = (
+        "## STEPS\n"
+        "### STEP 1: wrong\nFILES: wrong/a.py\nold draft body\n"
+        "## STEPS\n"                       # redraft — last header wins
+        "### STEP 1: right\nFILES: right/a.py\nfinal body\n"
+        "## TESTS\nshould NOT bleed into the step body\n"
+        "## CONFIDENCE\nhigh\n"
+    )
+    steps = _extract_impl_steps(plan)
+    assert len(steps) == 1
+    assert steps[0]["name"] == "right"
+    body = steps[0].get("details", "") + steps[0].get("body", "")
+    assert "should NOT bleed" not in body
+    assert "high" not in body
+
+
+def test_impl_steps__legacy_implementation_steps_header_still_works():
+    plan = "## IMPLEMENTATION STEPS\n### STEP 1: do it\nFILES: x.py\nbody\n"
+    steps = _extract_impl_steps(plan)
+    assert len(steps) == 1 and steps[0]["name"] == "do it"

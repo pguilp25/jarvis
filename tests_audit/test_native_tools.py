@@ -112,29 +112,30 @@ def test_read_file_shows_real_indentation():
         _cleanup(root)
 
 
-def test_diff_line_copy_paste_round_trips():
-    # A coder copying ANY line from a post-edit diff (context `N:  `, added `N:+ `,
-    # removed `N:- `, incl. the leading line-number pad) as its next `old`/`new` must
-    # resolve to the real code with its real indentation. (audit re-pass HIGH fix.)
+def test_diff_changed_line_copy_paste_round_trips():
+    # A coder copying a CHANGED diff line (added `N:+ ` or removed `N:- `, incl. the leading
+    # line-number pad) resolves to the real code with its real indentation. (Context `N:  `
+    # lines are intentionally NOT stripped — that shape collides with YAML `N:  value`, so
+    # the coder copies unchanged anchors from the read view instead. pass-3 fix.)
     from core.native_tools import _expand_indent_lines as ex
     from core.edit_diff import render_diff
     old = "class C:\n    def f(self):\n        return 1\n"
-    new = "class C:\n    def f(self):\n        if True:\n            return 2\n        return 1\n"
+    new = "class C:\n    def f(self):\n        return 2\n"
     diff = render_diff(old, new, "m.py")
-    for line in diff.splitlines()[1:]:          # skip the path header
-        if not line.strip():
-            continue
+    changed = [l for l in diff.splitlines() if l.lstrip()[:2] in ("+ ", "- ")
+               or (":" in l and l.split(":", 1)[1][:2] in ("+ ", "- "))]
+    assert changed, "expected at least one +/- diff line"
+    for line in changed:
         got = ex([line])[0]
-        # the expansion must NOT leave any diff gutter/marker behind
-        assert "|" not in got.split(":")[0] if ":" in got else True
-        assert not got.lstrip().startswith(("+ ", "- "))
-    # end-to-end: copy a real diff line as `old` and confirm it APPLIES
+        assert "|" not in got and not got.lstrip().startswith(("+ ", "- "))
+        assert ":" not in got.split()[0] if got.split() else True   # no LINENO: gutter left
+    # end-to-end: copy the removed (`-`) diff line as `old` and confirm it APPLIES
     from core.native_tools import _do_edit
     ctx = {"file_contents": {"m.py": old}, "files_changed": set()}
-    diff_line = next(l for l in diff.splitlines() if "return 1" in l)
-    r = _do_edit({"path": "m.py", "hunks": [{"start_line": 3, "old": [diff_line],
+    minus = next(l for l in diff.splitlines() if l.split(":", 1)[-1].startswith("- "))
+    r = _do_edit({"path": "m.py", "hunks": [{"start_line": 3, "old": [minus],
                                              "new": ["8|return 9"]}]}, ctx)
-    assert r.startswith("✓"), f"copied diff line should apply, got: {r}"
+    assert r.startswith("✓"), f"copied -/+ diff line should apply, got: {r}"
 
 
 def test_route_parser_accepts_colonless_go_to_step():
@@ -147,6 +148,22 @@ def test_route_parser_accepts_colonless_go_to_step():
     assert parse_route("[GO TO PLAN]").kind == "plan"
     assert parse_route("[GO TO STEP 3: fix it]").kind == "step"   # colon form still works
     assert parse_route("[APPROVED]").kind == "approved"
+    # word-boundary: PLANNER/STEPPED must NOT match the keyword as a prefix (pass-3 fix)
+    assert parse_route("[GO TO PLANNER] handle it").kind == "none"
+    assert parse_route("[GO TO STEPPED] carefully").kind == "none"
+
+
+def test_diff_space_marker_does_not_eat_yaml_mappings():
+    # _DIFF_LINE_RE must match ONLY +/- diff markers, never the context `N:  ` form — a
+    # YAML/dict mapping `443:  description` is shape-identical and must survive verbatim.
+    # (audit pass-3 fix: the space marker silently truncated config lines.)
+    from core.native_tools import _expand_indent_lines as ex
+    assert ex(["443:  description"]) == ["443:  description"]
+    assert ex(["200:  OK"]) == ["200:  OK"]
+    assert ex(["8080:  proxy backend"]) == ["8080:  proxy backend"]
+    # but real +/- diff lines (incl. leading pad) still resolve to the real code
+    assert ex([" 3:+     return 2"]) == ["    return 2"]
+    assert ex(["12:-     return 1"]) == ["    return 1"]
 
 
 def test_appears_annotation_strip_is_safe():

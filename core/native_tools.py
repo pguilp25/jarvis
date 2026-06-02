@@ -722,11 +722,14 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
 # never matches.
 _INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code
 _VIEW_LINE_RE   = re.compile(r'^\d+:(\d+)\|(.*)$')       # LINENO:INDENT|code (copied view line)
-# A line copied from a post-edit diff (core/edit_diff.py): `<pad>LINENO:` then a 2-char
-# marker — `+ ` (added), `- ` (removed), or `  ` (context) — then the code WITH its real
-# leading spaces. The line number is right-justified (width>=2) so single digits carry a
-# LEADING PAD; tolerate it with ^\s*. group(1) is the real code (its indent preserved).
-_DIFF_LINE_RE   = re.compile(r'^\s*\d+:[+\- ] (.*)$')
+# A line copied from a post-edit diff (core/edit_diff.py): `<pad>LINENO:` then `+ ` (added)
+# or `- ` (removed), then the code WITH its real leading spaces (the right-justified line#
+# carries a LEADING PAD on single digits, tolerated by ^\s*). group(1) is the real code.
+# IMPORTANT: match ONLY `+`/`-`, NOT the context marker `  ` (two spaces) — a context line
+# `N:  code` is shape-IDENTICAL to a YAML/dict mapping like `443:  description`, so eating
+# that prefix silently corrupts config files. Context lines are copied from the read view
+# (LINENO:INDENT|), which is unambiguous. (audit pass-3 fix: YAML/config over-match.)
+_DIFF_LINE_RE   = re.compile(r'^\s*\d+:[+\-] (.*)$')
 # blast-radius annotation a def line may carry: ` |appears N (#hex...)`. Require the
 # `(#hex` shape the annotation ALWAYS emits, so a real code line like
 # `raise ValueError("x |appears 3 times")` is NOT truncated.

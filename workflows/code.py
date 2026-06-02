@@ -9394,8 +9394,13 @@ def _extract_impl_steps(plan: str) -> list[dict]:
     # matched only ONCE (consuming everything from the FIRST header to EOF),
     # so the "use the last" intent was silently broken. Find header
     # positions directly instead.
+    # The live V8 prompts emit `## STEPS`; older/legacy text used `## IMPLEMENTATION STEPS`.
+    # Match BOTH — keying only on the old header meant this never matched the real plan, so
+    # the LAST-header scoping silently broke: a merger redraft kept the FIRST (incomplete)
+    # STEP 1 over the corrected final one, and the trailing `## TESTS`/`## CONFIDENCE` bled
+    # into the last step's body. (audit pass-3 fix: ## STEPS header mismatch.)
     header_pat = re.compile(
-        r'##\s*IMPLEMENTATION\s+STEPS\s*\n',
+        r'##\s*(?:IMPLEMENTATION\s+)?STEPS\s*\n',
         re.IGNORECASE,
     )
     header_positions = [m.end() for m in header_pat.finditer(plan)]
@@ -9438,8 +9443,10 @@ def _extract_impl_steps(plan: str) -> list[dict]:
                 r'\n##\s+EDGE\s+CASES\b',
                 r'\n##\s+VERIFICATION\b',
                 r'\n##\s+TEST\s+CRITERIA\b',
+                r'\n##\s+TESTS\b',            # V8 emits ## TESTS (not ## TEST CRITERIA)
                 r'\n##\s+PRE-?MORTEM\s+RESOLUTION\b',
                 r'\n##\s+CONFIDENCE\s+GATE\b',
+                r'\n##\s+CONFIDENCE\b',       # V8 emits ## CONFIDENCE (not ## CONFIDENCE GATE)
             ]
             term_pat = re.compile(
                 "|".join(terminators), re.IGNORECASE,
