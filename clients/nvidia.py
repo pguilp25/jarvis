@@ -343,7 +343,16 @@ async def call_nvidia_tools(
                 f"(no key / not mapped)")
         url, key, api_model = _forced
     else:
-        url, key, api_model = _route(model_id)
+        # OpenAI-compatible non-NVIDIA providers (e.g. mistral/medium → api.mistral.ai)
+        # speak the standard tools= function-calling API, so the same payload + parser
+        # work here — only the endpoint/key/slug differ. Route them via openai_compat
+        # so a former text-only model can serve as a NATIVE-tool coder. gpt-oss never
+        # reaches this branch (it always passes force_provider). (user 2026-06-02)
+        from clients.openai_compat import PROVIDERS as _OAI_PROV, _resolve as _oai_resolve
+        if model_id.split("/", 1)[0] in _OAI_PROV:
+            url, key, api_model = _oai_resolve(model_id)
+        else:
+            url, key, api_model = _route(model_id)
     payload = {
         "model": api_model,
         "messages": messages,

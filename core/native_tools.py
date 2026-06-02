@@ -51,7 +51,12 @@ from core.cli import status, warn
 from core import thought_logger
 
 # Models built for native function-calling — use the structured loop, not text.
-NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss-120b"}
+NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss-120b",
+                      # mistral/medium speaks the standard tools= function-calling API
+                      # (api.mistral.ai). As a TEXT coder it kept omitting JARVIS's
+                      # [tool use] wrapper (0 extractable edits); as a NATIVE-tool coder
+                      # it emits structured tool_calls instead. (user 2026-06-02)
+                      "mistral/medium"}
 
 # WHITESPACE read view (default ON for the native coder; JARVIS_NATIVE_WS=0 to
 # A/B-disable). The READ format must MATCH the WRITE format: edit_file is the

@@ -12107,7 +12107,7 @@ async def _implement_one_step(
         #   primary — qwen3-480b 429-saturated, pollinations-qwen 0-edits. gpt-oss native
         #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
-                        ("mistral/medium","text"), ("nvidia/gpt-oss-nim","native"),
+                        ("mistral/medium","native"), ("nvidia/gpt-oss-nim","native"),
                         ("nvidia/glm-5.1","text")]
         for _m, _mode in _CODER_CHAIN:
             try:
