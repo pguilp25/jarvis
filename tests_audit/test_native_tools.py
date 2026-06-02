@@ -623,13 +623,17 @@ def test_native_prompt_has_indent_by_scope_reasoning():
 
 
 def test_native_prompt_has_anti_over_elaboration_rule():
-    """ckpt 71: the coder over-elaborates (returns a wrapped type when a plain dict
-    is asked, appends an extra command flag, combines 'X or Y' alternatives). The
-    prompt must say the spec is a CEILING — implement only the stated behaviour."""
+    """ckpt 71 / ckpt 116 (RIGHT-SIZE): the coder must neither over-elaborate
+    (gold-plate: wrapped type, extra flag, combining 'X or Y') NOR under-build
+    (collapse required logic to a naive shortcut). The prompt must carry the
+    right-size rule: cut extras, keep required logic, pick ONE of alternatives."""
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
     low = IMPLEMENT_NATIVE_PROMPT.lower()
-    assert "ceiling" in low, "native prompt missing the spec-is-a-ceiling rule"
+    assert "right-size" in low or "gold-plat" in low, "native prompt missing the right-size / no-gold-plating rule"
     assert "pick exactly one" in low, "native prompt must say pick ONE of offered alternatives"
+    # the ckpt-116 nuance: minimal must NOT mean the naivest shortcut
+    assert "correct implementation" in low or "never required logic" in low, \
+        "right-size rule must say minimal = simplest CORRECT impl, not the naive shortcut"
 
 
 def test_native_prompt_has_thinking_toolkit_reflexes():
