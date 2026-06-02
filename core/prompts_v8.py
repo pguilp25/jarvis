@@ -1063,6 +1063,15 @@ runtime needs the closing fence to extract.
                account for EVERY reference to it (use [REFS:]/[SEARCH:])
                and make sure they're handled in this step or an
                EARLIER one — never a later one.
+    - THREADING A NEW PARAMETER: when a step adds an optional arg that
+      FLOWS THROUGH an existing call (e.g. `open_url` → `Request().open`),
+      do NOT prescribe a specific entry point from memory ("forward it
+      when CREATING the Request"). Say WHAT to add and let it be wired
+      the SAME WAY the call's existing sibling options already flow —
+      `[REFS:]`/read the call and check: if `ciphers`/`decompress` are
+      passed to `.open(...)`, the new arg goes to `.open(...)` too, beside
+      them, NOT through the constructor. The test asserts that conventional
+      call signature; a functionally-equivalent different path still FAILS.
     - SELF-CONTAINED: don't write "the function from STEP 1" —
       name the function, file, line. The coder may see only one
       STEP at a time.
@@ -1919,6 +1928,7 @@ REFLEXES — trigger then do this (fire each the instant it applies):
   - About to write an exact token — a command + flags, an API/method name, a constant, a dict key, a regex -> ASSUME-AND-CHECK: take your choice as correct, derive what the spec's example would then show, and check it shows EXACTLY that. On a collision the EXAMPLE wins. (A value in a tool's OUTPUT — `scope host` in `ip route` output — is never an INPUT flag.) Can't derive what your choice produces? You don't know it -> search_text for how the repo already does it and copy the real form.
   - You handled ONE of a set the spec treats as PARALLEL — one of several error codes, one of N call sites of a renamed symbol, one entry in a table -> SIBLINGS MOVE TOGETHER: scan the whole set, apply the change to each.
   - Returning a value / passing an argument -> TYPE-SNAP: produce the EXACT type the consumer/test expects — a plain dict if a dict is wanted, never a fancier superset.
+  - Adding a new parameter and FORWARDING it through an existing call -> THREAD LIKE ITS SIBLINGS: find how that call already passes its OTHER options (the sibling kwargs right next to where yours belongs) and pass yours the IDENTICAL way — same call, same style, beside them. If `ciphers`/`decompress` are kwargs on `x.open(...)`, your new param is a kwarg on `x.open(...)` too — do NOT reroute it through a DIFFERENT entry point (a constructor, a global, a setattr) just because that also happens to reach the target. The test asserts the conventional call signature, and consistency is the safe default. If the PLAN says to thread it one way ("forward it when creating the Request") but the file's existing parameters go another way (they're passed to `.open()`), FOLLOW THE FILE — the plan says WHAT to add, the code you read shows HOW it must be wired.
   - Tempted to add a feature / arg / wrapping the spec didn't ask for -> RIGHT-SIZE: cut the EXTRA, keep the REQUIRED. Don't gold-plate (no unrequested features, "while we're here" refactors, or extra args a test would trip over) — but "minimal" means the simplest CORRECT implementation that satisfies EVERY case and behaviour the spec names, NOT the naivest shortcut. If the spec implies a RELATION (a significance order like "minor or above", a mapping of inputs→values, a hierarchy), implement that relation — don't collapse it to a bare `==` or leave a boundary case (first-run / empty / None) on the old default. Trim scope, never required logic. If the plan offers "X or Y", pick exactly ONE.
   - RELOCATING code — moving/extracting a function or class -> MOVE IT VERBATIM: read_file the original and copy it character-for-character; change ONLY what the step requires (e.g. the import path). Paraphrasing silently drops a branch the tests rely on.
   - Adding a line, especially a def/class -> INDENT BY SCOPE: indentation is the line's SCOPE, not the line physically above it. Match a SIBLING in that scope (another method's `def`), not the previous method's body line — wrong indent silently breaks class-binding (AttributeError, with no import error to warn you).
