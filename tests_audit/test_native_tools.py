@@ -747,8 +747,11 @@ def test_edit_file_in_toolset_and_primary():
     assert names.index("edit_file") < names.index("replace_lines")
     schema = next(t for t in CODER_TOOLS if t["function"]["name"] == "edit_file")
     props = schema["function"]["parameters"]["properties"]
-    assert set(props) == {"path", "hunks"}
+    # ckpt 119: edit_file gained grounding-CoT fields (goal/traced/check), enforced
+    # only when JARVIS_EDIT_COT is set (optional in the base schema).
+    assert set(props) == {"path", "hunks", "goal", "traced", "check"}
     assert props["hunks"]["type"] == "array"
+    assert {"goal", "traced", "check"} <= set(props)
 
 
 def test_edit_file_changes_by_content_not_line_number():
@@ -1107,3 +1110,36 @@ def test_edit_diff_stamped_with_round_when_no_step():
     out = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 1, "old": ["a = 1"], "new": ["a = 2"]}]}, ctx)
     assert out.startswith("✓") and "round 7" in out and "step" not in out.split("\n")[0]
+
+
+def test_edit_cot_gate_rejects_ungrounded_when_flag_on():
+    """ckpt 119 (JARVIS_EDIT_COT): edit tools REQUIRE grounded goal/traced/check.
+    Ungrounded / guessed / unquoted edits are REJECTED; a grounded edit (traced
+    quotes a real line) applies. Flag OFF = no enforcement (regression-safe)."""
+    import os, importlib
+    src = "class Bar:\n    def a(self):\n        return 1\n"
+    mkctx = lambda: {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+                     "project_root": ".", "files_changed": set()}
+    hunk = [{"start_line": 3, "old": ["        return 1"], "new": ["        return 2"]}]
+    os.environ["JARVIS_EDIT_COT"] = "1"
+    try:
+        import core.native_tools as nt; importlib.reload(nt)
+        run = lambda a: asyncio.run(nt._dispatch("edit_file", a, mkctx()))
+        # missing grounding → reject
+        assert run({"path": "m.py", "hunks": hunk}).startswith("✗")
+        # hedge in traced → reject
+        assert "GUESS" in run({"path": "m.py", "goal": "make a() return 2 per spec",
+            "traced": "it probably returns 1", "check": "calling a() returns 2 not 1", "hunks": hunk})
+        # traced doesn't quote a real line → reject
+        assert run({"path": "m.py", "goal": "make a() return 2 per spec",
+            "traced": "the method returns the number one", "check": "a() gives 2",
+            "hunks": hunk}).startswith("✗")
+        # grounded (traced quotes `return 1`) → apply
+        ok = run({"path": "m.py", "goal": "make a() return 2 as the spec requires",
+            "traced": "a() runs `return 1`", "check": "a() returns 2 not 1", "hunks": hunk})
+        assert ok.startswith("✓"), ok
+    finally:
+        os.environ.pop("JARVIS_EDIT_COT", None)
+        import core.native_tools as nt; importlib.reload(nt)
+    # flag OFF: ungrounded edit applies (no enforcement)
+    assert asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": hunk}, mkctx())).startswith("✓")

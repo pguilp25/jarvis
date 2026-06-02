@@ -72,6 +72,56 @@ _WS_MODE = os.environ.get("JARVIS_NATIVE_WS", "1") != "0"
 # over-editing regression. Enabled with JARVIS_TRACE.
 _TRACE_MODE = bool(os.environ.get("JARVIS_TRACE"))
 
+# EDIT-COT (flag-gated, A/B; default OFF). The captured coder reasoning (ckpt-118)
+# showed the coder GUESSES the contract ("likely/probably/simpler/basic") instead of
+# doing the 4-move CoT — and an OPTIONAL CoT is ignored. So bake the grounding INTO
+# the writing tools: every edit must carry goal/traced/check, and the harness REJECTS
+# the edit if they're missing OR ungrounded (the `traced` field must quote a REAL line
+# from the file, so a guess can't satisfy it). Forcing the grounding as a tool arg is
+# the structural enforcement the diagnosis calls for. Enabled with JARVIS_EDIT_COT.
+_EDIT_COT = bool(os.environ.get("JARVIS_EDIT_COT"))
+_HEDGE = ("likely", "probably", "maybe", "i think", "i guess", "not sure",
+          "should be", "presumably", "perhaps", "might be")
+
+
+def _check_edit_cot(args: dict, cur: str, is_insert: bool) -> "str | None":
+    """When _EDIT_COT: require the writing call to carry GROUNDED reasoning —
+    goal (the spec behaviour this edit makes true), traced (what the code does NOW,
+    quoting a REAL line), check (one concrete input→expected case). Returns a
+    REJECTION string (edit must NOT apply) or None. The `traced`-must-quote-a-real-line
+    rule is the teeth: a 'likely/probably' guess can't quote an actual line."""
+    if not _EDIT_COT:
+        return None
+    fields = {f: str(args.get(f, "") or "").strip() for f in ("goal", "traced", "check")}
+    missing = [f for f, v in fields.items() if len(v) < 12]
+    if missing:
+        return (f"✗ grounding required before this edit — fill {missing}: "
+                f"`goal` = the spec behaviour this edit makes true; `traced` = what the "
+                f"code does NOW (QUOTE the real line you read, don't describe it); `check` "
+                f"= one concrete input→expected-output case your edit satisfies. "
+                f"(A guess is not grounding — read the actual line/spec first.)")
+    # anti-guess: hedge words without a concrete anchor = guessing, not grounding
+    low = fields["traced"].lower()
+    if any(h in low for h in _HEDGE):
+        return (f"✗ `traced` is a GUESS ('{fields['traced'][:60]}…') — read the actual "
+                f"code/spec and state what it CONCRETELY is (quote the real line), not what "
+                f"it 'likely/probably' is. Grounding, not guessing.")
+    # the teeth: for a CHANGE (not a pure insert), `traced` must QUOTE a real line
+    # (backtick-quoted content that actually appears in the file). A guess can't.
+    if not is_insert and cur:
+        cur_norm = " ".join(cur.split())
+        quoted = [q.strip() for q in re.findall(r'`([^`]+)`', fields["traced"]) if len(q.strip()) >= 4]
+        grounded = any(" ".join(q.split()) in cur_norm for q in quoted) or \
+                   (len(fields["traced"]) >= 20 and " ".join(fields["traced"].split()) in cur_norm)
+        if not grounded:
+            if not quoted:
+                return ("✗ `traced` must QUOTE the real line you're changing IN BACKTICKS "
+                        "(e.g. traced=\"a() runs `return 1`\"), not describe it — so the edit "
+                        "is grounded in the actual code, not a guess about it.")
+            return ("✗ the line you quoted in `traced` isn't in this file — quote the ACTUAL "
+                    "current line you're changing, copied verbatim from your read.")
+    return None
+
 
 def is_native_tool_model(model_id: str) -> bool:
     return model_id in NATIVE_TOOL_MODELS
@@ -172,6 +222,9 @@ CODER_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path of the new file"},
             "content": {"type": "string", "description": "the full contents of the new file"},
+            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this new file provides — 1 concrete sentence"},
+            "traced": {"type": "string", "description": "GROUNDING: the spec/interface line this file implements (quote it) — not a guess about what's wanted"},
+            "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case the new code satisfies"},
         }, "required": ["path", "content"]},
     }},
     {"type": "function", "function": {
@@ -194,6 +247,9 @@ CODER_TOOLS = [
             "that, don't re-read. Parse-checked; a rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
+            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this edit makes true — 1 concrete sentence"},
+            "traced": {"type": "string", "description": "GROUNDING: what the code does NOW at the edit site — QUOTE the real line you read (in backticks), don't guess/describe"},
+            "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies (the spec's example if given)"},
             "hunks": {
                 "type": "array",
                 "description": "one or more content-anchored edits",
@@ -224,6 +280,9 @@ CODER_TOOLS = [
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
             "new_content": {"type": "string"},
+            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this edit makes true — 1 concrete sentence"},
+            "traced": {"type": "string", "description": "GROUNDING: what the lines you're replacing do NOW — QUOTE a real line from the range (in backticks)"},
+            "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies"},
         }, "required": ["path", "start_line", "end_line", "new_content"]},
     }},
     {"type": "function", "function": {
@@ -507,6 +566,9 @@ def _do_replace(args: dict, ctx: dict) -> str:
                 f"end_line ({e_i}). Put the smaller line number first (use the "
                 f"numbers from your most recent read_file).")
     before = ctx["file_contents"].get(path)
+    _cot_reject = _check_edit_cot(args, before or "", is_insert=False)
+    if _cot_reject:
+        return _cot_reject
     _before_all = dict(ctx["file_contents"])   # to catch a suffix-resolved key (review #2)
     block = (f"=== EDIT: {path} ===\n[REPLACE LINES {s_i}-{e_i}]\n"
              f"{new}\n[/REPLACE]\n=== END EDIT ===")
@@ -661,6 +723,17 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"first, then copy the exact `old` lines (and their start_line) from "
                 f"that view.")
     cur_lines = cur.split("\n")
+
+    # EDIT-COT grounding gate (flag-gated): reject unless the edit carries grounded
+    # goal/traced/check — a guess can't quote a real line. Pure-insert = all hunks
+    # have empty `old` (no existing line to quote → relax the quote-check).
+    _hk = args.get("hunks") or []
+    _is_insert = bool(_hk) and all(
+        not any(str(o).strip() for o in (h.get("old") or []))
+        for h in _hk if isinstance(h, dict))
+    _cot_reject = _check_edit_cot(args, cur, _is_insert)
+    if _cot_reject:
+        return _cot_reject
 
     def _as_list(v):
         if v is None:
@@ -830,6 +903,10 @@ def _do_create(args: dict, ctx: dict) -> str:
         # (1 lines)" — a silent no-op the model can't tell from real success.
         return (f"✗ create_file: no content for {path}. Pass the full file body in "
                 f"`content` (the complete code for the new file).")
+    # grounding gate (new file → no line to quote; ground in the spec/interface)
+    _cot_reject = _check_edit_cot(args, "", is_insert=True)
+    if _cot_reject:
+        return _cot_reject
     existing = ctx["file_contents"].get(path)
     if existing is None and ctx.get("sandbox") is not None:
         existing = ctx["sandbox"].load_file(path)
@@ -1283,6 +1360,24 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "that test against your edit: green proves it, red shows exactly what to fix "
             "(change only the edge, nothing extra). A subtle fix you've run a discriminating "
             "test on beats one you only reasoned about.")
+    if _EDIT_COT:
+        # Bake the grounding INTO every edit: the writing tools (edit_file/replace_lines/
+        # create_file) now REQUIRE goal/traced/check, and the harness REJECTS the edit if
+        # they're missing or ungrounded. This makes guessing impossible — you cannot write
+        # without showing what you traced.
+        system = system + (
+            "\n\n## EVERY EDIT MUST BE GROUNDED (enforced — ungrounded edits are REJECTED)\n"
+            "edit_file / replace_lines / create_file now take three MANDATORY fields, and an "
+            "edit missing or faking them is REJECTED (not applied):\n"
+            "  • goal   — the spec behaviour this edit makes true (1 concrete sentence).\n"
+            "  • traced — what the code does NOW at the edit site, QUOTING the real line you "
+            "read (in backticks). NOT 'likely'/'probably'/a description — the actual line. "
+            "(For a brand-new symbol, quote the anchor/spec line you're building from.)\n"
+            "  • check  — one concrete input→expected-output case your edit satisfies (use the "
+            "spec's own example when given).\n"
+            "You literally cannot write without showing your grounding, so DON'T GUESS the "
+            "contract — read the real line/spec and quote it. A 'basic'/'simpler' guess that "
+            "doesn't quote real code will be rejected.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
