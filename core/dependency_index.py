@@ -463,9 +463,12 @@ def build_index(project_root: str,
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
-# Match a view-format line and capture the trailing line number.
-# View lines look like: `i<N>|<code> <LINE_NUMBER>`
-_VIEW_LINE_RE = re.compile(r'^(i\d+\|.*?)( )(\d+)(\s*)$')
+# Match a view-format line and capture its line number. The view format is the
+# current v10 front-line-number form `LINENO:INDENT|code` (e.g. `286:4|    def foo`);
+# group(1) is the line number. (Was the dead `i<N>|<code> <trailing-lineno>` form, which
+# the renderer stopped producing when the line# moved to the front — so the annotation
+# silently never fired and `[DEPENDENCY: #tag]` became unreachable. audit fix C.)
+_VIEW_LINE_RE = re.compile(r'^(\d+):(\d+)\|(.*)$')
 
 # Thresholds for the "central" marker. The marker fires when the
 # symbol's def file contains at least one symbol referenced from
@@ -525,7 +528,7 @@ def annotate_view(file_path: str, view_text: str,
         m = _VIEW_LINE_RE.match(line)
         if m and "|appears " not in line:
             try:
-                lineno = int(m.group(3))
+                lineno = int(m.group(1))   # front line number (v10 LINENO:INDENT|code)
             except ValueError:
                 out_lines.append(line)
                 continue

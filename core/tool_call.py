@@ -1791,7 +1791,7 @@ async def _run_code_reads(
         annotated_parts = []
         for part in output_parts:
             m = re.search(r'=== Code: (\S+?) ', part)
-            if m and re.search(r'^i\d+\|', part, re.MULTILINE):
+            if m and re.search(r'^\d+:\d+\|', part, re.MULTILINE):  # v10 LINENO:INDENT| (was dead ^i\d+|)
                 fpath_in_part = m.group(1)
                 annotated_parts.append(
                     await annotate_code_output_async(sandbox_dir, fpath_in_part, part)
@@ -2601,7 +2601,7 @@ async def _run_view(
         annotated_parts = []
         for part in output_parts:
             m = re.search(r'=== VIEW: (\S+?) \(lines ', part)
-            if m and re.search(r'^i\d+\|', part, re.MULTILINE):
+            if m and re.search(r'^\d+:\d+\|', part, re.MULTILINE):  # v10 LINENO:INDENT| (was dead ^i\d+|)
                 fpath_in_part = m.group(1)
                 annotated_parts.append(
                     await annotate_code_output_async(sandbox_dir, fpath_in_part, part)

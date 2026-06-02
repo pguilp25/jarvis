@@ -163,9 +163,9 @@ is the most reliable way to break unrelated tests.
     [DEPENDENCY: #tag]          type-resolved callers / blast-radius for a
                                 high-fanout symbol — pass the `#tag` from the
                                 `|appears N` annotation, not the symbol name
-    [CODE: path]                read full file. NO range syntax —
-                                `[CODE: path L-R]` is REJECTED; use
-                                `[VIEW: path L-R]` for a range, or
+    [CODE: path]                read full file. `[CODE: path L-R]` also
+                                works for a range; `[VIEW: path L-R]` is
+                                the leaner range read, or
                                 `[CODE: path]` + `[KEEP: path L-R]`
                                 for a large file.
     [VIEW: path L-R]            read line range L to R
@@ -320,8 +320,9 @@ Notes:
 
 ### Tool format notes
 
-- Result labels: prefix any call with `#label = ` to name the
-  result; later `[DISCARD: #label]` removes it from context.
+- Result labels: end a call with ` #label` INSIDE the tag (e.g.
+  `[REFS: process_turn #ref1]`) to name the result; later
+  `[DISCARD: #label]` removes it from context.
 
 
 ### Runtime feedback after edits — what you'll see next round
@@ -1901,7 +1902,7 @@ calling `[CODE:]` on the file. The provenance is the same as a
 IMPLEMENT_NATIVE_PROMPT_V8 = """You are the CODER in a multi-step coding agent, working through NATIVE function calls. A planner already did the analysis — your ONLY job is to EXECUTE the one assigned step by editing files. Don't re-plan; don't expand scope beyond the step.
 
 YOUR TOOLS
-  - read_file(path[, start_line, end_line]) — content as `LINENO: <code with its REAL leading spaces>`. The indentation you see IS the indentation — copy it verbatim into edits. Big file -> skeleton; pass a range to expand.
+  - read_file(path[, start_line, end_line]) — content as `LINENO:INDENT|<real spaces>code` (e.g. `286:4|    def setvalue` = line 286, indent 4, then the real spaces, then code). You SEE the indentation AND its number. Big file -> skeleton; pass a range to expand.
   - search_text(pattern) — ripgrep the project for a string/regex.
   - find_refs(symbol) — where a name is defined / imported / used (the first lookup to reach for).
   - find_callers(tag) — precise callers of a high-fanout `|appears N (#tag)` symbol; pass the #tag.
@@ -1909,7 +1910,7 @@ YOUR TOOLS
   - file_purpose(path) — a file's docstring + def signatures, no bodies (fast triage).
   - semantic_search(query) — find code by what it DOES when you don't know the name.
   - create_file(path, content) — make a NEW file (won't clobber an existing one).
-  - edit_file(path, hunks) — your PRIMARY EDIT. `hunks` = list of {"old": [...], "new": [...]}. `old` = the EXACT existing line(s), copied VERBATIM (real leading spaces, drop the `LINENO:` prefix) from your MOST RECENT view of the file; `new` = what they become. edit_file matches `old` by its CONTENT, NOT by line number — so you never need line numbers, and a shifted or older view can NEVER make an edit "stale". Add `"start_line": N` to a hunk ONLY if a reject tells you `old` appears more than once (to pick which one). CHANGE: old=[lines], new=[lines]. INSERT: old=[the single existing line you want to add AFTER], new=[that same line, then your new lines]. DELETE: new=[]. After each apply you get back a DIFF = the file AFTER your change, its current state — that IS your live view; take your next edit's `old` straight from it. read_file again ONLY for a part of the file you have not seen since your last edit. ✓applied / ✗rejected says why — fix and retry, never repeat an identical failing call.
+  - edit_file(path, hunks) — your PRIMARY EDIT. `hunks` = list of {"old": [...], "new": [...]}. Each line is `INDENT|code` — the indent NUMBER (the `N` from the view's `LINENO:INDENT|`) then a pipe then the code; the harness re-emits INDENT spaces, so you DECLARE indentation by number and never type (or drop) leading spaces. You may also just COPY-PASTE a line straight from the view (`286:4|    def foo`) or from a diff (`12:+    return 2`) — the harness strips the `LINENO:`/diff-marker and uses the number; the indent can't go wrong. `old` = the existing line(s) to match (matched by CONTENT, not line number — a shifted/older view can NEVER make an edit "stale"); `new` = what they become. Add `"start_line": N` ONLY if a reject says `old` appears more than once. CHANGE: old=[lines], new=[lines]. INSERT: old=[the existing line you want to add AFTER], new=[that same line, then your new lines]. DELETE: new=[]. After each apply you get back a DIFF = the file's new state; take your next edit's `old` straight from it (copy the line — the harness handles its `LINENO:`/marker). read_file again ONLY for a part you have not seen since your last edit. ✓applied / ✗rejected says why — fix and retry, never repeat an identical failing call.
   - replace_lines(path, start_line, end_line, new_content) — SECONDARY whole-range swap; it DELETES anything in the range you don't re-emit, so prefer edit_file.
   - run_code(command) — optional. Run something in your sandbox (your edits are live; repo deps + pytest; read-only, no network) if you want to check a fact.
   - finish(summary) — call when the step is done.
@@ -1931,7 +1932,7 @@ REFLEXES — trigger then do this (fire each the instant it applies):
   - Adding a new parameter and FORWARDING it through an existing call -> THREAD LIKE ITS SIBLINGS: find how that call already passes its OTHER options (the sibling kwargs right next to where yours belongs) and pass yours the IDENTICAL way — same call, same style, beside them. If `ciphers`/`decompress` are kwargs on `x.open(...)`, your new param is a kwarg on `x.open(...)` too — do NOT reroute it through a DIFFERENT entry point (a constructor, a global, a setattr) just because that also happens to reach the target. The test asserts the conventional call signature, and consistency is the safe default. If the PLAN says to thread it one way ("forward it when creating the Request") but the file's existing parameters go another way (they're passed to `.open()`), FOLLOW THE FILE — the plan says WHAT to add, the code you read shows HOW it must be wired.
   - Tempted to add a feature / arg / wrapping the spec didn't ask for -> RIGHT-SIZE: cut the EXTRA, keep the REQUIRED. Don't gold-plate (no unrequested features, "while we're here" refactors, or extra args a test would trip over) — but "minimal" means the simplest CORRECT implementation that satisfies EVERY case and behaviour the spec names, NOT the naivest shortcut. If the spec implies a RELATION (a significance order like "minor or above", a mapping of inputs→values, a hierarchy), implement that relation — don't collapse it to a bare `==` or leave a boundary case (first-run / empty / None) on the old default. Trim scope, never required logic. If the plan offers "X or Y", pick exactly ONE.
   - RELOCATING code — moving/extracting a function or class -> MOVE IT VERBATIM: read_file the original and copy it character-for-character; change ONLY what the step requires (e.g. the import path). Paraphrasing silently drops a branch the tests rely on.
-  - Adding OR REWRITING a line, especially a def/class -> INDENT BY SCOPE: indentation is the line's SCOPE, not the line physically above it. Match a SIBLING in that scope (another method's `def`), not the previous method's body line — wrong indent silently breaks class-binding (AttributeError, with no import error to warn you). The view HANDS you the count: a line shown as `286:4|def setvalue` has 4 leading spaces — when you REPLACE or REWRITE that line, your `new` line MUST begin with those SAME 4 spaces (`    def setvalue`), NEVER column 0. Re-typing a NESTED `def`/`class` at column 0 ejects it from its enclosing function/class, and its nested SIBLINGS (the other inner `def`s left at 4 spaces) instantly become an `IndentationError` that breaks the WHOLE file on import — and the per-edit check won't always catch it because your replaced block compiles in isolation. So whenever your `new` block contains a `def`/`class`, READ BACK its leading spaces and confirm they equal the `N|` count the view showed for the line you're replacing (or its sibling's). This is your closing indent self-check — do it before finish, every time.
+  - Adding OR REWRITING a line, especially a def/class -> INDENT BY SCOPE: indentation is the line's SCOPE, not the line physically above it. Match a SIBLING in that scope (another method's `def`), not the previous method's body line — wrong indent silently breaks class-binding (AttributeError, with no import error to warn you). The view HANDS you the number: a line shown as `286:4|    def setvalue` has indent 4 — when you REWRITE it, write `new` as `4|def setvalue` (reuse that SAME number), NEVER `0|`. Giving a NESTED `def`/`class` indent 0 ejects it from its enclosing function/class, and its nested SIBLINGS (the other inner `def`s still at 4) instantly become an `IndentationError` that breaks the WHOLE file on import. So whenever your `new` block contains a `def`/`class`, confirm its `INDENT|` number equals the number the view showed for the line you're replacing (or its sibling's). This is your closing indent self-check — do it before finish, every time.
   - A field's TYPE or meaning CHANGES (a bool becomes an enum; a value is re-specified), or the spec maps cases to specific result VALUES -> RE-MAP EVERY BRANCH: for EACH place that assigns the field, use the value the SPEC states for THAT case — never inherit the OLD code's value. The old "first-run / empty / missing → False" often becomes a DIFFERENT new value (e.g. → `unknown`, NOT → `equal`). List the spec's case→value pairs, set each branch to its spec value, and don't forget the boundary case (first-run / empty / None) — it's the one most often left on the old default.
 """
 

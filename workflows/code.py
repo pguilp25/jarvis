@@ -7521,7 +7521,11 @@ def _apply_line_edits(
     sorted_edits = [e for _, e in sorted(enumerate(edits), key=sort_key, reverse=True)]
 
     # Detect whether content uses the new i{N}| prefix format
-    indent_prefix_re = re.compile(r'^i\d+\|')
+    # Explicit-indent prefix: legacy `i\d+|` OR the current bare `\d+|` (e.g. `8|return x`).
+    # The current prompt teaches bare `N|` exclusively, so matching only `i\d+|` made this
+    # always-False → the "trust the explicit indent, no auto-reindent" branch went dead and
+    # _reindent_replace silently overrode the coder's declared count. (audit fix D.)
+    indent_prefix_re = re.compile(r'^i?\d+\|')
     def _is_new_format(code: str) -> bool:
         for ln in code.split('\n'):
             if ln.strip():

@@ -24,12 +24,14 @@ exact executor so behaviour is identical:
 
 (The coder has no [RUN:] — that's planner/reviewer-only, so neither does this.)
 
-INDENT FORMAT (ckpt 88): read_file renders each line as `LINENO: <code with REAL
-leading spaces>` and edit_file's old/new are real code lines — ONE format across read
-and write, so getting indentation right is a COPY job, not a count→spaces conversion.
-(Earlier the read used a `LINENO:INDENT|count` view aligned with replace_lines' `8|x`
-write form; edit_file copies verbatim, so the whole native path moved to real
-whitespace. The applier still accepts `N|` counts too, for back-compat.)
+INDENT FORMAT (ckpt 125): read_file + the pre-loaded file block render each line as
+`LINENO:INDENT|<real spaces>code` (prefix_ws) — the coder SEES the indentation AND its
+number. Edits declare indent by NUMBER: old/new lines are `INDENT|code` and the applier
+(`_expand_indent_lines`) re-emits the spaces — so the coder states a number and never
+types (or drops) leading spaces (the col-0 dedent root cause). The applier is
+copy-paste tolerant: it also accepts a full view line `LINENO:INDENT|code`, a diff line
+`LINENO:[+-]code`, a plain real-space line, and a `|appears N` annotated def line — the
+NUMBER is authoritative, copied spaces are stripped and re-applied.
 
 Edit tool = `replace_lines(path, start, end, new_content)` (line-range, NOT the
 anchor-based [edit] diff): native models produce clean structured args, and it
@@ -220,8 +222,9 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "create_file",
         "description": (
-            "Create a NEW file at `path` with `content` (the full file text, exact "
-            "indentation, NO line-number prefixes). Use this for files that don't "
+            "Create a NEW file at `path` with `content` — the full file text. Write each "
+            "line as `INDENT|code` (declare indent by number, harness applies the spaces) "
+            "OR with real leading spaces; both work, no `LINENO:` prefix. Use this for files that don't "
             "exist yet — a new module, script, or test file (greenfield builds, or "
             "adding a file to an existing project). To change a file that ALREADY "
             "exists, use edit_file instead — create_file refuses to clobber."),
@@ -238,7 +241,8 @@ CODER_TOOLS = [
         "description": (
             "Your PRIMARY edit tool. Change an existing file by giving `hunks` — a list "
             "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
-            "line(s), copied VERBATIM (real indentation, no LINENO/INDENT prefixes) from "
+            "line(s) as `INDENT|code` — or copy-pasted straight from the view "
+            "(`286:4|    foo`); the harness strips the LINENO:/marker and uses the number — from "
             "your MOST RECENT view of the file; `new` is what they become. The match is by "
             "`old` CONTENT (verified against the file), NOT by line number — so a shifted "
             "or older view can NEVER make an edit stale and you do not need line numbers. "
@@ -705,23 +709,43 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
             f"end_line range — don't re-dump the whole file.")
 
 
-_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')
+# Indentation is declared as a NUMBER; the harness re-emits the spaces. The model can
+# COPY-PASTE any of the forms it actually sees and they all resolve correctly:
+#   INDENT|code              the documented edit form          e.g.  4|def foo
+#   LINENO:INDENT|code       a line copied verbatim from the read view  e.g.  286:4|    def foo
+#   LINENO:[+|-]code         a line copied from a post-edit diff (real spaces)  e.g.  12:+    return 2
+# The INDENT NUMBER (when present) is authoritative — any visible leading spaces in the
+# copied code are stripped and re-applied from the number, so the coder cannot mis-indent.
+# A plain real-space line (no prefix) is taken literally (back-compat). The `LINENO:` and
+# diff-marker strips are anchored so they CANNOT corrupt real code: they only fire when a
+# `\d+\|` (indent) or `\d+:[+-]` (diff) shape follows — a normal `key: value` / `5: x` line
+# never matches.
+_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code
+_VIEW_LINE_RE   = re.compile(r'^\d+:(\d+)\|(.*)$')       # LINENO:INDENT|code (copied view line)
+_DIFF_LINE_RE   = re.compile(r'^\d+:[+\-](.*)$')         # LINENO:+/-content (copied diff line)
+_APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ .*$')   # blast-radius annotation a def line may carry
 
 
 def _expand_indent_lines(lines: list) -> list:
-    """Native edit lines arrive as `INDENT|code` (e.g. `4|def setvalue`) — the model
-    states indentation as a NUMBER instead of typing leading spaces (which it kept
-    silently dropping → col-0 dedent → IndentationError; see the indent audit). Re-emit
-    INDENT real leading spaces + the code with any copied leading spaces stripped. This
-    is IDEMPOTENT: the view shows `LINENO:INDENT|<real spaces>code`, so whether the model
-    copies `4|    def foo` (number + visible spaces) or writes `4|def foo` (number only),
-    the result is the same `    def foo` — the NUMBER is authoritative, so the coder
-    cannot mis-indent. A line with no `N|` prefix is taken literally (back-compat: an
-    anchor line lifted from the file, or a model that didn't use the prefix)."""
+    """Resolve every old/new/content line to its real source form (see the format note
+    above). The col-0 dedent root cause was that the model had to mentally convert the
+    indent number to spaces and kept dropping it; now it just states the number (or copies
+    a view/diff line verbatim) and the harness applies the spaces. Idempotent + literal
+    fallback so it can never corrupt a line that isn't one of the known prefixed forms."""
     out = []
     for ln in lines:
-        m = _INDENT_LINE_RE.match(ln)
-        out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' ') if m else ln)
+        # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation;
+        # strip it so copying that line as `old`/`new` still matches the real file line.
+        ln = _APPEARS_TAIL_RE.sub('', ln)
+        m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
+        if m:                                    # INDENT|code or LINENO:INDENT|code
+            out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' '))
+            continue
+        d = _DIFF_LINE_RE.match(ln)
+        if d:                                    # LINENO:+/-content — keep its real spaces
+            out.append(d.group(1))
+            continue
+        out.append(ln)                           # plain real-space line → literal
     return out
 
 
@@ -1390,11 +1414,12 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
     reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
     short = model_id.split('/')[-1]
-    if _WS_MODE:
-        # Authoritative override of any `INDENT|` count instructions in the base
-        # prompt. Appended LAST so it wins. read_file shows REAL indentation, which
-        # matches how edit_file works (you COPY lines) — so indentation is a
-        # copy job, not a count-to-spaces conversion.
+    if True:  # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO:INDENT|
+              # <real spaces>code), so this INDENT| write instruction must ALWAYS be
+              # appended. Gating it on JARVIS_NATIVE_WS used to drop it while the view
+              # stayed prefix_ws → re-armed the col-0 dedent bug. The flag no longer
+              # disables it. (audit fix E, 2026-06-02.)
+        # Authoritative INDENT| write-format instruction, appended LAST so it wins.
         system = system + (
             "\n\n## INDENTATION — you DECLARE it as a number; the harness applies the spaces\n"
             "Every code line is shown as `LINENO:INDENT|<real spaces>code` — e.g. "
