@@ -48,6 +48,7 @@ import os
 import re
 
 from core.cli import status, warn
+from core import thought_logger
 
 # Models built for native function-calling — use the structured loop, not text.
 NATIVE_TOOL_MODELS = {"nvidia/gpt-oss-120b", "nvidia/gpt-oss-nim", "groq/gpt-oss-120b"}
@@ -1340,11 +1341,30 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             warn(f"  [native:{short}] non-dict model message — stopping")
             reason = "api-error"
             break
+        # CAPTURE THE CODER'S CoT. gpt-oss is a native tool-calling model: it puts
+        # its chain-of-thought in `reasoning` (or `reasoning_content`) and leaves
+        # `content` EMPTY on a tool-call turn — so the prompt's 4-move CoT, if the
+        # model does it, lives there. (1) LOG it so the coder's reasoning is finally
+        # visible in the thinking log (the non-streaming native path never logged it
+        # before — only the streaming planner/summary phases did). (2) PERSIST a
+        # CAPPED copy into the assistant turn so the coder builds on its own prior
+        # reasoning across rounds; capped to avoid the context-bloat that timed out
+        # f631 (and _trim_history bounds the total).
+        _reason = (msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
+        _vis = (msg.get("content") or "").strip()
+        if _reason:
+            thought_logger.write_header(model_id, f"coder round {rnd}")
+            thought_logger.write_chunk(model_id, _reason)
+        _CAP = 1500
+        _persist = _vis
+        if _reason:
+            _r = _reason if len(_reason) <= _CAP else _reason[:_CAP] + " …[reasoning truncated]"
+            _persist = (f"[my reasoning] {_r}\n{_vis}").strip()
         # The assistant message that issued tool_calls MUST precede the tool
         # results in history, with its tool_calls intact.
         messages.append({
             "role": "assistant",
-            "content": msg.get("content") or "",
+            "content": _persist,
             **({"tool_calls": msg["tool_calls"]} if msg.get("tool_calls") else {}),
         })
         tcs = msg.get("tool_calls") or []
