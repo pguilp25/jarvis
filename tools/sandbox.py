@@ -62,8 +62,19 @@ class Sandbox:
         status(f"Sandbox created: {copied} files copied to {self.sandbox_dir}")
 
     def _norm(self, rel_path: str) -> str:
-        """Normalize path separators (accept both / and \\)."""
-        return str(Path(rel_path))
+        """Normalize path separators (accept both / and \\) AND enforce CONTAINMENT: the
+        path must resolve INSIDE the sandbox, never escape via `..` or an absolute path.
+        A model-supplied `../../x.py` or `/abs/x.py` would otherwise be written OUTSIDE the
+        repo (host pollution) and be silently ABSENT from the patch. Raise on escape so the
+        caller surfaces a clean reject. (audit pass-6 / create_file_no_path_containment.)"""
+        p = str(Path(rel_path))
+        base = self.sandbox_dir.resolve()
+        full = (self.sandbox_dir / p).resolve()
+        if full != base and not full.is_relative_to(base):
+            raise ValueError(
+                f"path {rel_path!r} resolves outside the project — use a path INSIDE the "
+                f"repo (no leading '/' and no '..' that escapes the root).")
+        return p
 
     def load_file(self, rel_path: str) -> str | None:
         """Load a file from the sandbox (working copy). Returns content or None."""

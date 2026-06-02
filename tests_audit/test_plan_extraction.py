@@ -292,3 +292,13 @@ def test_impl_steps__legacy_implementation_steps_header_still_works():
     plan = "## IMPLEMENTATION STEPS\n### STEP 1: do it\nFILES: x.py\nbody\n"
     steps = _extract_impl_steps(plan)
     assert len(steps) == 1 and steps[0]["name"] == "do it"
+
+
+def test_shared_interfaces_is_fence_aware():
+    # A `##`-prefixed line QUOTED inside a code fence in the SHARED INTERFACES body must
+    # NOT end the section early and drop a later signature. (audit pass-6 fix.)
+    from workflows.code import _extract_shared_interfaces
+    plan = ("## SHARED INTERFACES\nThe contract:\n```\n## Response schema\n"
+            "def serialize(o) -> dict\n```\ndef parse(s: str) -> Obj\n## STEPS\n")
+    out = _extract_shared_interfaces(plan)
+    assert "def parse(s: str) -> Obj" in out   # signature after the fenced ## not dropped

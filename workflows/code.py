@@ -9345,13 +9345,17 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
 # =====================================================================
 
 def _extract_shared_interfaces(plan: str) -> str:
-    """Extract the SHARED INTERFACES section from the plan."""
+    """Extract the SHARED INTERFACES section from the plan. Fence-aware: a `##`-prefixed
+    line QUOTED inside a code fence in the body must NOT end the section early (that would
+    silently drop a signature the coder is told to honour → contract drift). Scan the MASKED
+    copy for the boundary, slice the body from the ORIGINAL. (audit pass-6 fix.)"""
+    scan = _mask_fenced_blocks(plan)
     match = re.search(
         r'##\s*SHARED\s+INTERFACES\s*\n(.*?)(?=\n##\s|\Z)',
-        plan, re.DOTALL | re.IGNORECASE,
+        scan, re.DOTALL | re.IGNORECASE,
     )
     if match:
-        text = match.group(1).strip()
+        text = plan[match.start(1):match.end(1)].strip()   # body from the ORIGINAL
         if text.lower() not in ("(none)", "none", "n/a", ""):
             return text
     return ""
@@ -13072,10 +13076,17 @@ async def code_agent(state: AgentState) -> AgentState:
                 except Exception as _e:
                     warn(f"  plan cache write failed: {_e}")
 
-        # Extract files to modify from plan
-        files_to_modify = _extract_files_from_plan(plan, files)
-        if not files_to_modify:
-            files_to_modify = []
+        # Files to modify: prefer the EXACT union of the per-step `FILES:` when steps parse.
+        # The whole-plan scan (_extract_files_from_plan) also picks up files the plan cites as
+        # OUT of scope (## EDGE CASES "...not in this patch") and existing test files, which
+        # would wrongly become coder targets / widen the scope backstop. Fall back to the
+        # prose scan only when no steps parse. (audit pass-6 fix: scope leak.)
+        _scope_steps = _extract_impl_steps(plan)
+        _step_files = [f for s in _scope_steps for f in (s.get("files") or [])]
+        if _step_files:
+            files_to_modify = list(dict.fromkeys(_step_files))   # dedup, keep order
+        else:
+            files_to_modify = _extract_files_from_plan(plan, files) or []
         status(f"Files to modify: {', '.join(files_to_modify) or '(new files)'}")
         status(f"Sharing {len(research_cache)} cached lookups with coders + reviewers")
 

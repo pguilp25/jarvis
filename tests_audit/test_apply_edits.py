@@ -301,3 +301,17 @@ def test_adversarial__newline_only_search():
     result, m, t, amb = _apply_edits(orig, edits)
     # find_clean.strip('\n') → "" → continue (empty skip)
     assert m == 0
+
+
+def test_sandbox_rejects_path_escape():
+    # write_file/_norm must reject a path that resolves OUTSIDE the repo (a model-supplied
+    # ../../x or /abs/x would pollute the host and be absent from the patch). (pass-6 fix.)
+    import tempfile, os, pytest as _pt
+    from tools.sandbox import Sandbox
+    root = tempfile.mkdtemp(prefix="contain_test_")
+    open(os.path.join(root, "a.py"), "w").write("x = 1\n")
+    sb = Sandbox(root); sb.setup()
+    for bad in ["../../escape.py", "/tmp/abs_escape.py", "../sibling.py"]:
+        with _pt.raises(ValueError):
+            sb.write_file(bad, "leaked")
+    sb.write_file("sub/ok.py", "fine")   # legit inside path still works

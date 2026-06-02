@@ -234,8 +234,13 @@ def build_task_prompt(instance: dict) -> str:
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
+    # errors="replace": a repo with a non-UTF-8 byte (latin-1 source) used to raise
+    # UnicodeDecodeError on `git diff`, which was caught as diff_failed and shipped an EMPTY
+    # patch for an instance the coder actually SOLVED. Decoding tolerantly keeps the (mostly
+    # ASCII) patch usable and stays JSON-encodable for predictions.jsonl. (audit pass-6 fix.)
     return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        cmd, cwd=cwd, capture_output=True, text=True, errors="replace",
+        timeout=timeout, check=False
     )
 
 
