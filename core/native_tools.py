@@ -1321,6 +1321,23 @@ _VERIFY_NUDGE = (
     "correct as written, call finish — do NOT change it just to change something."
 )
 
+# No-edit-finish guard. A coder (esp. a fallback link like mistral/medium dropped
+# into a step the primary left incomplete) sometimes calls finish on its FIRST
+# round having made ZERO edits — a polite bail, not a real completion. The step
+# is NOT done (it was handed off precisely because no edit landed yet). Reject the
+# first such finish and nudge ONCE to actually make the change; if the coder still
+# finishes, accept it (fail-soft → the chain falls over to the next link). Fired
+# AT MOST once per native pass. (user 2026-06-02; medium bailed on ansible-a26c325.)
+_NO_EDIT_FINISH_NUDGE = (
+    "⚠ You called finish but have made ZERO edits this step — nothing changed. "
+    "This step was handed to you because it is NOT done yet, so finishing now "
+    "delivers an empty patch. Do the work first: read the target file if you "
+    "haven't, then make the edit the step requires with edit_file / replace_lines "
+    "/ create_file. Only call finish AFTER an edit has actually landed (you'll see "
+    "a ✓ Applied diff). If — after looking — you are certain the step needs no code "
+    "change, call finish again and say why in the summary."
+)
+
 
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 40,
@@ -1392,6 +1409,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     rnd = 0
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
     _verify_nudged = False    # one forced self-check before finishing (per step)
+    _noedit_finish_nudged = False  # one push-back on a finish-with-ZERO-edits bail
     _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
     _trace_nudges = 0         # grounding nudges spent on imagined trace citations
 
@@ -1512,10 +1530,18 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     out = (f"✗ {name or 'tool'} failed internally: {str(e)[:160]} — "
                            f"try a different tool or a narrower input.")
                 if isinstance(out, tuple) and out and out[0] == "__FINISH__":
-                    done = True
-                    final = out[1] or "done"
-                    reason = "finished"
-                    result_str = "Task marked finished."
+                    if not ctx.get("files_changed") and not _noedit_finish_nudged:
+                        # Finish on a step with ZERO edits = a bail, not completion.
+                        # Push back ONCE; if the coder finishes again, accept it.
+                        _noedit_finish_nudged = True
+                        result_str = _NO_EDIT_FINISH_NUDGE
+                        status(f"  [native:{short}] round {rnd}: finish with ZERO "
+                               f"edits — nudged to make the change first")
+                    else:
+                        done = True
+                        final = out[1] or "done"
+                        reason = "finished"
+                        result_str = "Task marked finished."
                 else:
                     result_str = str(out)
             # Loop-breaker: if the SAME tool call keeps getting rejected, escalate
