@@ -1385,7 +1385,16 @@ Before opening `=== PLAN ===`, output:
     B. DISAGREEMENTS THAT MATTER — which conflicts shape the plan.
     C. CONSENSUS-IS-SUSPICIOUS — what do 3+ plans agree on that
        you'd want to verify?
-    D. PRE-MORTEM — 2-3 plausible "this didn't fix it" reasons.
+    D. PRE-MORTEM — 2-3 plausible "this didn't fix it" reasons. But do NOT
+       manufacture a BACKWARD-COMPAT requirement the spec didn't ask for: when
+       the spec NAMES a new type/shape for a symbol ("change X to a VersionChange
+       enum"), THAT is the contract — implement exactly it. A consumer that used
+       the OLD type (e.g. app.py's `if not X`) is satisfied AROUND the new type
+       (add `__bool__`/`__eq__`, or a SEPARATE new accessor) — NEVER by changing
+       X's type to something else (a bool property) to "preserve compatibility."
+       A spec-mandated change is the INTENDED contract, not a regression to shim;
+       the tests are updated to it. Don't add compat STEPS for the very symbol the
+       spec is changing.
     E. SOUND-OR-SCRAP — given A-D, can the chosen approach actually
        satisfy the contract? If a draft's approach is fundamentally
        wrong (or all three are), say so and AUTHOR a different one —
