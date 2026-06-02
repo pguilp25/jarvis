@@ -1224,12 +1224,19 @@ def _is_transient(e) -> bool:
 
 
 async def _call_tools_with_retry(model_id, messages, tools, max_tokens,
-                                 per_provider_retries: int = 4):
+                                 per_provider_retries: int = 4,
+                                 tool_choice: str = "required"):
     """Call the model's native tool API, cycling its gpt-oss endpoints. For each
     provider: retry the SAME endpoint on transient errors, skip to the next
     provider on a permanent error. Only raises once EVERY provider is exhausted —
     so the workflow switches to a different MODEL only after gpt-oss has had every
-    endpoint. Non-gpt-oss models keep the single-endpoint behavior."""
+    endpoint. Non-gpt-oss models keep the single-endpoint behavior.
+    tool_choice defaults to "required": gpt-oss (and mistral/medium) emit their
+    plan in the harmony `analysis`/reasoning channel and STOP at the
+    analysis→commentary boundary without emitting the tool call (finish_reason=stop,
+    no tool_calls = the "empty-turn"). "required" forces a tool call every turn so
+    the model can't end on reasoning alone. call_nvidia_tools falls back to "auto"
+    if a provider 400s on "required"."""
     from clients.nvidia import call_nvidia_tools
     short = model_id.split('/')[-1]
     providers = [_GPT_OSS_ENDPOINT[short]] if short in _GPT_OSS_ENDPOINT else [""]
@@ -1239,6 +1246,7 @@ async def _call_tools_with_retry(model_id, messages, tools, max_tokens,
             try:
                 return await call_nvidia_tools(model_id, messages, tools,
                                                max_tokens=max_tokens,
+                                               tool_choice=tool_choice,
                                                force_provider=provider)
             except Exception as e:
                 last = e
@@ -1500,7 +1508,12 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # a finish — distinguish so the workflow can tell "model did nothing"
             # from a deliberate stop. (Audit #11/#45.)
             reason = "no-tool-call" if final.strip() else "empty-turn"
-            status(f"  [native:{short}] round {rnd}: no tool call ({reason})")
+            # Surface finish_reason: with tool_choice="required" this should be rare;
+            # when it happens, "stop" = harmony analysis→commentary boundary stop,
+            # "length" = reasoning channel ate the output budget. (root-cause probe.)
+            _fr = msg.get("_finish_reason", "")
+            status(f"  [native:{short}] round {rnd}: no tool call ({reason}"
+                   + (f", finish_reason={_fr}" if _fr else "") + ")")
             break
         n_edit = sum(1 for tc in tcs if tc.get("function", {}).get("name")
                      in ("edit_file", "replace_lines"))

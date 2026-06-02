@@ -372,7 +372,18 @@ async def call_nvidia_tools(
                                     timeout=aiohttp.ClientTimeout(total=1800)) as resp:
                 raw = await resp.text()
                 if resp.status != 200:
-                    raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
+                    # tool_choice="required" isn't universally supported on :free
+                    # endpoints — some 400 on it. Fall back to "auto" ONCE on the same
+                    # endpoint rather than cascading to a weaker model. (user 2026-06-02)
+                    if resp.status == 400 and tool_choice == "required":
+                        payload["tool_choice"] = "auto"
+                        async with session.post(url, json=payload, headers=headers,
+                                                timeout=aiohttp.ClientTimeout(total=1800)) as resp2:
+                            raw = await resp2.text()
+                            if resp2.status != 200:
+                                raise RuntimeError(f"NVIDIA {api_model} HTTP {resp2.status}: {raw[:200]}")
+                    else:
+                        raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
     return _extract_tool_message(raw, api_model)
 
 
@@ -404,6 +415,11 @@ def _extract_tool_message(raw: str, api_model: str) -> dict:
         fr = choices[0].get("finish_reason", "") if isinstance(choices[0], dict) else ""
         raise RuntimeError(f"NVIDIA {api_model} choice has no message "
                            f"(finish_reason={fr}): {str(choices[0])[:200]}")
+    # Surface finish_reason so the coder loop can diagnose empty-turns: a no-tool-call
+    # with finish_reason=="stop" is the harmony analysis→commentary boundary stop;
+    # =="length" means the reasoning channel exhausted the output budget. (synthetic
+    # key — the loop builds its own assistant turn, never re-sends this dict.)
+    message["_finish_reason"] = choices[0].get("finish_reason", "")
     return message
 
 
