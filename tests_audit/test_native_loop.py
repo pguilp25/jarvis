@@ -60,7 +60,7 @@ class _ScriptedModel:
         self.calls += 1
         self.seen_messages.append([dict(m) for m in messages])
         if not self.script:
-            return _msg("(no more script)")     # graceful: ends loop
+            return _msg("(no more script)")     # graceful: ends loop (no-tool-call)
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -180,7 +180,8 @@ def test_loop_malformed_arguments_no_crash():
                "function": {"name": "read_file", "arguments": "{not valid json"}}
         script = [
             _msg(tool_calls=[bad]),                # → args {} → ✗ string, no crash
-            _msg(tool_calls=[_tc("2", "finish")]),
+            _msg(tool_calls=[_tc("2", "finish")]),  # nudged (zero edits)
+            _msg(tool_calls=[_tc("3", "finish")]),  # accepted
         ]
         res, model = _run(script, ctx)
         assert res["done"] is True   # loop survived the malformed call
@@ -194,11 +195,13 @@ def test_loop_transient_error_then_success():
     try:
         script = [
             RuntimeError("NVIDIA openai/gpt-oss-120b:free HTTP 503: bad gateway"),
-            _msg(tool_calls=[_tc("1", "finish")]),
+            _msg(tool_calls=[_tc("1", "finish")]),   # nudged (zero edits, ckpt-121)
+            _msg(tool_calls=[_tc("2", "finish")]),   # accepted
         ]
         res, model = _run(script, ctx)
         assert res["done"] is True
-        assert model.calls == 2   # one failure + one success
+        # one failure + two finishes (first nudged, second accepted)
+        assert model.calls == 3
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -226,7 +229,9 @@ def test_loop_nonobject_arguments_no_crash():
         # args.get(...) without the isinstance guard
         bad = {"id": "1", "type": "function",
                "function": {"name": "read_file", "arguments": "5"}}
-        script = [_msg(tool_calls=[bad]), _msg(tool_calls=[_tc("2", "finish")])]
+        script = [_msg(tool_calls=[bad]),
+                  _msg(tool_calls=[_tc("2", "finish")]),   # nudged (zero edits)
+                  _msg(tool_calls=[_tc("3", "finish")])]   # accepted
         res, model = _run(script, ctx)
         assert res["done"] is True
         # the bad call's tool result tells the model its args weren't an object
@@ -249,7 +254,8 @@ def test_loop_executor_exception_survived():
         _nt._do_search = _boom
         try:
             script = [_msg(tool_calls=[_tc("1", "search_text", pattern="x")]),
-                      _msg(tool_calls=[_tc("2", "finish")])]
+                      _msg(tool_calls=[_tc("2", "finish")]),   # nudged (zero edits)
+                      _msg(tool_calls=[_tc("3", "finish")])]   # accepted
             res, model = _run(script, ctx)
         finally:
             _nt._do_search = orig
@@ -265,7 +271,9 @@ def test_loop_executor_exception_survived():
 def test_loop_reason_finished():
     ctx, rel, root = _mk_ctx()
     try:
-        res, _ = _run([_msg(tool_calls=[_tc("1", "finish")])], ctx)
+        # ckpt-121: a zero-edit finish is nudged once; the second finish is accepted.
+        res, _ = _run([_msg(tool_calls=[_tc("1", "finish")]),
+                       _msg(tool_calls=[_tc("2", "finish")])], ctx)
         assert res["reason"] == "finished"
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -319,13 +327,17 @@ def test_verify_nudge_fires_once_before_finish():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_verify_nudge_skipped_when_no_edits():
-    # finishing with ZERO edits must NOT be nudged (nothing to self-check).
+def test_no_edit_finish_is_nudged_once_then_accepted():
+    # ckpt-121: finishing with ZERO edits is a BAIL, not a completion — the FIRST
+    # such finish is rejected + nudged ("make the change first"); a SECOND finish is
+    # accepted (fail-soft → the chain falls over to the next coder). So one finish does
+    # NOT complete the step; two finishes do, taking one extra round.
     ctx, rel, root = _mk_ctx()
     try:
-        res, model = _run([_msg(tool_calls=[_tc("f", "finish")])], ctx)
+        res, model = _run([_msg(tool_calls=[_tc("f", "finish")]),
+                           _msg(tool_calls=[_tc("f2", "finish")])], ctx)
         assert res["done"] is True
-        assert model.calls == 1   # no extra round
+        assert model.calls == 2   # nudged once, accepted on the second finish
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

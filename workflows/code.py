@@ -6088,6 +6088,14 @@ def _filter_by_ranges(content: str, ranges: list[tuple[int, int]], filepath: str
                 # `LINENO|<actual leading whitespace><content>` — readable
                 # form for non-editing roles. Blank lines → "{n}|".
                 output_parts.append(f"{i + 1}:{' ' * indent_cols}{stripped_left}")
+            elif display_mode == "prefix_ws":
+                # NATIVE coder view: LINENO:INDENT|<real spaces>content — shows the
+                # indent BOTH as a number (authoritative for edits) AND as real spaces
+                # (so the coder can SEE the nesting), then the code. The native edit
+                # applier reads the NUMBER and re-emits the spaces (idempotent), so the
+                # coder declares indent by number and never drops leading spaces. Blank
+                # lines → "{n}:0|". (root-cause fix for col-0 dedents, 2026-06-02.)
+                output_parts.append(f"{i + 1}:{indent_cols}|{' ' * indent_cols}{stripped_left}")
             else:
                 # v10 prefix mode: LINENO:INDENT|content (line# uses ':' so a
                 # copied line pastes verbatim into SEARCH/REPLACE). Blank → "{n}:0|"
@@ -12058,7 +12066,7 @@ async def _implement_one_step(
                       and (sandbox is None or sandbox.load_file(fp) is None)]
         _file_block = "\n\n".join(
             f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n"
-            + _aln(c, display_mode="prefix")
+            + _aln(c, display_mode="prefix_ws")
             for fp, c in _nat_targets.items()
         ) or "(call read_file on the file(s) named in the step)"
         # Native coder system prompt is the maintained IMPLEMENT_NATIVE_PROMPT (its

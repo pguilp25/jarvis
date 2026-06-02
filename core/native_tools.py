@@ -139,8 +139,9 @@ CODER_TOOLS = [
         "name": "read_file",
         "description": (
             "Read a file (optionally a line range) from the project. Each line is "
-            "returned as `LINENO:INDENT|content` — LINENO is the 1-based line number, "
-            "INDENT is the leading-space COUNT, then the code. A huge file comes back "
+            "returned as `LINENO:INDENT|<real spaces>content` — LINENO is the 1-based line "
+            "number, INDENT is the leading-space COUNT (a number you reuse in edits), then "
+            "the real leading spaces, then the code. A huge file comes back "
             "as a skeleton (top-level defs); pass start_line/end_line to expand a "
             "region. TRUST YOUR VIEW: a file you've already been shown — the step's "
             "injected file(s), one you read, or one you edited (its diff IS the live "
@@ -262,9 +263,9 @@ CODER_TOOLS = [
                     "start_line": {"type": "integer",
                                    "description": "read_file line number where `old` begins (pins which occurrence)"},
                     "old": {"type": "array", "items": {"type": "string"},
-                            "description": "exact existing line(s), copied verbatim from read_file"},
+                            "description": "existing line(s) as `INDENT|code` (the view's INDENT number + code, no leading spaces) — e.g. `4|def setvalue`. Copying the view line verbatim also works (the number rules; visible spaces are stripped)."},
                     "new": {"type": "array", "items": {"type": "string"},
-                            "description": "replacement line(s); empty array to delete"},
+                            "description": "replacement line(s) as `INDENT|code` — declare each line's indent with its NUMBER, code without leading spaces (`8|return x`); the harness applies the spaces. Empty array to delete."},
                 }, "required": ["start_line", "old", "new"]},
             },
         }, "required": ["path", "hunks"]},
@@ -275,9 +276,9 @@ CODER_TOOLS = [
             "SECONDARY edit tool — prefer edit_file. Use ONLY for a clean whole-range "
             "swap where copying the old lines is pointless. Replace lines "
             "start_line..end_line (inclusive, 1-based, from your most recent read_file) "
-            "of `path` with new_content. Write new_content with REAL leading spaces, "
-            "exactly like the read_file view shows them (NO `LINENO:` prefix, NO `N|` "
-            "count). To INSERT after line N, set start_line=end_line=N and make "
+            "of `path` with new_content. Write each new_content line as `INDENT|code` — "
+            "the indent NUMBER + code without leading spaces (`8|return x`); the harness "
+            "re-emits the spaces (NO `LINENO:` prefix). To INSERT after line N, set start_line=end_line=N and make "
             "new_content the current line N followed by your new line(s). Line numbers "
             "go stale after any edit — that's why edit_file (content-matched) is safer."),
         "parameters": {"type": "object", "properties": {
@@ -485,7 +486,9 @@ async def _do_read(args: dict, ctx: dict) -> str:
         out = await _run_code_reads(
             [arg], ctx.get("project_root", ""),
             viewed_versions=ctx.get("viewed_versions"),
-            display_mode="whitespace" if _WS_MODE else "prefix")
+            # Unified native view: LINENO:INDENT|<real spaces>code — number (authoritative
+            # for edits) + visible indent, matching the pre-loaded file block. 2026-06-02.
+            display_mode="prefix_ws")
     except Exception as ex:
         out = f"✗ read_file failed: {str(ex)[:160]}"
     # Keep file_contents (the replace_lines base) in step with the sandbox.
@@ -551,6 +554,10 @@ def _do_replace(args: dict, ctx: dict) -> str:
     new = args.get("new_content", "")
     if not path or s is None or e is None:
         return "✗ replace_lines needs path, start_line, end_line, new_content."
+    # INDENT|code: declare indent as a number, harness re-emits the spaces (idempotent;
+    # same fix as edit_file). new_content lines may be `N|code` or literal real-space code.
+    if new:
+        new = "\n".join(_expand_indent_lines(new.split("\n")))
     try:
         s_i, e_i = int(s), int(e)
     except (TypeError, ValueError):
@@ -698,6 +705,26 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
             f"end_line range — don't re-dump the whole file.")
 
 
+_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')
+
+
+def _expand_indent_lines(lines: list) -> list:
+    """Native edit lines arrive as `INDENT|code` (e.g. `4|def setvalue`) — the model
+    states indentation as a NUMBER instead of typing leading spaces (which it kept
+    silently dropping → col-0 dedent → IndentationError; see the indent audit). Re-emit
+    INDENT real leading spaces + the code with any copied leading spaces stripped. This
+    is IDEMPOTENT: the view shows `LINENO:INDENT|<real spaces>code`, so whether the model
+    copies `4|    def foo` (number + visible spaces) or writes `4|def foo` (number only),
+    the result is the same `    def foo` — the NUMBER is authoritative, so the coder
+    cannot mis-indent. A line with no `N|` prefix is taken literally (back-compat: an
+    anchor line lifted from the file, or a model that didn't use the prefix)."""
+    out = []
+    for ln in lines:
+        m = _INDENT_LINE_RE.match(ln)
+        out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' ') if m else ln)
+    return out
+
+
 def _do_edit(args: dict, ctx: dict) -> str:
     """CONTENT-ANCHORED edit (the primary edit tool), expressed as JSON `hunks` —
     each {start_line, old:[lines], new:[lines]}. `old` = the EXACT existing lines
@@ -752,8 +779,12 @@ def _do_edit(args: dict, ctx: dict) -> str:
         if not isinstance(h, dict):
             return (f"✗ edit_file hunk #{i} is not an object — each hunk must be "
                     f"{{\"start_line\": N, \"old\": [...], \"new\": [...]}}.")
-        old_list = _as_list(h.get("old"))
-        new_list = _as_list(h.get("new"))
+        # INDENT|code: the model declares indentation as a NUMBER (the view shows it),
+        # the harness re-emits that many spaces — so the coder never types (and never
+        # drops) leading spaces. Idempotent: copying the view's `4|    def foo` gives
+        # the same result as `4|def foo`. (root-cause fix, 2026-06-02.)
+        old_list = _expand_indent_lines(_as_list(h.get("old")))
+        new_list = _expand_indent_lines(_as_list(h.get("new")))
         if not any(o.strip() for o in old_list):
             # PURE INSERT ergonomics: the model naturally leaves `old` empty when
             # ADDING new code (a method/function) and gives start_line + new. Don't
@@ -908,6 +939,8 @@ def _do_create(args: dict, ctx: dict) -> str:
         # (1 lines)" — a silent no-op the model can't tell from real success.
         return (f"✗ create_file: no content for {path}. Pass the full file body in "
                 f"`content` (the complete code for the new file).")
+    # INDENT|code allowed here too (idempotent; literal real-space content still works).
+    content = "\n".join(_expand_indent_lines(str(content).split("\n")))
     # grounding gate (new file → no line to quote; ground in the spec/interface)
     _cot_reject = _check_edit_cot(args, "", is_insert=True)
     if _cot_reject:
@@ -1363,18 +1396,23 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         # matches how edit_file works (you COPY lines) — so indentation is a
         # copy job, not a count-to-spaces conversion.
         system = system + (
-            "\n\n## INDENTATION — read_file shows REAL spaces (overrides any `N|` count rule above)\n"
-            "Every read_file line is `LINENO: <the code with its ACTUAL leading spaces>` — "
-            "the indentation you see IS the indentation. So in edit_file:\n"
-            "  • `old` lines: copy them CHARACTER-FOR-CHARACTER from the read view, leading "
-            "spaces included (drop only the `LINENO: ` prefix). Never re-type or re-indent "
-            "them — paste exactly, so the content-match can't fail on whitespace.\n"
-            "  • `new` lines: write the real leading spaces too. For a CHANGED line, keep the "
-            "same indentation as the line it replaces. For a NEW line, indent it to line up "
-            "with the surrounding code you can SEE (a block body sits one level — usually 4 "
-            "spaces — deeper than its `def`/`if`/`for`/`class` header, never at the header's "
-            "level). A blank line is empty.\n"
-            "Do NOT write `N|` counts anywhere — that's the old format; use real spaces.")
+            "\n\n## INDENTATION — you DECLARE it as a number; the harness applies the spaces\n"
+            "Every code line is shown as `LINENO:INDENT|<real spaces>code` — e.g. "
+            "`286:4|    def setvalue` means line 286, indent 4, then 4 real spaces, then the "
+            "code. You SEE the indentation AND read its exact number (`4`).\n"
+            "In edit_file/replace_lines, write each `old` and `new` line as `INDENT|code` — "
+            "the indent NUMBER, a pipe, then the code WITHOUT leading spaces. The harness "
+            "re-emits INDENT spaces for you, so you NEVER type or count leading spaces and "
+            "can never drop them. The number is AUTHORITATIVE: you may copy a view line as-is "
+            "(`4|    def setvalue`) — the harness strips the visible spaces and re-applies the "
+            "4. So indentation cannot go wrong if you get the NUMBER right.\n"
+            "  • CHANGED line → reuse the SAME `INDENT` the view shows for it (`286:4|...` → "
+            "your new line is `4|...`).\n"
+            "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
+            "method indent (look at another `def` in that class, e.g. `4|`); a body line is "
+            "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
+            "class/function — that ejects it (the dedent bug). A blank line is `0|`.\n"
+            "Always prefix every `old`/`new` line with `INDENT|`.")
     if _TRACE_MODE:
         # Force the trace→test→run→minimal-edit loop for subtle behaviour, so the
         # coder UNDERSTANDS the flow instead of guessing a plausible-wrong impl, and

@@ -1627,6 +1627,11 @@ async def _run_code_reads(
                         n_indent = len(expanded) - len(stripped)
                         if display_mode == "whitespace":
                             renumbered.append(f"{start + i}:{' ' * n_indent}{stripped}")
+                        elif display_mode == "prefix_ws":
+                            # NATIVE view: LINENO:INDENT|<real spaces>code — number
+                            # (authoritative) + visible indent + code. Edit applier reads
+                            # the number, re-emits the spaces (idempotent). 2026-06-02.
+                            renumbered.append(f"{start + i}:{n_indent}|{' ' * n_indent}{stripped}")
                         else:
                             # v10: line# uses ':' so view lines paste verbatim.
                             renumbered.append(f"{start + i}:{n_indent}|{stripped}")

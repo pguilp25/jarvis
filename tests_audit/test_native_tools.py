@@ -86,13 +86,16 @@ def test_every_schema_is_wellformed():
 
 
 # ── read_file: REAL-whitespace format (ckpt 88, aligned with edit_file copy) ──
-def test_read_file_whitespace_format():
+def test_read_file_prefix_ws_format():
     ctx, rel, root = _mk_ctx()
     try:
         out = _disp("read_file", {"path": rel}, ctx)
         assert "greet" in out
-        # NEW format is `LINENO: <real spaces><code>` — NOT the `N|` count format
-        assert ":0|" not in out and ":4|" not in out and ":8|" not in out
+        # prefix_ws format `LINENO:INDENT|<real spaces>code`: shows BOTH the indent
+        # NUMBER (authoritative for edits) AND the real spaces (so the coder sees it).
+        assert ":8|" in out                       # the indent number is present
+        assert ":8|        self.n = 0" in out      # number + 8 real spaces + code
+        assert ":0|def greet(name):" in out        # col-0 def
     finally:
         _cleanup(root)
 
@@ -101,7 +104,7 @@ def test_read_file_shows_real_indentation():
     ctx, rel, root = _mk_ctx()
     try:
         out = _disp("read_file", {"path": rel}, ctx)
-        # a method body line carries its ACTUAL 8 leading spaces (copy-verbatim)
+        # a method body line carries its ACTUAL 8 leading spaces (after the `8|`)
         assert "        self.n = 0" in out
         # a module-level def is at column 0
         assert "def greet(name):" in out
