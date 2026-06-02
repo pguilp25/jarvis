@@ -27,7 +27,10 @@ class _gptoss_serialize:
     night interleave (SWE-bench + a real-world coding run on the same box)."""
 
     def __init__(self, model_id: str):
-        self.on = bool(os.environ.get("JARVIS_GPTOSS_LOCK")) and ("gpt-oss" in (model_id or ""))
+        # Per-call flock is fine for gpt-oss: within ONE run the native coder makes
+        # one gpt-oss call at a time (sequential rounds), so there's no intra-run
+        # concurrency to preserve here (unlike the parallel planner drafts).
+        self.on = bool(os.environ.get("JARVIS_INTERLEAVE")) and ("gpt-oss" in (model_id or ""))
         self.fh = None
 
     async def __aenter__(self):
