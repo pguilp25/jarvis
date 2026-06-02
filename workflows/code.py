@@ -9357,6 +9357,27 @@ def _extract_shared_interfaces(plan: str) -> str:
     return ""
 
 
+_FENCE_RE = re.compile(r'^\s*```')
+
+
+def _mask_fenced_blocks(text: str) -> str:
+    """Return `text` with the INTERIOR (and delimiter lines) of ``` fenced code blocks
+    replaced by same-length blanks, newlines preserved — so offsets are identical to the
+    original. Used to scan plan structure (## STEPS / ### STEP N / terminator headers)
+    without matching those tokens when they're QUOTED inside a step's code fence. Body text
+    is sliced from the ORIGINAL, so fence content is kept intact."""
+    out, in_fence = [], False
+    for ln in text.split('\n'):
+        if _FENCE_RE.match(ln):
+            in_fence = not in_fence
+            out.append(' ' * len(ln))
+        elif in_fence:
+            out.append(' ' * len(ln))
+        else:
+            out.append(ln)
+    return '\n'.join(out)
+
+
 def _extract_impl_steps(plan: str) -> list[dict]:
     """Parse IMPLEMENTATION STEPS from the plan.
 
@@ -9403,20 +9424,27 @@ def _extract_impl_steps(plan: str) -> list[dict]:
         r'##\s*(?:IMPLEMENTATION\s+)?STEPS\s*\n',
         re.IGNORECASE,
     )
-    header_positions = [m.end() for m in header_pat.finditer(plan)]
+    # FENCE-AWARE scanning: a step body often QUOTES `## STEPS` / `### STEP N` / `## TESTS`
+    # inside a ``` code fence (a template/example). Scan a MASKED copy (fenced interiors
+    # blanked, offsets preserved 1:1) so those quotes can't become the header/step/terminator
+    # anchor — but slice the actual body TEXT from the ORIGINAL `plan` so the fence content is
+    # kept intact. (audit pass-4 fix: the ## STEPS short header re-scoped on fenced quotes.)
+    scan = _mask_fenced_blocks(plan)
+    header_positions = [m.end() for m in header_pat.finditer(scan)]
     if header_positions:
         # Use the LAST header position — everything after that is the
         # final draft of the implementation steps section.
-        plan_scoped = plan[header_positions[-1]:]
+        cut = header_positions[-1]
+        plan_scoped, scan_scoped = plan[cut:], scan[cut:]
     else:
-        plan_scoped = plan
+        plan_scoped, scan_scoped = plan, scan
 
     steps = []
     step_pattern = re.compile(
         r'###\s*STEP\s*(\d+)\s*[:\-—]\s*(.+?)(?=\n)',
         re.IGNORECASE,
     )
-    matches = list(step_pattern.finditer(plan_scoped))
+    matches = list(step_pattern.finditer(scan_scoped))
 
     if not matches:
         # No steps found — return empty, caller will use single-step fallback
@@ -9451,7 +9479,9 @@ def _extract_impl_steps(plan: str) -> list[dict]:
             term_pat = re.compile(
                 "|".join(terminators), re.IGNORECASE,
             )
-            next_term = term_pat.search(plan_scoped[start:])
+            # search the MASKED text so a `## TESTS`/`## CONFIDENCE` quoted inside the step's
+            # own code fence doesn't truncate it; slice the body from the ORIGINAL.
+            next_term = term_pat.search(scan_scoped[start:])
             end = start + next_term.start() if next_term else len(plan_scoped)
         body = plan_scoped[start:end]
 

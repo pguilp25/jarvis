@@ -51,10 +51,11 @@ def _blank_protocol_bodies(text: str) -> str:
 # Colon is OPTIONAL: the reviewer prompt's prose shows the bare `[GO TO STEP]` /
 # `[GO TO PLAN]` form, so a literal-minded reviewer can emit it without a colon — and a
 # colon-required parser silently dropped that rejection (a lost FAIL ships a bug).
-# \b after PLAN/STEP so `[GO TO PLANNER]`/`[GO TO STEPPED]` don't match the keyword as a
-# prefix (the colon-optional form would otherwise route them with a garbage message).
-_PLAN_PREFIX = re.compile(r"\[\s*GO\s+TO\s+PLAN\b\s*:?\s*", re.IGNORECASE)
-_STEP_PREFIX = re.compile(r"\[\s*GO\s+TO\s+STEP\b\s*(\d+)?\s*:?\s*", re.IGNORECASE)
+# (?![A-Za-z]) after PLAN/STEP so `[GO TO PLANNER]`/`[GO TO STEPPED]` don't match the
+# keyword as a prefix — but, unlike \b, this still allows a digit right after (so the
+# no-space `[GO TO STEP2]` form keeps routing; \b had silently dropped it).
+_PLAN_PREFIX = re.compile(r"\[\s*GO\s+TO\s+PLAN(?![A-Za-z])\s*:?\s*", re.IGNORECASE)
+_STEP_PREFIX = re.compile(r"\[\s*GO\s+TO\s+STEP(?![A-Za-z])\s*(\d+)?\s*:?\s*", re.IGNORECASE)
 
 # The explicit `[APPROVED]` tag matches anywhere; the reviewer's bare
 # `APPROVED`/`APPROVED — …` vocabulary matches ONLY at a line start, so prose

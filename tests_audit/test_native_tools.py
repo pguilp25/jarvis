@@ -112,30 +112,25 @@ def test_read_file_shows_real_indentation():
         _cleanup(root)
 
 
-def test_diff_changed_line_copy_paste_round_trips():
-    # A coder copying a CHANGED diff line (added `N:+ ` or removed `N:- `, incl. the leading
-    # line-number pad) resolves to the real code with its real indentation. (Context `N:  `
-    # lines are intentionally NOT stripped — that shape collides with YAML `N:  value`, so
-    # the coder copies unchanged anchors from the read view instead. pass-3 fix.)
-    from core.native_tools import _expand_indent_lines as ex
+def test_diff_rows_are_not_editable_input_strict():
+    # STRICT design (pass-4): a raw diff row is NOT editable input — the applier does NOT
+    # silently strip its gutter (that shape is ambiguous with YAML/config). Pasting a diff
+    # `-` row as `old` does NOT match; the reject teaches the canonical INDENT|code form.
+    from core.native_tools import _expand_indent_lines as ex, _do_edit
     from core.edit_diff import render_diff
     old = "class C:\n    def f(self):\n        return 1\n"
     new = "class C:\n    def f(self):\n        return 2\n"
     diff = render_diff(old, new, "m.py")
-    changed = [l for l in diff.splitlines() if l.lstrip()[:2] in ("+ ", "- ")
-               or (":" in l and l.split(":", 1)[1][:2] in ("+ ", "- "))]
-    assert changed, "expected at least one +/- diff line"
-    for line in changed:
-        got = ex([line])[0]
-        assert "|" not in got and not got.lstrip().startswith(("+ ", "- "))
-        assert ":" not in got.split()[0] if got.split() else True   # no LINENO: gutter left
-    # end-to-end: copy the removed (`-`) diff line as `old` and confirm it APPLIES
-    from core.native_tools import _do_edit
-    ctx = {"file_contents": {"m.py": old}, "files_changed": set()}
     minus = next(l for l in diff.splitlines() if l.split(":", 1)[-1].startswith("- "))
-    r = _do_edit({"path": "m.py", "hunks": [{"start_line": 3, "old": [minus],
-                                             "new": ["8|return 9"]}]}, ctx)
-    assert r.startswith("✓"), f"copied -/+ diff line should apply, got: {r}"
+    assert ex([minus]) == [minus]                          # left literal, NOT transformed
+    ctx = {"file_contents": {"m.py": old}, "files_changed": set()}
+    r = _do_edit({"path": "m.py", "hunks": [{"old": [minus], "new": ["8|return 9"]}]}, ctx)
+    assert not r.startswith("✓")
+    assert "INDENT|code" in r and "diff" in r.lower()      # targeted, helpful reject
+    # the canonical forms DO apply
+    ctx2 = {"file_contents": {"m.py": old}, "files_changed": set()}
+    r2 = _do_edit({"path": "m.py", "hunks": [{"old": ["8|return 1"], "new": ["8|return 2"]}]}, ctx2)
+    assert r2.startswith("✓") and "return 2" in ctx2["file_contents"]["m.py"]
 
 
 def test_route_parser_accepts_colonless_go_to_step():
@@ -153,17 +148,18 @@ def test_route_parser_accepts_colonless_go_to_step():
     assert parse_route("[GO TO STEPPED] carefully").kind == "none"
 
 
-def test_diff_space_marker_does_not_eat_yaml_mappings():
-    # _DIFF_LINE_RE must match ONLY +/- diff markers, never the context `N:  ` form — a
-    # YAML/dict mapping `443:  description` is shape-identical and must survive verbatim.
-    # (audit pass-3 fix: the space marker silently truncated config lines.)
+def test_expand_indent_never_corrupts_real_content():
+    # STRICT design: only the two UNAMBIGUOUS canonical forms are transformed; everything
+    # else is literal. A YAML/dict mapping, a diff row, a dict-slice, a bitmask — all survive
+    # verbatim (no guessed transform can corrupt real content). (audit pass-4: strict.)
     from core.native_tools import _expand_indent_lines as ex
-    assert ex(["443:  description"]) == ["443:  description"]
-    assert ex(["200:  OK"]) == ["200:  OK"]
-    assert ex(["8080:  proxy backend"]) == ["8080:  proxy backend"]
-    # but real +/- diff lines (incl. leading pad) still resolve to the real code
-    assert ex([" 3:+     return 2"]) == ["    return 2"]
-    assert ex(["12:-     return 1"]) == ["    return 1"]
+    for literal in ["443:  description", "200:  OK", "8080:  proxy backend",
+                    " 3:+     return 2", "12:-     return 1", "    data[5: 10]",
+                    "    flags = 0o755 | 0o644", "5: 'value',"]:
+        assert ex([literal]) == [literal], f"corrupted: {literal!r} -> {ex([literal])!r}"
+    # canonical forms still expand
+    assert ex(["8|return x"]) == ["        return x"]
+    assert ex(["3:4|    def foo"]) == ["    def foo"]
 
 
 def test_appears_annotation_strip_is_safe():

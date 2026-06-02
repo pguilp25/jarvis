@@ -222,9 +222,9 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "create_file",
         "description": (
-            "Create a NEW file at `path` with `content` — the full file text. Write each "
-            "line as `INDENT|code` (declare indent by number, harness applies the spaces) "
-            "OR with real leading spaces; both work, no `LINENO:` prefix. Use this for files that don't "
+            "Create a NEW file at `path` with `content` — the full file text. Write each line "
+            "with REAL leading spaces (or the `INDENT|code` number form); no `LINENO:` prefix. "
+            "Use this for files that don't "
             "exist yet — a new module, script, or test file (greenfield builds, or "
             "adding a file to an existing project). To change a file that ALREADY "
             "exists, use edit_file instead — create_file refuses to clobber."),
@@ -253,8 +253,9 @@ CODER_TOOLS = [
             "new=[that same line, then your new line(s)].\n"
             "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
             "Multiple hunks edit several spots in one call. After applying you get a diff "
-            "= the file AFTER your change (its current state) — take your next `old` from "
-            "that, don't re-read. Parse-checked; a rejection says exactly what to fix."),
+            "showing the file's new state — read it to confirm, but write your next `old` as "
+            "`INDENT|code` (or copy it from your read view), NOT as a pasted diff row. "
+            "Parse-checked; a rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this edit makes true — 1 concrete sentence"},
@@ -686,12 +687,22 @@ def _locate_block(cur_lines: list, old_list: list) -> "tuple[int | None, int]":
     return (hits[0] if hits else None), len(hits)
 
 
-def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
+def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None) -> str:
     """`old` matched nowhere in the file. Two very different causes — name the
     likely one. If we've already edited this file, the model is almost certainly
     copying `old` from a STALE earlier read (the file moved under it); telling it
     'wrong file' would wrongly send it away from the right file. If we HAVEN'T
     touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug)."""
+    # Strict-input cue: if `old` looks like it was pasted from a DIFF's +/- row
+    # (`N:+ ` / `N:- `), that gutter is NOT editable input and isn't silently stripped —
+    # tell the coder the canonical form instead of leaving it to guess. (audit pass-4.)
+    if old_raw and any(_LOOKS_COPIED_GUTTER_RE.match(str(o)) for o in old_raw):
+        return (f"✗ edit_file hunk #{i}: your `old` looks like a line copied from a DIFF "
+                f"(it starts with `LINENO:+ ` / `LINENO:- `). A diff row is not editable "
+                f"input. Write each `old`/`new` line as `INDENT|code` (the indent NUMBER, a "
+                f"pipe, then the code — e.g. `8|return x`), or copy a line from a read_file "
+                f"VIEW of {path} (which shows `LINENO:INDENT|code`). The harness applies the "
+                f"indent from the number.")
     if path in ctx.get("files_changed", set()):
         _when = ctx.get("view_at", {}).get(path, "your last edit")
         return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
@@ -720,42 +731,40 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
 # diff-marker strips are anchored so they CANNOT corrupt real code: they only fire when a
 # `\d+\|` (indent) or `\d+:[+-]` (diff) shape follows — a normal `key: value` / `5: x` line
 # never matches.
-_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code
-_VIEW_LINE_RE   = re.compile(r'^\d+:(\d+)\|(.*)$')       # LINENO:INDENT|code (copied view line)
-# A line copied from a post-edit diff (core/edit_diff.py): `<pad>LINENO:` then `+ ` (added)
-# or `- ` (removed), then the code WITH its real leading spaces (the right-justified line#
-# carries a LEADING PAD on single digits, tolerated by ^\s*). group(1) is the real code.
-# IMPORTANT: match ONLY `+`/`-`, NOT the context marker `  ` (two spaces) — a context line
-# `N:  code` is shape-IDENTICAL to a YAML/dict mapping like `443:  description`, so eating
-# that prefix silently corrupts config files. Context lines are copied from the read view
-# (LINENO:INDENT|), which is unambiguous. (audit pass-3 fix: YAML/config over-match.)
-_DIFF_LINE_RE   = re.compile(r'^\s*\d+:[+\-] (.*)$')
+# CANONICAL edit forms ONLY — both are UNAMBIGUOUS (the `\d+\|` / `\d+:\d+\|` shape does not
+# collide with real code/YAML/config):
+_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code            (the write form)
+_VIEW_LINE_RE   = re.compile(r'^\d+:(\d+)\|(.*)$')       # LINENO:INDENT|code     (a copied view line)
 # blast-radius annotation a def line may carry: ` |appears N (#hex...)`. Require the
 # `(#hex` shape the annotation ALWAYS emits, so a real code line like
 # `raise ValueError("x |appears 3 times")` is NOT truncated.
 _APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ \(#[0-9a-fA-F][^)]*\)\s*$')
+# A line that looks like it was copied from a DIFF's +/- row (`N:+ ` / `N:- `). We
+# deliberately do NOT silently transform these — but if one is used as `old` and the match
+# fails, the reject TELLS the coder to re-send as INDENT|code. Detection drives that message
+# ONLY; it never rewrites the line. We match ONLY `+`/`-` (NOT the context `N:  ` form, which
+# is shape-ambiguous with YAML `443:  desc` and would mis-fire). (audit pass-4: strict.)
+_LOOKS_COPIED_GUTTER_RE = re.compile(r'^\s*\d+:[+\-] ')
 
 
 def _expand_indent_lines(lines: list) -> list:
-    """Resolve every old/new/content line to its real source form (see the format note
-    above). The col-0 dedent root cause was that the model had to mentally convert the
-    indent number to spaces and kept dropping it; now it just states the number (or copies
-    a view/diff line verbatim) and the harness applies the spaces. Idempotent + literal
-    fallback so it can never corrupt a line that isn't one of the known prefixed forms."""
+    """Resolve every old/new/content line to its real source form. The model declares indent
+    by NUMBER (`INDENT|code`) — or copies a view line verbatim (`LINENO:INDENT|code`) — and the
+    harness applies the spaces, so the coder never types (and never drops) leading spaces (the
+    col-0 dedent root cause). We transform ONLY these two UNAMBIGUOUS forms; everything else is
+    taken LITERALLY (so a real YAML/code line is never corrupted by a guessed transform). A
+    leftover diff/whitespace gutter is NOT stripped — it simply won't match, and the reject
+    explains how to re-send (see _do_edit)."""
     out = []
     for ln in lines:
-        # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation;
-        # strip it so copying that line as `old`/`new` still matches the real file line.
+        # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation
+        # (the harness's own marker, `(#hex)`-guarded); strip it so copying that line matches.
         ln = _APPEARS_TAIL_RE.sub('', ln)
         m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
         if m:                                    # INDENT|code or LINENO:INDENT|code
             out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' '))
-            continue
-        d = _DIFF_LINE_RE.match(ln)
-        if d:                                    # LINENO:+/-content — keep its real spaces
-            out.append(d.group(1))
-            continue
-        out.append(ln)                           # plain real-space line → literal
+        else:
+            out.append(ln)                       # literal — never a guessed transform
     return out
 
 
@@ -843,7 +852,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # No number given — resolve from content; reject if it's not unique.
             sl, n_hits = _locate_block(cur_lines, old_list)
             if n_hits == 0:
-                return _old_not_found_msg(i, path, ctx)
+                return _old_not_found_msg(i, path, ctx, h.get("old"))
             if n_hits > 1:
                 return (f"✗ edit_file hunk #{i}: `old` appears {n_hits} times in {path} "
                         f"— add `start_line` (the read_file line number where this "
@@ -865,7 +874,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # in dataclasses.py when the class is in _collection_finder.py.
             _, _n = _locate_block(cur_lines, old_list)
             if _n == 0:
-                return _old_not_found_msg(i, path, ctx)
+                return _old_not_found_msg(i, path, ctx, h.get("old"))
         resolved.append((sl, old_list, new_list))
 
     # The numbered [edit] applier requires lines top-to-bottom in FILE order.
@@ -973,8 +982,11 @@ def _do_create(args: dict, ctx: dict) -> str:
         # (1 lines)" — a silent no-op the model can't tell from real success.
         return (f"✗ create_file: no content for {path}. Pass the full file body in "
                 f"`content` (the complete code for the new file).")
-    # INDENT|code allowed here too (idempotent; literal real-space content still works).
-    content = "\n".join(_expand_indent_lines(str(content).split("\n")))
+    content = str(content)
+    # NOTE (pass-4 F6, deferred): new-file content is still N|-expanded by the shared
+    # `=== FILE:` applier downstream, so a literal data line shaped `123|x` is rewritten to
+    # 123 spaces. Rare (needs a new file with digit-pipe data lines); a proper fix means
+    # making the shared new-file applier verbatim — tracked, not done here.
     # grounding gate (new file → no line to quote; ground in the spec/interface)
     _cot_reject = _check_edit_cot(args, "", is_insert=True)
     if _cot_reject:
