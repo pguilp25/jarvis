@@ -22,21 +22,21 @@ exact executor so behaviour is identical:
     [REPLACE LINES]     replace_lines      _extract/_apply_extracted_code
     [DONE]              finish             —
 
-(The coder has no [RUN:] — that's planner/reviewer-only, so neither does this.)
-
-INDENT FORMAT (ckpt 125): read_file + the pre-loaded file block render each line as
+INDENT FORMAT (ckpt 125/129): read_file + the pre-loaded file block render each line as
 `LINENO:INDENT|<real spaces>code` (prefix_ws) — the coder SEES the indentation AND its
 number. Edits declare indent by NUMBER: old/new lines are `INDENT|code` and the applier
 (`_expand_indent_lines`) re-emits the spaces — so the coder states a number and never
-types (or drops) leading spaces (the col-0 dedent root cause). The applier is
-copy-paste tolerant: it also accepts a full view line `LINENO:INDENT|code`, a diff line
-`LINENO:[+-]code`, a plain real-space line, and a `|appears N` annotated def line — the
-NUMBER is authoritative, copied spaces are stripped and re-applied.
+types (or drops) leading spaces (the col-0 dedent root cause). STRICT (ckpt 129): the
+applier transforms ONLY the two UNAMBIGUOUS forms — `INDENT|code` and a full view line
+`LINENO:INDENT|code` (plus stripping the harness's own `|appears N (#hex)` tail). A diff
+row is NOT editable input (its gutter is shape-ambiguous with YAML/config, so it's taken
+literally and the reject tells the coder to re-send as `INDENT|code`). Anything else is
+literal — no guessed transform can corrupt real content.
 
-Edit tool = `replace_lines(path, start, end, new_content)` (line-range, NOT the
-anchor-based [edit] diff): native models produce clean structured args, and it
-REUSES the existing `[REPLACE LINES]` applier + validation gate + reject feedback
-(lazy import, to avoid a circular dep with workflows.code).
+Primary edit = `edit_file(path, hunks)` (content-anchored, can't go stale); `replace_lines`
+is the secondary line-range tool. Both REUSE the existing applier + validation gate +
+reject feedback (lazy import, to avoid a circular dep with workflows.code). The coder also
+has `run_code` (a sandboxed runner — read-only, no network).
 
 Public:
   NATIVE_TOOL_MODELS          — model ids that should use this path
@@ -642,9 +642,9 @@ def _do_replace(args: dict, ctx: dict) -> str:
                 f"The diff below is the ONLY change to {path} since your last view; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. Your earlier view + this diff = "
                 f"its CURRENT, live state — TRUST it, your view is NOT stale. Do NOT "
-                f"read_file {path} again; copy your next edit's `old` line(s) from this diff "
-                f"or your earlier view. Only for a part of {path} you have NOT seen, read it "
-                f"with a start_line/end_line range.\n"
+                f"read_file {path} again; for your next edit write `old` as `INDENT|code` "
+                f"(or copy a line from your read view) — do NOT paste a diff row. Only for a "
+                f"part of {path} you have NOT seen, read it with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
     # _match_fp can suffix-resolve it to another key — mutating file_contents
@@ -707,11 +707,11 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None) -> str:
         _when = ctx.get("view_at", {}).get(path, "your last edit")
         return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
                 f"You already EDITED {path} ({_when}), so this `old` was copied from a view "
-                f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: if the "
-                f"line is in the region you changed, copy `old` from the LATEST diff of "
-                f"{path} in your context above; if it's in a part you have NOT seen since "
-                f"the edit, read_file {path} with that exact start_line/end_line range. Do "
-                f"not reuse stale line text from an earlier full read.")
+                f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: write "
+                f"`old` as `INDENT|code` for the line as it reads NOW (the LATEST diff above "
+                f"shows the current text — read it, but don't paste the diff row); if the line "
+                f"is in a part you have NOT seen since the edit, read_file {path} with that "
+                f"exact start_line/end_line range. Don't reuse stale line text.")
     return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Two causes: "
             f"(1) WRONG FILE — the code may be defined elsewhere; [SEARCH] the symbol to find "
             f"its real file, then edit THAT. (2) Your `old` doesn't match {path}'s text — copy "
@@ -939,10 +939,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
                 f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
                 f"(your `old` was matched by CONTENT, so line numbers never mattered). Do "
-                f"NOT read_file {path} again. For your next change here, copy the exact "
-                f"`old` line(s) from this diff (changed region) or from your earlier view "
-                f"(unchanged region); only if you need a part of {path} you have NOT seen, "
-                f"read_file it with a start_line/end_line range.\n"
+                f"NOT read_file {path} again. For your next change here, write `old` as "
+                f"`INDENT|code` (or copy a line from your read view) — do NOT paste a diff "
+                f"row. Only if you need a part of {path} you have NOT seen, read_file it "
+                f"with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).

@@ -9357,7 +9357,7 @@ def _extract_shared_interfaces(plan: str) -> str:
     return ""
 
 
-_FENCE_RE = re.compile(r'^\s*```')
+_FENCE_RE = re.compile(r'^\s*(?:```|~~~)')   # ``` or ~~~ fenced code blocks
 
 
 def _mask_fenced_blocks(text: str) -> str:

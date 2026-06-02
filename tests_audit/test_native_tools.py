@@ -1205,3 +1205,20 @@ def test_edit_cot_gate_rejects_ungrounded_when_flag_on():
         import core.native_tools as nt; importlib.reload(nt)
     # flag OFF: ungrounded edit applies (no enforcement)
     assert asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": hunk}, mkctx())).startswith("✓")
+
+
+def test_edit_success_messages_dont_tell_coder_to_paste_a_diff():
+    # ckpt-130: the strict applier no longer accepts a diff row as editable input, so the
+    # post-edit success messages must NOT tell the coder to copy its next `old` from the
+    # diff — they must point to the canonical INDENT|code form. (pass-5 leftover fix.)
+    import os
+    os.environ.pop("JARVIS_EDIT_COT", None)
+    from core.native_tools import _do_edit, _do_replace
+    ctx = {"file_contents": {"m.py": "def f():\n    return 1\n"}, "files_changed": set()}
+    r = _do_edit({"path": "m.py", "hunks": [{"old": ["8|return 1"], "new": ["8|return 2"]}]}, ctx)
+    assert r.startswith("✓") and "INDENT|code" in r
+    assert "from this diff" not in r.lower()
+    ctx2 = {"file_contents": {"m.py": "def f():\n    return 1\n"}, "files_changed": set(),
+            "viewed_versions": {"m.py": "def f():\n    return 1\n"}}
+    r2 = _do_replace({"path": "m.py", "start_line": 2, "end_line": 2, "new_content": "8|return 2"}, ctx2)
+    assert "copy your next edit's `old` line(s) from this diff" not in r2
