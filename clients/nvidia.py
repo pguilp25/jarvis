@@ -8,6 +8,60 @@ import json as _json
 import os
 import asyncio
 import aiohttp
+import fcntl
+
+
+_GPTOSS_LOCK_PATH = "/tmp/jarvis_gptoss.lock"
+
+
+class _gptoss_serialize:
+    """Cross-process advisory lock so only ONE JARVIS process calls gpt-oss at a
+    time — the free tier is concurrency-1, so two concurrent callers 429 each
+    other into degraded fallbacks. ENV-GATED (JARVIS_GPTOSS_LOCK) and FAIL-OPEN:
+    any locking error → proceed UNLOCKED, never block or crash a real call. So
+    with the env unset (default) this is a pure no-op — zero risk to normal runs.
+
+    Granularity is PER gpt-oss CALL (one coder round), so two runs sharing the
+    lock interleave round-by-round; the PLANNING phase never uses gpt-oss, so it
+    never touches the lock and overlaps freely. This is the mechanism behind the
+    night interleave (SWE-bench + a real-world coding run on the same box)."""
+
+    def __init__(self, model_id: str):
+        self.on = bool(os.environ.get("JARVIS_GPTOSS_LOCK")) and ("gpt-oss" in (model_id or ""))
+        self.fh = None
+
+    async def __aenter__(self):
+        if not self.on:
+            return self
+        try:
+            self.fh = open(_GPTOSS_LOCK_PATH, "w")
+            waited = 0.0
+            while True:
+                try:
+                    fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(0.25)
+                    waited += 0.25
+                    if waited > 1800:   # 30-min safety valve: never deadlock a run
+                        break
+        except Exception:
+            try:
+                if self.fh:
+                    self.fh.close()
+            except Exception:
+                pass
+            self.fh = None   # fail-open
+        return self
+
+    async def __aexit__(self, *exc):
+        if self.fh is not None:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
+                self.fh.close()
+            except Exception:
+                pass
+            self.fh = None
 from typing import Optional
 from config import NVIDIA_MODEL_IDS, NVIDIA_SLEEP_BETWEEN, STREAM_TTFT_TIMEOUT
 from core.cli import thinking, warn
@@ -297,12 +351,16 @@ async def call_nvidia_tools(
         **_max_thinking_payload(model_id),
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=1800)) as resp:
-            raw = await resp.text()
-            if resp.status != 200:
-                raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
+    # gpt-oss serialization (night interleave): hold the cross-process lock only for
+    # the duration of the actual gpt-oss HTTP call. No-op unless JARVIS_GPTOSS_LOCK is
+    # set; fail-open on any lock error.
+    async with _gptoss_serialize(model_id):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+                raw = await resp.text()
+                if resp.status != 200:
+                    raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
     return _extract_tool_message(raw, api_model)
 
 
