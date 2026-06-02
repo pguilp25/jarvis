@@ -1501,6 +1501,9 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     reason = "budget-exhausted"
     rnd = 0
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
+    _total_rejects = 0        # TOTAL ✗ this step — backstop for the varied-reject evasion
+                              # of _fail_counts (a coder that tweaks args each round never
+                              # trips the identical-3× stop and burns the whole budget). (M1/N1)
     _verify_nudged = False    # one forced self-check before finishing (per step)
     _noedit_finish_nudged = False  # one push-back on a finish-with-ZERO-edits bail
     _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
@@ -1649,6 +1652,13 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # malformed call — counting it would cut off the fix loop we just added.
             if (isinstance(result_str, str) and result_str.startswith("✗")
                     and name != "run_code"):
+                _total_rejects += 1
+                # backstop: many DIFFERENT rejected edit calls (varied args evade the
+                # identical-3× check) → still stuck; fall over rather than burn the budget.
+                if _total_rejects >= 8:
+                    warn(f"  [native:{short}] {_total_rejects} rejected edit calls this "
+                         f"step — stuck; stopping for fallover")
+                    _stuck = True
                 _sig = (name, raw_args)
                 _fail_counts[_sig] = _fail_counts.get(_sig, 0) + 1
                 if _fail_counts[_sig] == 2:
@@ -1723,6 +1733,11 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             if ctx.get("files_changed") and not _verify_nudged:
                 _verify_nudged = True
                 done = False
+                # reset reason too: `finished` was set when the finish fired, but we're
+                # un-finishing for the self-check. If the coder never re-finishes (hits the
+                # round cap), reason must reflect that — leaving it `finished` would log a
+                # budget-truncated step as a clean finish and suppress the warning. (pass-6 M1.)
+                reason = "budget-exhausted"
                 messages.append(_verify_nudge_msg())
                 status(f"  [native:{short}] round {rnd}: finish requested — "
                        f"one self-check pass first")

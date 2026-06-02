@@ -557,13 +557,24 @@ async def main_async(args) -> None:
     write_lock = asyncio.Lock()
 
     async def run_and_record(inst: dict) -> None:
-        pred = await run_one_instance(inst, sem, args.model_name, args.timeout, summary_log)
+        # NEVER let one instance's exception escape — at --parallel>1 a bare gather would
+        # cancel every sibling (losing their in-flight predictions). Catch here, write an
+        # empty-patch prediction, and let the rest of the batch finish. (audit pass-6 M4.)
+        try:
+            pred = await run_one_instance(inst, sem, args.model_name, args.timeout, summary_log)
+        except Exception as e:
+            iid = inst.get("instance_id", "?")
+            summary_log(f"ERROR  {iid}  uncaught: {str(e)[:160]}")
+            pred = {"instance_id": iid, "model_name_or_path": args.model_name, "model_patch": ""}
         async with write_lock:
             out_fh.write(json.dumps(pred) + "\n")
             out_fh.flush()
 
     t_start = time.time()
-    await asyncio.gather(*(run_and_record(inst) for inst in instances))
+    # return_exceptions=True is belt-and-suspenders: even if run_and_record itself somehow
+    # raises, the gather completes the other instances instead of cancelling them.
+    await asyncio.gather(*(run_and_record(inst) for inst in instances),
+                         return_exceptions=True)
     out_fh.close()
     total = time.time() - t_start
 
