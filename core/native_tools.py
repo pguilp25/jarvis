@@ -722,8 +722,15 @@ def _old_not_found_msg(i: int, path: str, ctx: dict) -> str:
 # never matches.
 _INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code
 _VIEW_LINE_RE   = re.compile(r'^\d+:(\d+)\|(.*)$')       # LINENO:INDENT|code (copied view line)
-_DIFF_LINE_RE   = re.compile(r'^\d+:[+\-](.*)$')         # LINENO:+/-content (copied diff line)
-_APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ .*$')   # blast-radius annotation a def line may carry
+# A line copied from a post-edit diff (core/edit_diff.py): `<pad>LINENO:` then a 2-char
+# marker — `+ ` (added), `- ` (removed), or `  ` (context) — then the code WITH its real
+# leading spaces. The line number is right-justified (width>=2) so single digits carry a
+# LEADING PAD; tolerate it with ^\s*. group(1) is the real code (its indent preserved).
+_DIFF_LINE_RE   = re.compile(r'^\s*\d+:[+\- ] (.*)$')
+# blast-radius annotation a def line may carry: ` |appears N (#hex...)`. Require the
+# `(#hex` shape the annotation ALWAYS emits, so a real code line like
+# `raise ValueError("x |appears 3 times")` is NOT truncated.
+_APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ \(#[0-9a-fA-F][^)]*\)\s*$')
 
 
 def _expand_indent_lines(lines: list) -> list:

@@ -18,6 +18,23 @@ def _e(find, replace):
     return (find, replace)
 
 
+def test_explicit_N_indent_count_not_silently_reindented():
+    # When the coder declares an explicit `N|` indent on the REPLACE body, that count is
+    # AUTHORITATIVE — the SEARCH/REPLACE applier must NOT reindent it to the matched
+    # window's indent (which would revert a deliberate de-dent). The find here is
+    # whitespace-normalized (no indent) so it goes through a reindent strategy, not the
+    # verbatim exact-match path. (audit re-pass: the 5 _reindent_replace sites were ungated.)
+    orig = "def f():\n    if cond:\n        result = old()\n"
+    edits = [_e("result = old()", "4|result = new()")]   # declare indent 4 (de-dent out of `if`)
+    result, m, t, amb = _apply_edits(orig, edits)
+    assert m == 1
+    assert "    result = new()" in result            # honored the declared 4
+    assert "        result = new()" not in result     # NOT reverted to the window's 8
+    # control: NO explicit count → reindent to the matched window (legacy behaviour kept)
+    r2, _, _, _ = _apply_edits(orig, [_e("result = old()", "result = new()")])
+    assert "        result = new()" in r2             # reindented to 8
+
+
 # ─────────────── Strategy 1: exact match ───────────────
 
 

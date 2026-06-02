@@ -48,8 +48,11 @@ def _blank_protocol_bodies(text: str) -> str:
     for pat in _PROTOCOL_BODY_RES:
         text = pat.sub(lambda m: m.group(1) + re.sub(r"[^\n]", " ", m.group(2)) + m.group(3), text)
     return text
-_PLAN_PREFIX = re.compile(r"\[\s*GO\s+TO\s+PLAN\s*:\s*", re.IGNORECASE)
-_STEP_PREFIX = re.compile(r"\[\s*GO\s+TO\s+STEP\s*(\d+)?\s*:\s*", re.IGNORECASE)
+# Colon is OPTIONAL: the reviewer prompt's prose shows the bare `[GO TO STEP]` /
+# `[GO TO PLAN]` form, so a literal-minded reviewer can emit it without a colon — and a
+# colon-required parser silently dropped that rejection (a lost FAIL ships a bug).
+_PLAN_PREFIX = re.compile(r"\[\s*GO\s+TO\s+PLAN\s*:?\s*", re.IGNORECASE)
+_STEP_PREFIX = re.compile(r"\[\s*GO\s+TO\s+STEP\s*(\d+)?\s*:?\s*", re.IGNORECASE)
 
 # The explicit `[APPROVED]` tag matches anywhere; the reviewer's bare
 # `APPROVED`/`APPROVED — …` vocabulary matches ONLY at a line start, so prose

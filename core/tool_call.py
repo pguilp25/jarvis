@@ -1655,28 +1655,37 @@ async def _run_code_reads(
                     # Huge file — return a skeleton instead of the full body.
                     # Loading the full file would blow the model's context.
                     skeleton = _build_file_skeleton(all_lines, filename=fpath)
-                    output_parts.append(
+                    _hdr = (
                         f"\n=== Code: {fpath} ({total_lines} lines — SKELETON ONLY) ===\n"
                         f"⛔ This file is too large to return in full "
                         f"({total_lines} lines > {KEEP_FORCE_THRESHOLD} threshold). "
                         f"Loading the entire file would overflow the model's "
                         f"context window. Below is the file's SKELETON — "
-                        f"top-level definitions with their line numbers.\n\n"
-                        f"To READ ACTUAL CONTENT around a line in the skeleton,\n"
-                        f"use VIEW with a line number (this is the right tool here):\n"
-                        f"  [tool use] [VIEW: {fpath} LINE_NUMBER] [/tool use]\n"
-                        f"    → ~80 lines centered on LINE_NUMBER (±40). Use this\n"
-                        f"      to explore when you don't yet know the exact range.\n"
-                        f"  [tool use] [VIEW: {fpath} START-END] [/tool use]\n"
-                        f"    → an explicit range (max 600 lines) once you know it.\n"
-                        f"Do NOT use [KEEP:] to read this file — KEEP is only for\n"
-                        f"NARROWING a file you ALREADY read with [CODE:]; on a file\n"
-                        f"this size, VIEW by line number above is the correct tool.\n"
-                        f"(KEEP still works for pinning a range right before a\n"
-                        f"[REPLACE LINES N-M] edit, but VIEW first to find the lines.)\n"
-                        f"Each call must be followed by [STOP][CONFIRM_STOP].\n"
-                        f"\n{skeleton}\n"
-                    )
+                        f"top-level definitions with their line numbers.\n\n")
+                    if display_mode == "prefix_ws":
+                        # NATIVE coder: it has no [VIEW:]/[KEEP:] text tags — its only read
+                        # is read_file with a range. (audit fix: skeleton used to hand the
+                        # native coder text-loop tags it cannot emit.)
+                        _how = (
+                            f"To READ ACTUAL CONTENT around a line in the skeleton, call\n"
+                            f"read_file with a range: read_file(path='{fpath}', start_line=N, "
+                            f"end_line=M) — pick N..M around the def's line number below.\n")
+                    else:
+                        _how = (
+                            f"To READ ACTUAL CONTENT around a line in the skeleton,\n"
+                            f"use VIEW with a line number (this is the right tool here):\n"
+                            f"  [tool use] [VIEW: {fpath} LINE_NUMBER] [/tool use]\n"
+                            f"    → ~80 lines centered on LINE_NUMBER (±40). Use this\n"
+                            f"      to explore when you don't yet know the exact range.\n"
+                            f"  [tool use] [VIEW: {fpath} START-END] [/tool use]\n"
+                            f"    → an explicit range (max 600 lines) once you know it.\n"
+                            f"Do NOT use [KEEP:] to read this file — KEEP is only for\n"
+                            f"NARROWING a file you ALREADY read with [CODE:]; on a file\n"
+                            f"this size, VIEW by line number above is the correct tool.\n"
+                            f"(KEEP still works for pinning a range right before a\n"
+                            f"[REPLACE LINES N-M] edit, but VIEW first to find the lines.)\n"
+                            f"Each call must be followed by [STOP][CONFIRM_STOP].\n")
+                    output_parts.append(f"{_hdr}{_how}\n{skeleton}\n")
                     # Don't record skeleton as viewed_versions — line-anchored
                     # edits against a skeleton view would be wrong. Force the
                     # model to KEEP first, which DOES record the real content.

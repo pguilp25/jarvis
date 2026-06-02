@@ -8076,6 +8076,30 @@ def _clear_revert_history(filepath: str | None = None) -> None:
         _REVERT_STACK.pop(filepath, None)
 
 
+_EXPLICIT_INDENT_RE = re.compile(r'^i?\d+\|')
+
+
+def _replace_has_explicit_indent(raw_replace: str) -> bool:
+    """True if the coder declared an explicit `N|` (or legacy `iN|`) indent on the first
+    non-blank REPLACE line. Then the count is AUTHORITATIVE: the body (already expanded to
+    real spaces by _restore_replace_whitespace) must be spliced VERBATIM, NOT passed through
+    _reindent_replace — which would shift it to the matched window's indent and silently
+    revert a deliberate de-dent/wrap. (audit fix: SEARCH/REPLACE family was reindenting
+    unconditionally, contradicting the prompt's "never silently reindents".)"""
+    for ln in raw_replace.split('\n'):
+        if ln.strip():
+            return bool(_EXPLICIT_INDENT_RE.match(ln))
+    return False
+
+
+def _replace_block_lines(raw_replace: str, replace_clean: str, window) -> list[str]:
+    """New lines for a SEARCH/REPLACE splice: verbatim when the coder declared an explicit
+    `N|` indent (authoritative), else reindent to the matched window (legacy/no-prefix)."""
+    if _replace_has_explicit_indent(raw_replace):
+        return replace_clean.split('\n')
+    return _reindent_replace(replace_clean, window)
+
+
 def _reindent_replace(replace_text: str, matched_lines) -> list[str]:
     """Re-indent replace_text so its first non-blank line aligns with the first
     non-blank line of the matched window in the file.
@@ -8299,8 +8323,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> tuple[str, int,
                         result_lines[i:i + len(find_lines)] = []
                         _record_edit(i, len(find_lines), 0)
                     else:
-                        new_lines = _reindent_replace(
-                            replace_clean, result_lines[i:i + len(find_lines)]
+                        new_lines = _replace_block_lines(
+                            replace_text, replace_clean, result_lines[i:i + len(find_lines)]
                         )
                         result_lines[i:i + len(find_lines)] = new_lines
                         _record_edit(i, len(find_lines), len(new_lines))
@@ -8329,8 +8353,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> tuple[str, int,
                     result_lines[best:best + len(find_lines)] = []
                     _record_edit(best, len(find_lines), 0)
                 else:
-                    new_lines = _reindent_replace(
-                        replace_clean, result_lines[best:best + len(find_lines)]
+                    new_lines = _replace_block_lines(
+                        replace_text, replace_clean, result_lines[best:best + len(find_lines)]
                     )
                     result_lines[best:best + len(find_lines)] = new_lines
                     _record_edit(best, len(find_lines), len(new_lines))
@@ -8343,8 +8367,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> tuple[str, int,
                     result_lines[i:i + len(find_lines)] = []
                     _record_edit(i, len(find_lines), 0)
                 else:
-                    new_lines = _reindent_replace(
-                        replace_clean, result_lines[i:i + len(find_lines)]
+                    new_lines = _replace_block_lines(
+                        replace_text, replace_clean, result_lines[i:i + len(find_lines)]
                     )
                     result_lines[i:i + len(find_lines)] = new_lines
                     _record_edit(i, len(find_lines), len(new_lines))
@@ -8424,8 +8448,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> tuple[str, int,
                 result_lines[best_idx:best_idx + best_length] = []
                 _record_edit(best_idx, best_length, 0)
             else:
-                new_lines = _reindent_replace(
-                    replace_clean, result_lines[best_idx:best_idx + best_length]
+                new_lines = _replace_block_lines(
+                    replace_text, replace_clean, result_lines[best_idx:best_idx + best_length]
                 )
                 result_lines[best_idx:best_idx + best_length] = new_lines
                 _record_edit(best_idx, best_length, len(new_lines))
@@ -8452,8 +8476,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> tuple[str, int,
                 result_lines[best_idx:best_idx + best_length] = []
                 _record_edit(best_idx, best_length, 0)
             else:
-                new_lines = _reindent_replace(
-                    replace_clean, result_lines[best_idx:best_idx + best_length]
+                new_lines = _replace_block_lines(
+                    replace_text, replace_clean, result_lines[best_idx:best_idx + best_length]
                 )
                 result_lines[best_idx:best_idx + best_length] = new_lines
                 _record_edit(best_idx, best_length, len(new_lines))

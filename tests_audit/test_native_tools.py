@@ -112,6 +112,52 @@ def test_read_file_shows_real_indentation():
         _cleanup(root)
 
 
+def test_diff_line_copy_paste_round_trips():
+    # A coder copying ANY line from a post-edit diff (context `N:  `, added `N:+ `,
+    # removed `N:- `, incl. the leading line-number pad) as its next `old`/`new` must
+    # resolve to the real code with its real indentation. (audit re-pass HIGH fix.)
+    from core.native_tools import _expand_indent_lines as ex
+    from core.edit_diff import render_diff
+    old = "class C:\n    def f(self):\n        return 1\n"
+    new = "class C:\n    def f(self):\n        if True:\n            return 2\n        return 1\n"
+    diff = render_diff(old, new, "m.py")
+    for line in diff.splitlines()[1:]:          # skip the path header
+        if not line.strip():
+            continue
+        got = ex([line])[0]
+        # the expansion must NOT leave any diff gutter/marker behind
+        assert "|" not in got.split(":")[0] if ":" in got else True
+        assert not got.lstrip().startswith(("+ ", "- "))
+    # end-to-end: copy a real diff line as `old` and confirm it APPLIES
+    from core.native_tools import _do_edit
+    ctx = {"file_contents": {"m.py": old}, "files_changed": set()}
+    diff_line = next(l for l in diff.splitlines() if "return 1" in l)
+    r = _do_edit({"path": "m.py", "hunks": [{"start_line": 3, "old": [diff_line],
+                                             "new": ["8|return 9"]}]}, ctx)
+    assert r.startswith("✓"), f"copied diff line should apply, got: {r}"
+
+
+def test_route_parser_accepts_colonless_go_to_step():
+    # The reviewer prompt's prose shows the bare `[GO TO STEP]` / `[GO TO PLAN]` form;
+    # the parser must accept it (a colon-required parser silently dropped the rejection →
+    # a lost FAIL ships a bug). (audit re-pass MED fix.)
+    from core.review_verify import parse_route
+    assert parse_route("[GO TO STEP]").kind == "step"
+    assert parse_route("[GO TO STEP 3]").kind == "step"
+    assert parse_route("[GO TO PLAN]").kind == "plan"
+    assert parse_route("[GO TO STEP 3: fix it]").kind == "step"   # colon form still works
+    assert parse_route("[APPROVED]").kind == "approved"
+
+
+def test_appears_annotation_strip_is_safe():
+    # The `|appears N (#tag)` blast-radius annotation is stripped when copied, but a real
+    # code line that merely CONTAINS "|appears <n>" (no `(#hex)`) must NOT be truncated.
+    from core.native_tools import _expand_indent_lines as ex
+    assert ex(["5:4|    def baz(self): |appears 1 (#085)"]) == ["    def baz(self):"]
+    real = '    raise ValueError("symbol |appears 3 times")'
+    assert ex(["4|" + real.lstrip()]) == [real]      # NOT truncated
+
+
 def test_read_file_range():
     ctx, rel, root = _mk_ctx()
     try:
