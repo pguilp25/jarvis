@@ -218,25 +218,33 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Edit a file: `old` = the EXACT existing block, `new` = what it becomes (a "
-            "content-matched search→replace). FOR `old`: copy the view line(s) VERBATIM, "
-            "keeping the WHOLE `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def setvalue`) — the "
-            "harness anchors on BOTH the line number (so a repeated line lands on the RIGHT one) "
-            "AND the content (a stale number self-corrects). FOR `new` (new code, no line "
-            "number): write each line as `INDENT|code` — the indent NUMBER (the one after the "
-            "`⇥` in the view), a pipe, then the code with NO leading spaces (e.g. `4|def f():`, "
-            "`8|return x`); the harness re-emits the spaces, so you never type or drop "
-            "indentation. Put the WHOLE span you're changing in `old` (every line, top to "
-            "bottom) and the whole replacement in `new` — don't leave part of the block out (that "
-            "strands the old code). To INSERT, include a surrounding line in BOTH old and new. To "
-            "DELETE, new=[]. After applying you get the file's new diff; a rejection says what to fix."),
+            "Edit a file with a content-matched search→replace. GROUP ALL your changes to "
+            "this file into ONE call: pass `edits` = a list of {old, new} pairs (your whole "
+            "'edit section' in one shot). They all anchor to the file's CURRENT view and "
+            "apply together — so line numbers DON'T shift between them and you never have to "
+            "re-read mid-edit — and you get back ONE consolidated diff = the file's new "
+            "state. (For a single change you may pass `old`/`new` directly instead of `edits`.) "
+            "Per change: `old` = the EXACT existing block — copy the view line(s) VERBATIM, "
+            "keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def setvalue`); the "
+            "harness anchors on BOTH the line number AND the content (a stale number "
+            "self-corrects). `new` = the replacement as `INDENT|code` (the indent NUMBER after "
+            "the `⇥`, a pipe, then code with NO leading spaces — e.g. `4|def f():`, `8|return "
+            "x`; the harness re-emits the spaces). Put the WHOLE span you're changing in `old` "
+            "(don't strand part of the block). To INSERT, include a surrounding line in BOTH "
+            "old and new. To DELETE, new=[]. A rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
+            "edits": {"type": "array", "description": "ALL your changes to this file in one batch — "
+                      "a list of {old, new}; they apply together against the current view and return "
+                      "ONE consolidated diff. Prefer this over many separate edit_file calls.",
+                      "items": {"type": "object", "properties": {
+                          "old": {"type": "array", "items": {"type": "string"}},
+                          "new": {"type": "array", "items": {"type": "string"}}}}},
             "old": {"type": "array", "items": {"type": "string"},
-                    "description": "the EXACT existing lines — copy them VERBATIM from your read, keeping the `LINENO ⇥INDENT|` prefix so the line number anchors the edit; content is also verified"},
+                    "description": "single-edit shorthand: the EXACT existing lines, copied VERBATIM from your read (keep the `LINENO ⇥INDENT|` prefix). Use `edits` to batch several changes."},
             "new": {"type": "array", "items": {"type": "string"},
-                    "description": "the replacement lines as `INDENT|code` (no line number — these are new); [] to delete"},
-        }, "required": ["path", "old", "new"]},
+                    "description": "single-edit shorthand: the replacement as `INDENT|code` (no line number); [] to delete"},
+        }, "required": ["path"]},
     }},
     {"type": "function", "function": {
         "name": "run_code",
@@ -854,11 +862,16 @@ def _do_edit(args: dict, ctx: dict) -> str:
     if _pe:
         return _pe
     hunks = args.get("hunks")
+    # ckpt-151: the model-facing BATCH form is `edits` = [{old, new}, ...] — the coder's
+    # whole "edit section" for this file in ONE call. All edits anchor to the SAME current
+    # view and apply together (so line numbers can't shift between them → no mid-edit
+    # re-read churn), and the call returns ONE consolidated diff. `hunks` is the internal
+    # alias; a single {old, new} is the shorthand. (all funnel to the same applier below.)
     if not hunks:
-        # ckpt-138: model-facing form is a single old->new block (no `hunks` array, no
-        # start_line) — a plain content-matched search→replace. Wrap it into one hunk so
-        # the proven applier/gate/recovery path below is unchanged. (`hunks` still accepted
-        # internally for back-compat with existing tests.)
+        _edits = args.get("edits")
+        if isinstance(_edits, list) and _edits:
+            hunks = _edits
+    if not hunks:
         _o = args.get("old"); _n = args.get("new")
         if _o is not None or _n is not None:
             _as = lambda v: v if isinstance(v, list) else ([] if v in (None, "") else str(v).split("\n"))
@@ -1046,7 +1059,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
         _when = _view_stamp(ctx)
-        return (f"✓ Applied {len(hunks)} hunk(s) to {path} — change made at {_when}. "
+        return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}. The consolidated diff "
+                f"below is {path}'s CURRENT state after ALL of them. "
                 f"The diff below is the ONLY change to {path} since your last view of it; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
                 f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "

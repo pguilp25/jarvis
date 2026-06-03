@@ -813,11 +813,13 @@ def test_edit_file_in_toolset_and_primary():
     assert "replace_lines" not in names      # ckpt-138: collapsed to one edit tool
     schema = next(t for t in CODER_TOOLS if t["function"]["name"] == "edit_file")
     props = schema["function"]["parameters"]["properties"]
-    # ckpt-138: dead-simple search→replace — only path/old/new. No hunks/start_line/
-    # grounding slots. old=array, new=array, both required.
-    assert set(props) == {"path", "old", "new"}
+    # ckpt-138: dead-simple search→replace — path/old/new. ckpt-151: + `edits`
+    # array for batching multiple old/new pairs into ONE atomic call. Only `path`
+    # is hard-required (old/new used solo, OR edits used for a batch).
+    assert set(props) == {"path", "old", "new", "edits"}
     assert props["old"]["type"] == "array" and props["new"]["type"] == "array"
-    assert schema["function"]["parameters"]["required"] == ["path", "old", "new"]
+    assert props["edits"]["type"] == "array"
+    assert schema["function"]["parameters"]["required"] == ["path"]
 
 
 def test_edit_file_changes_by_content_not_line_number():
@@ -1138,6 +1140,25 @@ def test_edit_anchors_on_copied_view_line_number():
     out2 = _disp("edit_file", {"path": "m.py",
                                "old": ["4|return x"], "new": ["4|return x + 1"]}, ctx2)
     assert out2.startswith("✗") and "appears 2 times" in out2
+
+
+def test_edit_file_batch_applies_atomically_with_one_diff():
+    # ckpt-151: `edits` = a batch of changes applied TOGETHER (one consolidated diff).
+    # A multi-site refactor (delete a def AND fix its only call site) in ONE batch must
+    # NOT trip the dangling-ref gate — the intermediate "deleted but still called" state
+    # never exists, so the whole edit section lands clean.
+    src = "def _h(x):\n    return x\n\ndef use(n):\n    return _h(n)\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "view_at": {}}
+    out = _disp("edit_file", {"path": "m.py", "edits": [
+        {"old": ["def _h(x):", "    return x"], "new": []},          # delete the helper
+        {"old": ["    return _h(n)"], "new": ["    return n + 1"]},  # fix its call site
+    ]}, ctx)
+    assert out.startswith("✓"), out                        # applied — no dangling-ref reject
+    res = ctx["file_contents"]["m.py"]
+    assert "def _h" not in res and "_h(" not in res         # both edits landed
+    assert "return n + 1" in res
+    assert "Applied 2 edit(s)" in out and "consolidated" in out
 
 
 def test_dangling_ref_reject_points_at_the_use_site():
