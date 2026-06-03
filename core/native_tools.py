@@ -1476,6 +1476,86 @@ _EMPTY_TURN_NUDGE = (
     "your next move now as a tool call."
 )
 
+# ── SALVAGE: do the native tool-calling OURSELVES (ckpt-148) ─────────────────
+# gpt-oss on a cheap provider (DeepInfra) intermittently returns finish_reason=stop
+# with NO structured `tool_calls` — but the call it MEANT to make is sitting right
+# there as TEXT in the harmony reasoning/commentary channel (e.g. `…view that file.
+# {"path":"x.py","start_line":40,"end_line":70}`). The provider just failed to parse
+# its own commentary into tool_calls. So we parse it: extract the JSON, infer the tool,
+# synthesize the call, continue. Keeps the cheap provider, costs NO extra API call
+# (unlike a retry), and works because the model already DID the work.
+_SALVAGE_TOOL_NAMES = {t["function"]["name"] for t in CODER_TOOLS}
+
+
+def _balanced_json_objs(text: str) -> list:
+    """Every balanced {...} substring in `text`, string/escape aware (so a `{`/`}`
+    inside a string literal — code in an old/new array — doesn't break the match)."""
+    objs = []; i = 0; n = len(text)
+    while i < n:
+        if text[i] == '{':
+            depth = 0; j = i; instr = False; esc = False; q = ''
+            while j < n:
+                c = text[j]
+                if instr:
+                    if esc: esc = False
+                    elif c == '\\': esc = True
+                    elif c == q: instr = False
+                elif c in '"\'':
+                    instr = True; q = c
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        objs.append(text[i:j + 1]); break
+                j += 1
+            i = j + 1
+        else:
+            i += 1
+    return objs
+
+
+def _infer_tool_from_args(d: dict):
+    """Map a bare arguments object to the tool whose signature it fits — the harmony
+    leak usually drops the function name and emits just the args. Ordered by specificity."""
+    k = set(d.keys())
+    if "old" in k or "new" in k: return "edit_file"
+    if "command" in k: return "run_code"
+    if "symbol" in k: return "find_refs"
+    if "tag" in k: return "find_callers"
+    if "query" in k: return "semantic_search"
+    if "pattern" in k: return "search_text"
+    if "content" in k and "path" in k: return "create_file"
+    if "summary" in k and "path" not in k and "old" not in k: return "finish"
+    if "path" in k: return "read_file"
+    return None
+
+
+def _salvage_inline_tool_call(text: str, ctr: int):
+    """Parse a tool call the model leaked as TEXT and return a synthetic tool_call dict
+    (or None). Tries the LAST balanced JSON object first (the leak is usually at the end
+    of the reasoning). Handles both the {"name","arguments"} wrapper and a bare args
+    object (tool inferred from its keys). Only returns a call for a real CODER_TOOLS tool."""
+    if not text:
+        return None
+    for raw in reversed(_balanced_json_objs(text)):
+        try:
+            d = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(d, dict) or not d:
+            continue
+        nm, ar = d.get("name"), d.get("arguments")
+        if isinstance(nm, str) and nm in _SALVAGE_TOOL_NAMES and ar is not None:
+            a = ar if isinstance(ar, str) else json.dumps(ar)
+            return {"id": f"salvage_{ctr}", "type": "function",
+                    "function": {"name": nm, "arguments": a}}
+        nm2 = _infer_tool_from_args(d)
+        if nm2:
+            return {"id": f"salvage_{ctr}", "type": "function",
+                    "function": {"name": nm2, "arguments": json.dumps(d)}}
+    return None
+
 
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 40,
@@ -1557,6 +1637,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                               # trips the identical-3× stop and burns the whole budget). (M1/N1)
     _verify_nudged = False    # one forced self-check before finishing (per step)
     _empty_retries = 0        # empty-turn (stop, no tool_call) recovery attempts (ckpt-145)
+    _salvage_count = 0        # inline tool-calls parsed from the reasoning channel (ckpt-148)
     _noedit_finish_nudged = False  # one push-back on a finish-with-ZERO-edits bail
     _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
     _trace_nudges = 0         # grounding nudges spent on imagined trace citations
@@ -1641,6 +1722,21 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             **({"tool_calls": msg["tool_calls"]} if msg.get("tool_calls") else {}),
         })
         tcs = msg.get("tool_calls") or []
+        # SALVAGE (ckpt-148): no structured tool_calls, but the model may have leaked the
+        # call as TEXT in the reasoning/commentary channel (the harmony empty-turn). Parse
+        # it ourselves — "do the native ourselves" — so we recover the step on the cheap
+        # provider with no extra API call, instead of retrying or dying. Cap to avoid loops.
+        if not tcs and _salvage_count < 4:
+            _sal = _salvage_inline_tool_call((_reason or "") + "\n" + (_vis or ""), _salvage_count)
+            if _sal:
+                _salvage_count += 1
+                tcs = [_sal]
+                # the assistant turn we just appended MUST carry the call so its tool
+                # result has a matching preceding tool_calls (API invariant).
+                messages[-1]["tool_calls"] = tcs
+                status(f"  [native:{short}] round {rnd}: salvaged inline "
+                       f"{_sal['function']['name']} call from the reasoning channel "
+                       f"(provider returned it as text, not a structured tool_call)")
         if not tcs:
             final = msg.get("content") or ""
             # Stopped WITH edits but never verified → force one self-check pass

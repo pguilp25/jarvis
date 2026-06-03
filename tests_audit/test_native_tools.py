@@ -1093,6 +1093,28 @@ def test_edit_file_pure_insert_with_empty_old():
 # ── comprehension GPS (ckpt 90): harness computes the blast-radius the weak ──
 # model can't hold, and hands back the exact remaining edit (not a dead-end error).
 
+def test_salvage_parses_leaked_tool_call_from_reasoning():
+    # ckpt-148: gpt-oss on a cheap provider intermittently returns finish_reason=stop with
+    # the tool call left as TEXT in the harmony reasoning channel. We parse it ourselves
+    # ("do the native ourselves") instead of depending on the provider / paying for a
+    # stricter one. Covers the real leak shapes seen in the f327 run.
+    from core.native_tools import _salvage_inline_tool_call as sal
+    # bare args object after intent words (f327 round-9 actual leak) -> read_file
+    r = sal('Let us view around line 40-60.{"path":"x.py","start_line":40,"end_line":70}', 0)
+    assert r and r["function"]["name"] == "read_file" and r["id"] == "salvage_0"
+    # path+pattern -> search_text (pattern wins over path)
+    assert sal('{"path":"m.py","pattern":"_is_fqcn"}', 1)["function"]["name"] == "search_text"
+    # {name, arguments} wrapper
+    assert sal('{"name":"read_file","arguments":{"path":"a.py"}}', 2)["function"]["name"] == "read_file"
+    # edit with a brace INSIDE a string literal — string-aware matcher must not break
+    e = sal('Now edit. {"old":["if x: {"],"new":["if x: pass"],"path":"a.py"}', 3)
+    assert e and e["function"]["name"] == "edit_file"
+    # plain reasoning with NO call -> None (no false salvage)
+    assert sal('We should think about whether the function returns True here.', 4) is None
+    # only real CODER_TOOLS tools are salvaged
+    assert sal('{"name":"rm_rf","arguments":{"x":1}}', 5) is None
+
+
 def test_edit_anchors_on_copied_view_line_number():
     # ckpt-144: copying the view line VERBATIM for `old` (keeping the `LINENO ⇥INDENT|`
     # prefix) anchors the edit on BOTH the line number AND the content. `return x`
