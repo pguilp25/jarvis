@@ -1465,6 +1465,14 @@ _NO_EDIT_FINISH_NUDGE = (
     "change, call finish again and say why in the summary."
 )
 
+_EMPTY_TURN_NUDGE = (
+    "⚠ You ended your turn with NO tool call. In this agent your reply must be a "
+    "STRUCTURED tool call (the function-calling interface) — read_file, edit_file, "
+    "search_text, find_refs, run_code, finish, etc. Do NOT write the call as plain "
+    "text or a JSON object in your message; emit it as an actual tool call. Make "
+    "your next move now as a tool call."
+)
+
 
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 40,
@@ -1545,6 +1553,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                               # of _fail_counts (a coder that tweaks args each round never
                               # trips the identical-3× stop and burns the whole budget). (M1/N1)
     _verify_nudged = False    # one forced self-check before finishing (per step)
+    _empty_retries = 0        # empty-turn (stop, no tool_call) recovery attempts (ckpt-145)
     _noedit_finish_nudged = False  # one push-back on a finish-with-ZERO-edits bail
     _stuck = False            # hard-stop flag: same edit rejected ≥3× → fall over
     _trace_nudges = 0         # grounding nudges spent on imagined trace citations
@@ -1639,14 +1648,25 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 status(f"  [native:{short}] round {rnd}: stopped with edits — "
                        f"one self-check pass before finishing")
                 continue
+            _fr = msg.get("_finish_reason", "")
+            # EMPTY-TURN RECOVERY (ckpt-145): finish_reason=stop with no tool_call means
+            # tool_choice=required was DROPPED for this call — the silent 400→auto
+            # downgrade in call_nvidia_tools, or the provider ignoring it. Probes confirm
+            # `required` reliably yields a tool call, so don't die (and don't salvage
+            # leaked text) — nudge "emit a STRUCTURED tool call" and retry. Bounded so a
+            # genuine no-op finish still ends the step. This is what cost f327 its step
+            # (round 9 knew it needed read_file(40-60) but emitted it as text → stop).
+            if _empty_retries < 2:
+                _empty_retries += 1
+                messages.append({"role": "user", "content": _EMPTY_TURN_NUDGE})
+                status(f"  [native:{short}] round {rnd}: empty-turn "
+                       + (f"(finish_reason={_fr}) " if _fr else "")
+                       + f"— retrying with a forced tool call ({_empty_retries}/2)")
+                continue
             # An empty assistant turn (no tool calls, no content) is a STALL, not
             # a finish — distinguish so the workflow can tell "model did nothing"
             # from a deliberate stop. (Audit #11/#45.)
             reason = "no-tool-call" if final.strip() else "empty-turn"
-            # Surface finish_reason: with tool_choice="required" this should be rare;
-            # when it happens, "stop" = harmony analysis→commentary boundary stop,
-            # "length" = reasoning channel ate the output budget. (root-cause probe.)
-            _fr = msg.get("_finish_reason", "")
             status(f"  [native:{short}] round {rnd}: no tool call ({reason}"
                    + (f", finish_reason={_fr}" if _fr else "") + ")")
             break

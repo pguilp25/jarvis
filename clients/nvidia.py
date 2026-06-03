@@ -385,7 +385,15 @@ async def call_nvidia_tools(
                     # tool_choice="required" isn't universally supported on :free
                     # endpoints — some 400 on it. Fall back to "auto" ONCE on the same
                     # endpoint rather than cascading to a weaker model. (user 2026-06-02)
+                    # ckpt-145: this downgrade SILENTLY disabled the empty-turn guard —
+                    # once on "auto" the model is free to stop with no tool call. LOG it
+                    # (with the 400 body) so we can see when/why it fires; the caller
+                    # also retries the empty-turn with required forced.
                     if resp.status == 400 and tool_choice == "required":
+                        import sys as _sys
+                        print(f"⚠️  [nvidia] {api_model}: HTTP 400 on tool_choice=required "
+                              f"→ DOWNGRADING to auto (empty-turn guard OFF this call). "
+                              f"400 body: {raw[:240]}", file=_sys.stderr, flush=True)
                         payload["tool_choice"] = "auto"
                         async with session.post(url, json=payload, headers=headers,
                                                 timeout=aiohttp.ClientTimeout(total=1800)) as resp2:
