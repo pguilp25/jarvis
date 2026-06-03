@@ -92,11 +92,11 @@ def test_read_file_prefix_ws_format():
     try:
         out = _disp("read_file", {"path": rel}, ctx)
         assert "greet" in out
-        # prefix_ws format `LINENO:INDENT|<real spaces>code`: shows BOTH the indent
-        # NUMBER (authoritative for edits) AND the real spaces (so the coder sees it).
-        assert ":8|" in out                       # the indent number is present
-        assert ":8|        self.n = 0" in out      # number + 8 real spaces + code
-        assert ":0|def greet(name):" in out        # col-0 def
+        # ckpt-140 prefix_ws format `LINENO|<the line, real indentation>`: a line-number
+        # gutter, a pipe, then the line VERBATIM (real leading spaces). No indent number.
+        assert "|        self.n = 0" in out         # LINENO| + 8 real spaces + code
+        assert "|def greet(name):" in out           # col-0 def (no leading spaces)
+        assert ":8|" not in out                     # the old INDENT-number form is gone
     finally:
         _cleanup(root)
 
@@ -125,13 +125,13 @@ def test_diff_rows_are_not_editable_input_strict():
     minus = next(l for l in diff.splitlines() if l.split(":", 1)[-1].startswith("- "))
     assert ex([minus]) == [minus]                          # left literal, NOT transformed
     ctx = {"file_contents": {"m.py": old}, "files_changed": set()}
-    r = _do_edit({"path": "m.py", "hunks": [{"old": [minus], "new": ["8|return 9"]}]}, ctx)
+    r = _do_edit({"path": "m.py", "old": [minus], "new": ["        return 9"]}, ctx)
     assert not r.startswith("✓")
-    assert "INDENT|code" in r and "diff" in r.lower()      # targeted, helpful reject
-    # the canonical forms DO apply
+    assert "diff" in r.lower()                              # targeted, helpful reject
+    # ckpt-140: verbatim edits (real indentation) apply
     ctx2 = {"file_contents": {"m.py": old}, "files_changed": set()}
-    r2 = _do_edit({"path": "m.py", "hunks": [{"old": ["8|return 1"], "new": ["8|return 2"]}]}, ctx2)
-    assert r2.startswith("✓") and "return 2" in ctx2["file_contents"]["m.py"]
+    r2 = _do_edit({"path": "m.py", "old": ["        return 1"], "new": ["        return 2"]}, ctx2)
+    assert r2.startswith("✓") and "        return 2" in ctx2["file_contents"]["m.py"]
 
 
 def test_route_parser_accepts_colonless_go_to_step():
@@ -158,9 +158,10 @@ def test_expand_indent_never_corrupts_real_content():
                     " 3:+     return 2", "12:-     return 1", "    data[5: 10]",
                     "    flags = 0o755 | 0o644", "5: 'value',"]:
         assert ex([literal]) == [literal], f"corrupted: {literal!r} -> {ex([literal])!r}"
-    # canonical forms still expand
-    assert ex(["8|return x"]) == ["        return x"]
-    assert ex(["3:4|    def foo"]) == ["    def foo"]
+    # ckpt-140: a pasted LINENO| (or legacy LINENO:INDENT|) gutter is stripped; the rest
+    # is kept VERBATIM (real spaces), never re-expanded from a number.
+    assert ex(["8|        return x"]) == ["        return x"]   # LINENO| gutter dropped, spaces kept
+    assert ex(["3:4|    def foo"]) == ["    def foo"]            # legacy gutter still stripped
 
 
 def test_appears_annotation_strip_is_safe():
@@ -169,7 +170,7 @@ def test_appears_annotation_strip_is_safe():
     from core.native_tools import _expand_indent_lines as ex
     assert ex(["5:4|    def baz(self): |appears 1 (#085)"]) == ["    def baz(self):"]
     real = '    raise ValueError("symbol |appears 3 times")'
-    assert ex(["4|" + real.lstrip()]) == [real]      # NOT truncated
+    assert ex(["4|" + real]) == [real]      # gutter dropped, real spaces kept, NOT truncated
 
 
 def test_read_file_range():
@@ -1220,9 +1221,10 @@ def test_edit_success_messages_dont_tell_coder_to_paste_a_diff():
     os.environ.pop("JARVIS_EDIT_COT", None)
     from core.native_tools import _do_edit, _do_replace
     ctx = {"file_contents": {"m.py": "def f():\n    return 1\n"}, "files_changed": set()}
-    r = _do_edit({"path": "m.py", "hunks": [{"old": ["8|return 1"], "new": ["8|return 2"]}]}, ctx)
-    assert r.startswith("✓") and "INDENT|code" in r
+    r = _do_edit({"path": "m.py", "old": ["    return 1"], "new": ["    return 2"]}, ctx)
+    assert r.startswith("✓")
     assert "from this diff" not in r.lower()
+    assert "INDENT|code" not in r          # ckpt-140: no indent-number form anymore
     ctx2 = {"file_contents": {"m.py": "def f():\n    return 1\n"}, "files_changed": set(),
             "viewed_versions": {"m.py": "def f():\n    return 1\n"}}
     r2 = _do_replace({"path": "m.py", "start_line": 2, "end_line": 2, "new_content": "8|return 2"}, ctx2)
@@ -1239,15 +1241,16 @@ def test_old_not_found_reject_shows_actual_lines_for_recovery():
     import core.native_tools as nt
     src = "def foo():\n    x = 1\n    y = 2\n    return x + y\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
-    # start_line points at a real region but `old` is imagined → must reject WITH the real lines
-    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
-        {"start_line": 3, "old": ["8|y = 999  # imagined"], "new": ["8|y = 5"]}]}, ctx))
+    # `old` is slightly off (not exactly in the file) → reject WITH the real lines shown
+    # (ckpt-140: verbatim input; no start_line, so the hint fuzzy-locates the nearest line).
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py",
+        "old": ["    y = 22"], "new": ["    y = 5"]}, ctx))   # close to "    y = 2" → fuzzy hit
     assert r.startswith("✗")
     assert "ACTUAL current lines" in r
-    assert "3:4|y = 2" in r          # the real line 3 rendered as LINENO:INDENT|code
-    # no start_line: fuzzy-locate still surfaces the nearest real line
-    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
-        {"old": ["    return x + y - 1"], "new": ["    return x"]}]}, ctx))
+    assert "|    y = 2" in r          # the real line rendered as LINENO|<verbatim>
+    # another imagined old: fuzzy-locate still surfaces the nearest real line
+    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py",
+        "old": ["    return x + y - 1"], "new": ["    return x"]}, ctx))
     assert r2.startswith("✗") and "ACTUAL current lines" in r2 and "return x + y" in r2
 
 
@@ -1261,10 +1264,11 @@ def test_block_reject_tells_coder_to_replace_whole_block():
     import core.native_tools as nt
     src = "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n"   # clean baseline, no dead code
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
-    # rewrite the 4-line body so the result leaves code unreachable after a return
+    # rewrite the 4-line body (verbatim, real 4-space indent) so the result leaves code
+    # unreachable after a return at the same indent
     r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py",
-        "old": ["4|a = 1", "4|b = 2", "4|c = 3", "4|return a"],
-        "new": ["4|return 1", "4|dead1 = 1", "4|dead2 = 2"]}, ctx))
+        "old": ["    a = 1", "    b = 2", "    c = 3", "    return a"],
+        "new": ["    return 1", "    dead1 = 1", "    dead2 = 2"]}, ctx))
     assert r.startswith("✗")
     assert "WHOLE span" in r and "2 to 5" in r, \
         "block reject must tell the coder to put the whole span (lines 2-5) in old/new"
