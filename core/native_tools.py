@@ -214,18 +214,18 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Edit a file: give the EXACT existing block as `old` and what it becomes as `new` "
-            "— a content-matched search→replace. Write each line as REAL CODE WITH ITS REAL "
-            "INDENTATION — type the leading spaces yourself, exactly like normal Python (e.g. "
-            "old=[\"    return bool(re.match(RE, name))\"], new=[\"    if name.count('.') != 1:\", "
-            "\"        return False\", \"    return all(...)\"]). NO line numbers, NO `INDENT|` "
-            "prefix — just the code. Copy `old` VERBATIM from your read (drop the `LINENO|` "
-            "gutter, keep the spaces); it's matched by CONTENT, so a shifted view never goes "
-            "stale. Put the WHOLE span you're changing in `old` (every line, top to bottom) and "
-            "the whole replacement in `new` — don't leave part of the block out (that strands the "
-            "old code). Get the indentation right — it's real Python; a wrong indent is rejected. "
-            "To INSERT, include a surrounding line in BOTH old and new. To DELETE, new=[]. After "
-            "applying you get the file's new diff; a rejection says what to fix."),
+            "Edit a file: `old` is the EXACT existing block, `new` is what it becomes "
+            "— a content-matched search→replace. Each line is REAL CODE WITH ITS REAL "
+            "INDENTATION: type the leading spaces exactly like normal Python (a module-level "
+            "line has none; a method body line starts with eight spaces). NO line numbers, NO "
+            "`INDENT|` prefix — just the code. Copy `old` VERBATIM from your read (drop the "
+            "`LINENO|` gutter, keep the spaces); it's matched by CONTENT, so a shifted view "
+            "never goes stale. Put the WHOLE span you're changing in `old` (every line, top to "
+            "bottom) and the whole replacement in `new` — don't leave part of the block out "
+            "(that strands the old code). Get the indentation right — it's real Python; a wrong "
+            "indent is rejected. To INSERT, include a surrounding line in BOTH old and new. To "
+            "DELETE, give an empty new. After applying you get the file's new diff; a rejection "
+            "says what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "old": {"type": "array", "items": {"type": "string"},
@@ -821,9 +821,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 return (f"✗ edit_file hunk #{i}: `old` is empty. `old` must hold the "
                         f"EXACT existing line(s) you're changing, copied verbatim from "
                         f"your read. To INSERT new code, pick a real adjacent line, put "
-                        f"it in BOTH `old` and `new`, and add your new line(s) next to "
-                        f"it in `new` (e.g. old=[\"    return x\"], "
-                        f"new=[\"    log(x)\", \"    return x\"]).")
+                        f"it in BOTH `old` and `new`, and place your new line(s) next to "
+                        f"it inside `new` (the adjacent line keeps it anchored).")
         sl = h.get("start_line")
         if sl is None:
             # No number given — resolve from content; reject if it's not unique.
