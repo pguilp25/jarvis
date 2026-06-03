@@ -213,7 +213,10 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Your PRIMARY edit tool. Change an existing file by giving `hunks` — a list "
+            "Your tool for SMALL, surgical changes — a few specific lines. (Rewriting a "
+            "WHOLE function/method body or a multi-line block? Use replace_lines instead — "
+            "a clean range swap won't strand the old `return` or duplicate the anchor the "
+            "way hunks do on big rewrites.) Change an existing file by giving `hunks` — a list "
             "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
             "line(s) as `INDENT|code` — or copy-pasted straight from the view "
             "(`286:4|    foo`); the harness strips the LINENO:/marker and uses the number — from "
@@ -252,14 +255,18 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "replace_lines",
         "description": (
-            "SECONDARY edit tool — prefer edit_file. Use ONLY for a clean whole-range "
-            "swap where copying the old lines is pointless. Replace lines "
-            "start_line..end_line (inclusive, 1-based, from your most recent read_file) "
-            "of `path` with new_content. Write each new_content line as `INDENT|code` — "
-            "the indent NUMBER + code without leading spaces (`8|return x`); the harness "
-            "re-emits the spaces (NO `LINENO:` prefix). To INSERT after line N, set start_line=end_line=N and make "
-            "new_content the current line N followed by your new line(s). Line numbers "
-            "go stale after any edit — that's why edit_file (content-matched) is safer."),
+            "BEST TOOL FOR A WHOLE-BLOCK REWRITE — a function/method body, a class, or any "
+            "multi-line span you're replacing wholesale. Replace lines start_line..end_line "
+            "(inclusive, 1-based, from your most recent read_file) of `path` with new_content. "
+            "PREFER THIS over edit_file whenever you're rewriting a whole def/body/block: a clean "
+            "start..end swap has NO anchor to re-emit and NO old line left behind, so it CAN'T "
+            "produce the leftover-`return` (unreachable code) or duplicated-anchor errors that "
+            "make edit_file reject-loop on big rewrites. You already know the range from your "
+            "read (e.g. lines 846-855) — just swap it. Write each new_content line as `INDENT|code` "
+            "— the indent NUMBER + code without leading spaces (`8|return x`); the harness re-emits "
+            "the spaces (NO `LINENO:` prefix). To INSERT after line N, set start_line=end_line=N and "
+            "make new_content the current line N followed by your new line(s). (edit_file is better "
+            "for a SMALL surgical change to a few specific lines; replace_lines for whole blocks.)"),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
             "start_line": {"type": "integer"},
