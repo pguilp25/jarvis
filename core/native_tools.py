@@ -213,69 +213,23 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Your tool for SMALL, surgical changes — a few specific lines. (Rewriting a "
-            "WHOLE function/method body or a multi-line block? Use replace_lines instead — "
-            "a clean range swap won't strand the old `return` or duplicate the anchor the "
-            "way hunks do on big rewrites.) Change an existing file by giving `hunks` — a list "
-            "of {\"old\": [...], \"new\": [...]} objects. `old` is the EXACT existing "
-            "line(s) as `INDENT|code` — or copy-pasted straight from the view "
-            "(`286:4|    foo`); the harness strips the LINENO:/marker and uses the number — from "
-            "your MOST RECENT view of the file; `new` is what they become. The match is by "
-            "`old` CONTENT (verified against the file), NOT by line number — so a shifted "
-            "or older view can NEVER make an edit stale and you do not need line numbers. "
-            "Add \"start_line\": N to a hunk ONLY if a reject says `old` appears more than "
-            "once (to pick which occurrence).\n"
-            "  • CHANGE lines: old=[current lines], new=[replacements].\n"
-            "  • INSERT new code: old=[the single existing line you want to add AFTER], "
-            "new=[that same line, then your new line(s)].\n"
-            "  • DELETE: old=[the lines to remove], new=[] (empty).\n"
-            "Multiple hunks edit several spots in one call. After applying you get a diff "
-            "showing the file's new state — read it to confirm, but write your next `old` as "
-            "`INDENT|code` (or copy it from your read view), NOT as a pasted diff row. "
-            "Parse-checked; a rejection says exactly what to fix."),
+            "Edit a file: give the EXACT existing block as `old` and what it becomes as `new` "
+            "— a content-matched search→replace. Each line is `INDENT|code`: the leading-space "
+            "COUNT (the number the view shows in `LINENO:INDENT|`), a pipe, then the code with "
+            "NO leading spaces — e.g. `4|def f():` then `8|return x`. The harness re-emits the "
+            "spaces, so you never type or drop indentation. `old` is matched by CONTENT (not "
+            "line numbers) — copy it VERBATIM from your most recent read; a shifted view never "
+            "goes stale. Put the WHOLE span you're changing in `old` (every line, top to bottom) "
+            "and the whole replacement in `new` — don't leave part of the block out (that strands "
+            "the old code). To INSERT, include a surrounding line in BOTH old and new. To DELETE, "
+            "new=[]. After applying you get the file's new diff; a rejection says what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
-            "goal": {"type": "string", "description": "GROUNDING (optional): the spec behaviour this edit makes true — 1 concrete sentence"},
-            "traced": {"type": "string", "description": "GROUNDING: what the code does NOW at the edit site — QUOTE the real line you read (in backticks), don't guess/describe"},
-            "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies (the spec's example if given)"},
-            "hunks": {
-                "type": "array",
-                "description": "one or more content-anchored edits",
-                "items": {"type": "object", "properties": {
-                    "start_line": {"type": "integer",
-                                   "description": "read_file line number where `old` begins (pins which occurrence)"},
-                    "old": {"type": "array", "items": {"type": "string"},
-                            "description": "existing line(s) as `INDENT|code` (the view's INDENT number + code, no leading spaces) — e.g. `4|def setvalue`. Copying the view line verbatim also works (the number rules; visible spaces are stripped)."},
-                    "new": {"type": "array", "items": {"type": "string"},
-                            "description": "replacement line(s) as `INDENT|code` — declare each line's indent with its NUMBER, code without leading spaces (`8|return x`); the harness applies the spaces. Empty array to delete."},
-                }, "required": ["start_line", "old", "new"]},
-            },
-        }, "required": ["path", "hunks"]},
-    }},
-    {"type": "function", "function": {
-        "name": "replace_lines",
-        "description": (
-            "BEST TOOL FOR A WHOLE-BLOCK REWRITE — a function/method body, a class, or any "
-            "multi-line span you're replacing wholesale. Replace lines start_line..end_line "
-            "(inclusive, 1-based, from your most recent read_file) of `path` with new_content. "
-            "PREFER THIS over edit_file whenever you're rewriting a whole def/body/block: a clean "
-            "start..end swap has NO anchor to re-emit and NO old line left behind, so it CAN'T "
-            "produce the leftover-`return` (unreachable code) or duplicated-anchor errors that "
-            "make edit_file reject-loop on big rewrites. You already know the range from your "
-            "read (e.g. lines 846-855) — just swap it. Write each new_content line as `INDENT|code` "
-            "— the indent NUMBER + code without leading spaces (`8|return x`); the harness re-emits "
-            "the spaces (NO `LINENO:` prefix). To INSERT after line N, set start_line=end_line=N and "
-            "make new_content the current line N followed by your new line(s). (edit_file is better "
-            "for a SMALL surgical change to a few specific lines; replace_lines for whole blocks.)"),
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "start_line": {"type": "integer"},
-            "end_line": {"type": "integer"},
-            "new_content": {"type": "string"},
-            "goal": {"type": "string", "description": "GROUNDING (optional): the spec behaviour this edit makes true — 1 concrete sentence"},
-            "traced": {"type": "string", "description": "GROUNDING: what the lines you're replacing do NOW — QUOTE a real line from the range (in backticks)"},
-            "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies"},
-        }, "required": ["path", "start_line", "end_line", "new_content"]},
+            "old": {"type": "array", "items": {"type": "string"},
+                    "description": "the EXACT existing block as `INDENT|code` lines, copied verbatim from your read (matched by content)"},
+            "new": {"type": "array", "items": {"type": "string"},
+                    "description": "the replacement block as `INDENT|code` lines; [] to delete"},
+        }, "required": ["path", "old", "new"]},
     }},
     {"type": "function", "function": {
         "name": "run_code",
@@ -808,12 +762,20 @@ def _do_edit(args: dict, ctx: dict) -> str:
     after], new=[that line, then the additions]."""
     path = args.get("path", "")
     hunks = args.get("hunks")
+    if not hunks:
+        # ckpt-138: model-facing form is a single old->new block (no `hunks` array, no
+        # start_line) — a plain content-matched search→replace. Wrap it into one hunk so
+        # the proven applier/gate/recovery path below is unchanged. (`hunks` still accepted
+        # internally for back-compat with existing tests.)
+        _o = args.get("old"); _n = args.get("new")
+        if _o is not None or _n is not None:
+            _as = lambda v: v if isinstance(v, list) else ([] if v in (None, "") else str(v).split("\n"))
+            hunks = [{"old": _as(_o), "new": _as(_n)}]
     if not path:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
-        return ("✗ edit_file needs a non-empty `hunks` array. Each hunk is "
-                "{\"start_line\": N, \"old\": [exact existing line(s) from read_file], "
-                "\"new\": [replacement line(s)]}.")
+        return ("✗ edit_file needs `old` (the exact existing block as INDENT|code lines, "
+                "copied verbatim from your read) and `new` (the replacement; [] to delete).")
 
     cur = ctx["file_contents"].get(path)
     if cur is None:
@@ -953,12 +915,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
             if _is_block and resolved:
                 _start = resolved[0][0]
                 _end = max(s + len(o) - 1 for s, o, _n in resolved)
-                _gate += (f"\n↪ This is a whole-block rewrite (lines {_start}-{_end}). Instead of "
-                          f"patching with hunks, swap the WHOLE range cleanly: "
-                          f"replace_lines(path=\"{path}\", start_line={_start}, end_line={_end}, "
-                          f"new_content=<the entire corrected block as INDENT|code>). A range "
-                          f"swap can't strand the old return (unreachable) or duplicate the "
-                          f"anchor — which is what just rejected.")
+                _gate += (f"\n↪ Your edit left part of the block behind (that's the reject "
+                          f"above). Put the WHOLE span in `old` — every line from {_start} to "
+                          f"{_end}, top to bottom — and the entire corrected block in `new`. "
+                          f"Replace the full block in ONE edit; don't patch a fragment.")
             return _gate
         sb = ctx.get("sandbox")
         if sb is not None:

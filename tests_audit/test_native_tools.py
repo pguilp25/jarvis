@@ -68,9 +68,10 @@ def _disp(name, args, ctx):
 # ── tool surface ─────────────────────────────────────────────────────────────
 def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
+    # ckpt-138: collapsed to ONE edit tool (edit_file old→new). replace_lines removed.
     assert names == {"read_file", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "depends_on",
-                     "edit_file", "create_file", "replace_lines", "run_code", "finish"}
+                     "edit_file", "create_file", "run_code", "finish"}
 
 
 def test_every_schema_is_wellformed():
@@ -808,15 +809,14 @@ def test_create_file_syntax_gate_rejects_unparseable():
 def test_edit_file_in_toolset_and_primary():
     names = [t["function"]["name"] for t in CODER_TOOLS]
     assert "edit_file" in names
-    # edit_file is listed BEFORE replace_lines (the model prefers earlier tools)
-    assert names.index("edit_file") < names.index("replace_lines")
+    assert "replace_lines" not in names      # ckpt-138: collapsed to one edit tool
     schema = next(t for t in CODER_TOOLS if t["function"]["name"] == "edit_file")
     props = schema["function"]["parameters"]["properties"]
-    # ckpt 119: edit_file gained grounding-CoT fields (goal/traced/check), enforced
-    # only when JARVIS_EDIT_COT is set (optional in the base schema).
-    assert set(props) == {"path", "hunks", "goal", "traced", "check"}
-    assert props["hunks"]["type"] == "array"
-    assert {"goal", "traced", "check"} <= set(props)
+    # ckpt-138: dead-simple search→replace — only path/old/new. No hunks/start_line/
+    # grounding slots. old=array, new=array, both required.
+    assert set(props) == {"path", "old", "new"}
+    assert props["old"]["type"] == "array" and props["new"]["type"] == "array"
+    assert schema["function"]["parameters"]["required"] == ["path", "old", "new"]
 
 
 def test_edit_file_changes_by_content_not_line_number():
@@ -1251,20 +1251,20 @@ def test_old_not_found_reject_shows_actual_lines_for_recovery():
     assert r2.startswith("✗") and "ACTUAL current lines" in r2 and "return x + y" in r2
 
 
-def test_block_reject_routes_to_replace_lines():
-    """ckpt-137: edit_file rejects 62% of the time (vs replace_lines 0%) — mostly the
-    post-edit gate on whole-block rewrites (stranded return = unreachable, duplicated
-    anchor). On such a multi-line/def-body reject, hand the coder the exact replace_lines
-    call (with the resolved start..end range) so it stops re-looping hunks."""
+def test_block_reject_tells_coder_to_replace_whole_block():
+    """ckpt-137/138: a whole-block reject (stranded return = unreachable / duplicated
+    anchor) must tell the coder to put the ENTIRE block (the resolved line span) in
+    old→new, not patch a fragment. (ckpt-138 collapsed to one edit tool, so the message
+    no longer points at replace_lines — it points at making `old` the whole span.)"""
     import os
     os.environ.pop("JARVIS_EDIT_COT", None)
     import core.native_tools as nt
     src = "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n"   # clean baseline, no dead code
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
     # rewrite the 4-line body so the result leaves code unreachable after a return
-    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
-        {"start_line": 2, "old": ["4|a = 1", "4|b = 2", "4|c = 3", "4|return a"],
-         "new": ["4|return 1", "4|dead1 = 1", "4|dead2 = 2"]}]}, ctx))
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py",
+        "old": ["4|a = 1", "4|b = 2", "4|c = 3", "4|return a"],
+        "new": ["4|return 1", "4|dead1 = 1", "4|dead2 = 2"]}, ctx))
     assert r.startswith("✗")
-    assert "replace_lines(" in r and "start_line=2" in r and "end_line=5" in r, \
-        "block reject must route to replace_lines with the resolved range"
+    assert "WHOLE span" in r and "2 to 5" in r, \
+        "block reject must tell the coder to put the whole span (lines 2-5) in old/new"
