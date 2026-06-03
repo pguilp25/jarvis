@@ -1628,10 +1628,11 @@ async def _run_code_reads(
                         if display_mode == "whitespace":
                             renumbered.append(f"{start + i}:{' ' * n_indent}{stripped}")
                         elif display_mode == "prefix_ws":
-                            # NATIVE view (ckpt-140): LINENO|<verbatim line w/ real indentation>.
-                            # Line number is a gutter the coder drops; code after `|` is copied
-                            # VERBATIM into edits (real spaces, no indent-NUMBER convention).
-                            renumbered.append(f"{start + i}|{' ' * n_indent}{stripped}")
+                            # NATIVE view: `LINENO ⇥INDENT|<real spaces>code` — line# bare
+                            # on the left, `⇥INDENT` marks the indent (N leading spaces;
+                            # authoritative — the applier re-emits it), then visible indent
+                            # + code. Two numbers, unmistakable. (ckpt-143 naturalization.)
+                            renumbered.append(f"{start + i} ⇥{n_indent}|{' ' * n_indent}{stripped}")
                         else:
                             # v10: line# uses ':' so view lines paste verbatim.
                             renumbered.append(f"{start + i}:{n_indent}|{stripped}")

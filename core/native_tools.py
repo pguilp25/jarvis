@@ -22,13 +22,15 @@ exact executor so behaviour is identical:
     [REPLACE LINES]     replace_lines      _extract/_apply_extracted_code
     [DONE]              finish             —
 
-INDENT FORMAT (ckpt 125/129): read_file + the pre-loaded file block render each line as
-`LINENO:INDENT|<real spaces>code` (prefix_ws) — the coder SEES the indentation AND its
-number. Edits declare indent by NUMBER: old/new lines are `INDENT|code` and the applier
-(`_expand_indent_lines`) re-emits the spaces — so the coder states a number and never
-types (or drops) leading spaces (the col-0 dedent root cause). STRICT (ckpt 129): the
-applier transforms ONLY the two UNAMBIGUOUS forms — `INDENT|code` and a full view line
-`LINENO:INDENT|code` (plus stripping the harness's own `|appears N (#hex)` tail). A diff
+INDENT FORMAT (ckpt 125/129; gutter naturalized ckpt 143): read_file + the pre-loaded file
+block render each line as `LINENO ⇥INDENT|<real spaces>code` (prefix_ws) — line# bare on the
+left, `⇥INDENT` marks the indent number, then real spaces + code. The coder SEES the
+indentation AND its number. Edits declare indent by NUMBER: old/new lines are `INDENT|code`
+and the applier (`_expand_indent_lines`) re-emits the spaces — so the coder states a number
+and never types (or drops) leading spaces (the col-0 dedent root cause). STRICT (ckpt 129):
+the applier transforms ONLY the two UNAMBIGUOUS forms — `INDENT|code` and a full view line
+`LINENO ⇥INDENT|code` (also tolerating the old `LINENO:INDENT|`, plus stripping the harness's
+own `|appears N (#hex)` tail). A diff
 row is NOT editable input (its gutter is shape-ambiguous with YAML/config, so it's taken
 literally and the reject tells the coder to re-send as `INDENT|code`). Anything else is
 literal — no guessed transform can corrupt real content.
@@ -115,10 +117,11 @@ CODER_TOOLS = [
         "name": "read_file",
         "description": (
             "Read a file (optionally a line range) from the project. Each line is "
-            "returned as `LINENO|<the line, with its real indentation>` — LINENO is the "
-            "1-based line number (a gutter you drop when editing), a pipe, then the line "
-            "EXACTLY as it is (real leading spaces and all). To edit, copy the part after "
-            "the `|` verbatim. A huge file comes back "
+            "returned as `LINENO ⇥INDENT|<real spaces>content` — LINENO (bare, on the left) "
+            "is the 1-based line number; `⇥INDENT` is the indentation — the ⇥ marks it, "
+            "INDENT is the leading-space COUNT (the number you reuse in edits); then `|`, the "
+            "real leading spaces, and the code. (So `286 ⇥4|    def foo` = line 286, indent 4.) "
+            "A huge file comes back "
             "as a skeleton (top-level defs); pass start_line/end_line to expand a "
             "region. TRUST YOUR VIEW: a file you've already been shown — the step's "
             "injected file(s), one you read, or one you edited (its diff IS the live "
@@ -197,8 +200,8 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "create_file",
         "description": (
-            "Create a NEW file at `path` with `content` — the full file text, written as REAL "
-            "code with real indentation (normal leading spaces); no line-number gutter. "
+            "Create a NEW file at `path` with `content` — the full file text. Write each line "
+            "with REAL leading spaces (or the `INDENT|code` number form); no `LINENO:` prefix. "
             "Use this for files that don't "
             "exist yet — a new module, script, or test file (greenfield builds, or "
             "adding a file to an existing project). To change a file that ALREADY "
@@ -214,24 +217,22 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Edit a file: `old` is the EXACT existing block, `new` is what it becomes "
-            "— a content-matched search→replace. Each line is REAL CODE WITH ITS REAL "
-            "INDENTATION: type the leading spaces exactly like normal Python (a module-level "
-            "line has none; a method body line starts with eight spaces). NO line numbers, NO "
-            "`INDENT|` prefix — just the code. Copy `old` VERBATIM from your read (drop the "
-            "`LINENO|` gutter, keep the spaces); it's matched by CONTENT, so a shifted view "
-            "never goes stale. Put the WHOLE span you're changing in `old` (every line, top to "
-            "bottom) and the whole replacement in `new` — don't leave part of the block out "
-            "(that strands the old code). Get the indentation right — it's real Python; a wrong "
-            "indent is rejected. To INSERT, include a surrounding line in BOTH old and new. To "
-            "DELETE, give an empty new. After applying you get the file's new diff; a rejection "
-            "says what to fix."),
+            "Edit a file: give the EXACT existing block as `old` and what it becomes as `new` "
+            "— a content-matched search→replace. Each line is `INDENT|code`: the leading-space "
+            "COUNT (the number after the `⇥` in the view's `LINENO ⇥INDENT|`), a pipe, then the "
+            "code with NO leading spaces — e.g. `4|def f():` then `8|return x`. The harness re-emits the "
+            "spaces, so you never type or drop indentation. `old` is matched by CONTENT (not "
+            "line numbers) — copy it VERBATIM from your most recent read; a shifted view never "
+            "goes stale. Put the WHOLE span you're changing in `old` (every line, top to bottom) "
+            "and the whole replacement in `new` — don't leave part of the block out (that strands "
+            "the old code). To INSERT, include a surrounding line in BOTH old and new. To DELETE, "
+            "new=[]. After applying you get the file's new diff; a rejection says what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "old": {"type": "array", "items": {"type": "string"},
-                    "description": "the EXACT existing lines, as real code WITH real indentation, copied verbatim from your read (drop the LINENO| gutter); matched by content"},
+                    "description": "the EXACT existing block as `INDENT|code` lines, copied verbatim from your read (matched by content)"},
             "new": {"type": "array", "items": {"type": "string"},
-                    "description": "the replacement lines, as real code WITH real indentation (type the leading spaces); [] to delete"},
+                    "description": "the replacement block as `INDENT|code` lines; [] to delete"},
         }, "required": ["path", "old", "new"]},
     }},
     {"type": "function", "function": {
@@ -580,9 +581,8 @@ def _do_replace(args: dict, ctx: dict) -> str:
                 f"The diff below is the ONLY change to {path} since your last view; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. Your earlier view + this diff = "
                 f"its CURRENT, live state — TRUST it, your view is NOT stale. Do NOT "
-                f"read_file {path} again; for your next edit write `old` as the real line(s) "
-                f"verbatim (copy from your view, drop the LINENO| gutter) — do NOT paste a diff "
-                f"row. Only for a "
+                f"read_file {path} again; for your next edit write `old` as `INDENT|code` "
+                f"(or copy a line from your read view) — do NOT paste a diff row. Only for a "
                 f"part of {path} you have NOT seen, read it with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
@@ -633,7 +633,7 @@ def _actual_region_hint(cur_lines, start_line, old_list) -> str:
     nothing → reject → it re-sends the same imagined `old` → fallover with only a
     trivial top-level line landed (e.g. just an `import`). Instead of dead-ending,
     SHOW the coder the real current lines at the intended site so it can copy a valid
-    `old`. Renders as `LINENO:INDENT|code` (the read-view form). '' if we can't localize."""
+    `old`. Renders as `LINENO ⇥INDENT|code` (the read-view form). '' if we can't localize."""
     if not cur_lines:
         return ""
     n = len([o for o in (old_list or []) if str(o).strip()]) or 1
@@ -660,10 +660,11 @@ def _actual_region_hint(cur_lines, start_line, old_list) -> str:
     lo = max(0, anchor - 2); hi = min(len(cur_lines), anchor + n + 2)
     rows = []
     for idx in range(lo, hi):
-        rows.append(f"     {idx+1}|{cur_lines[idx]}")     # LINENO|verbatim (real indentation)
+        ln = cur_lines[idx]; ind = len(ln) - len(ln.lstrip(' '))
+        rows.append(f"     {idx+1} ⇥{ind}|{ln.strip()}")
     return ("\n   ↪ The ACTUAL current lines at that spot are below — copy your `old` "
-            "VERBATIM from these (real code, real indentation; drop the LINENO| gutter), "
-            "don't reconstruct it from memory:\n" + "\n".join(rows))
+            "VERBATIM from these (as INDENT|code), don't reconstruct it from memory:\n"
+            + "\n".join(rows))
 
 
 def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
@@ -681,15 +682,16 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
     if old_raw and any(_LOOKS_COPIED_GUTTER_RE.match(str(o)) for o in old_raw):
         return (f"✗ edit_file hunk #{i}: your `old` looks like a line copied from a DIFF "
                 f"(it starts with `LINENO:+ ` / `LINENO:- `). A diff row is not editable "
-                f"input. Write each `old`/`new` line as the REAL code with its real "
-                f"indentation (e.g. `        return x`), copied from a read_file VIEW of "
-                f"{path} (which shows `LINENO|<the real line>` — drop the `LINENO|` gutter).")
+                f"input. Write each `old`/`new` line as `INDENT|code` (the indent NUMBER, a "
+                f"pipe, then the code — e.g. `8|return x`), or copy a line from a read_file "
+                f"VIEW of {path} (which shows `LINENO ⇥INDENT|code`). The harness applies the "
+                f"indent from the number.")
     if path in ctx.get("files_changed", set()):
         _when = ctx.get("view_at", {}).get(path, "your last edit")
         return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
                 f"You already EDITED {path} ({_when}), so this `old` was copied from a view "
                 f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: write "
-                f"`old` as the real line(s) as they read NOW (the LATEST diff above "
+                f"`old` as `INDENT|code` for the line as it reads NOW (the LATEST diff above "
                 f"shows the current text — read it, but don't paste the diff row); if the line "
                 f"is in a part you have NOT seen since the edit, read_file {path} with that "
                 f"exact start_line/end_line range. Don't reuse stale line text."
@@ -704,34 +706,53 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
 
 
 # Indentation is declared as a NUMBER; the harness re-emits the spaces. The model can
-# ckpt-140: edits are VERBATIM (real indentation). The coder writes `old`/`new` lines with
-# their actual leading spaces — NO indent-number convention (that caused the coder to confuse
-# the view's `LINENO:INDENT|` with the edit's `INDENT|` and mis-pick the indent → reject loops
-# on every coder, 2026-06-03). The ONLY transform here is stripping a leading line-number
-# GUTTER if the coder pasted a view line verbatim (`286|    def foo` → `    def foo`). Code
-# after the gutter is kept EXACTLY as-is; everything without a gutter is taken literally.
-# Gutters recognized: `LINENO|` (current view) and legacy `LINENO:INDENT|` (old view), only
-# when anchored at col 0 — a real indented line (starts with spaces) never matches.
-_GUTTER_RE = re.compile(r'^\d+(?::\d+)?\|')             # LINENO|  or legacy LINENO:INDENT|
+# COPY-PASTE any of the forms it actually sees and they all resolve correctly:
+#   INDENT|code              the documented edit form          e.g.  4|def foo
+#   LINENO ⇥INDENT|code      a line copied verbatim from the read view  e.g.  286 ⇥4|    def foo
+#   LINENO:[+|-]code         a line copied from a post-edit diff (real spaces)  e.g.  12:+    return 2
+# The INDENT NUMBER (when present) is authoritative — any visible leading spaces in the
+# copied code are stripped and re-applied from the number, so the coder cannot mis-indent.
+# A plain real-space line (no prefix) is taken literally (back-compat). The `LINENO:` and
+# diff-marker strips are anchored so they CANNOT corrupt real code: they only fire when a
+# `\d+\|` (indent) or `\d+:[+-]` (diff) shape follows — a normal `key: value` / `5: x` line
+# never matches.
+# CANONICAL edit forms ONLY — both are UNAMBIGUOUS (the `\d+\|` / `\d+:\d+\|` shape does not
+# collide with real code/YAML/config):
+_INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code            (the write form)
+# A copied view line. ckpt-143 naturalized the gutter to `LINENO ⇥INDENT|code`
+# (the ⇥ tab-glyph marks the indent); we still accept the old `LINENO:INDENT|`
+# colon form so a stale paste never silently fails to match.
+_VIEW_LINE_RE   = re.compile(r'^\d+\s*[:⇥](\d+)\|(.*)$')  # LINENO ⇥INDENT|code  (copied view line)
 # blast-radius annotation a def line may carry: ` |appears N (#hex...)`. Require the
 # `(#hex` shape the annotation ALWAYS emits, so a real code line like
 # `raise ValueError("x |appears 3 times")` is NOT truncated.
 _APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ \(#[0-9a-fA-F][^)]*\)\s*$')
-# A line that looks like it was copied from a DIFF's +/- row (`N:+ ` / `N:- `). Detection only
-# (drives a clear reject), never rewrites. (audit pass-4: strict.)
+# A line that looks like it was copied from a DIFF's +/- row (`N:+ ` / `N:- `). We
+# deliberately do NOT silently transform these — but if one is used as `old` and the match
+# fails, the reject TELLS the coder to re-send as INDENT|code. Detection drives that message
+# ONLY; it never rewrites the line. We match ONLY `+`/`-` (NOT the context `N:  ` form, which
+# is shape-ambiguous with YAML `443:  desc` and would mis-fire). (audit pass-4: strict.)
 _LOOKS_COPIED_GUTTER_RE = re.compile(r'^\s*\d+:[+\-] ')
 
 
 def _expand_indent_lines(lines: list) -> list:
-    """Resolve every old/new/content line to its real source form. Edits are VERBATIM: the
-    coder writes real leading spaces, so we take each line LITERALLY — the only cleanup is
-    stripping a leading line-number gutter (`286|`/legacy `286:4|`) when the coder pasted a
-    view line, plus the harness's own ` |appears N (#tag)` blast-radius annotation. We never
-    re-emit spaces from a number (no indent-number convention anymore)."""
+    """Resolve every old/new/content line to its real source form. The model declares indent
+    by NUMBER (`INDENT|code`) — or copies a view line verbatim (`LINENO:INDENT|code`) — and the
+    harness applies the spaces, so the coder never types (and never drops) leading spaces (the
+    col-0 dedent root cause). We transform ONLY these two UNAMBIGUOUS forms; everything else is
+    taken LITERALLY (so a real YAML/code line is never corrupted by a guessed transform). A
+    leftover diff/whitespace gutter is NOT stripped — it simply won't match, and the reject
+    explains how to re-send (see _do_edit)."""
     out = []
     for ln in lines:
+        # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation
+        # (the harness's own marker, `(#hex)`-guarded); strip it so copying that line matches.
         ln = _APPEARS_TAIL_RE.sub('', ln)
-        out.append(_GUTTER_RE.sub('', ln, count=1))   # drop a pasted LINENO| gutter; rest verbatim
+        m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
+        if m:                                    # INDENT|code or LINENO:INDENT|code
+            out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' '))
+        else:
+            out.append(ln)                       # literal — never a guessed transform
     return out
 
 
@@ -760,8 +781,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
     if not path:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
-        return ("✗ edit_file needs `old` (the exact existing lines, as real code with real "
-                "indentation, copied verbatim from your read) and `new` (the replacement; [] to delete).")
+        return ("✗ edit_file needs `old` (the exact existing block as INDENT|code lines, "
+                "copied verbatim from your read) and `new` (the replacement; [] to delete).")
 
     cur = ctx["file_contents"].get(path)
     if cur is None:
@@ -818,11 +839,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 old_list = [anchor]
                 new_list = [anchor] + new_list   # keep the anchor, add new below it
             else:
-                return (f"✗ edit_file hunk #{i}: `old` is empty. `old` must hold the "
-                        f"EXACT existing line(s) you're changing, copied verbatim from "
-                        f"your read. To INSERT new code, pick a real adjacent line, put "
-                        f"it in BOTH `old` and `new`, and place your new line(s) next to "
-                        f"it inside `new` (the adjacent line keeps it anchored).")
+                return (f"✗ edit_file hunk #{i}: `old` is empty. To CHANGE code, put the "
+                        f"exact existing line(s) in `old`. To INSERT new code, give "
+                        f"`start_line` = the line you want to add AFTER and put the new "
+                        f"line(s) in `new` (leave `old` empty).")
         sl = h.get("start_line")
         if sl is None:
             # No number given — resolve from content; reject if it's not unique.
@@ -928,23 +948,16 @@ def _do_edit(args: dict, ctx: dict) -> str:
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
         _when = _view_stamp(ctx)
-        # The edit LANDED but a post-apply gate may have flagged a ⚠ (e.g. the
-        # dangling-ref/NameError check, which now applies-and-warns rather than
-        # rejecting so a multi-site refactor can accumulate). Surface those ⚠ lines
-        # on the success return — otherwise the diff message buries them and the
-        # coder finishes with an unresolved NameError it was never told about.
-        _warns = [str(x).strip() for x in skips if "⚠" in str(x)]
-        _warn_tail = ("\n\n" + "\n".join(_warns)) if _warns else ""
         return (f"✓ Applied {len(hunks)} hunk(s) to {path} — change made at {_when}. "
                 f"The diff below is the ONLY change to {path} since your last view of it; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
                 f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
                 f"(your `old` was matched by CONTENT, so line numbers never mattered). Do "
-                f"NOT read_file {path} again. For your next change here, write `old` as the "
-                f"real line(s) verbatim (copy from your view, drop the LINENO| gutter) — do "
-                f"NOT paste a diff row. Only if you need a part of {path} you have NOT seen, read_file it "
+                f"NOT read_file {path} again. For your next change here, write `old` as "
+                f"`INDENT|code` (or copy a line from your read view) — do NOT paste a diff "
+                f"row. Only if you need a part of {path} you have NOT seen, read_file it "
                 f"with a start_line/end_line range.\n"
-                + (_diff or "(no visible line change)") + _warn_tail)
+                + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).
     _changed = {k: v for k, v in result.items()
@@ -1437,7 +1450,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
     reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
     short = model_id.split('/')[-1]
-    if True:  # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO:INDENT|
+    if True:  # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO ⇥INDENT|
               # <real spaces>code), so this INDENT| write instruction must ALWAYS be
               # appended. Gating it on JARVIS_NATIVE_WS used to drop it while the view
               # stayed prefix_ws → re-armed the col-0 dedent bug. The flag no longer
@@ -1445,16 +1458,18 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         # Authoritative INDENT| write-format instruction, appended LAST so it wins.
         system = system + (
             "\n\n## INDENTATION — you DECLARE it as a number; the harness applies the spaces\n"
-            "Every code line is shown as `LINENO:INDENT|<real spaces>code` — e.g. "
-            "`286:4|    def setvalue` means line 286, indent 4, then 4 real spaces, then the "
-            "code. You SEE the indentation AND read its exact number (`4`).\n"
+            "Every code line is shown as `LINENO ⇥INDENT|<real spaces>code` — e.g. "
+            "`286 ⇥4|    def setvalue` means line 286, indent 4, then 4 real spaces, then the "
+            "code. The bare number on the LEFT is the line; the number after the `⇥` is the "
+            "INDENT — you SEE the indentation AND read its exact number (`4`).\n"
             "In edit_file/replace_lines, write each `old` and `new` line as `INDENT|code` — "
-            "the indent NUMBER, a pipe, then the code WITHOUT leading spaces. The harness "
-            "re-emits INDENT spaces for you, so you NEVER type or count leading spaces and "
-            "can never drop them. The number is AUTHORITATIVE: you may copy a view line as-is "
-            "(`4|    def setvalue`) — the harness strips the visible spaces and re-applies the "
-            "4. So indentation cannot go wrong if you get the NUMBER right.\n"
-            "  • CHANGED line → reuse the SAME `INDENT` the view shows for it (`286:4|...` → "
+            "the indent NUMBER (the one after the `⇥`), a pipe, then the code WITHOUT leading "
+            "spaces. The harness re-emits INDENT spaces for you, so you NEVER type or count "
+            "leading spaces and can never drop them. The number is AUTHORITATIVE: you may copy "
+            "a view line as-is (`286 ⇥4|    def setvalue`) — the harness strips the line "
+            "number, the `⇥`, and the visible spaces and re-applies the 4. So indentation "
+            "cannot go wrong if you get the NUMBER right.\n"
+            "  • CHANGED line → reuse the SAME `INDENT` the view shows for it (`286 ⇥4|...` → "
             "your new line is `4|...`).\n"
             "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
             "method indent (look at another `def` in that class, e.g. `4|`); a body line is "

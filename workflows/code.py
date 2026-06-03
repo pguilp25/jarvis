@@ -6089,13 +6089,13 @@ def _filter_by_ranges(content: str, ranges: list[tuple[int, int]], filepath: str
                 # form for non-editing roles. Blank lines → "{n}|".
                 output_parts.append(f"{i + 1}:{' ' * indent_cols}{stripped_left}")
             elif display_mode == "prefix_ws":
-                # NATIVE coder view: LINENO:INDENT|<real spaces>content — shows the
-                # indent BOTH as a number (authoritative for edits) AND as real spaces
-                # (so the coder can SEE the nesting), then the code. The native edit
-                # applier reads the NUMBER and re-emits the spaces (idempotent), so the
-                # coder declares indent by number and never drops leading spaces. Blank
-                # lines → "{n}:0|". (root-cause fix for col-0 dedents, 2026-06-02.)
-                output_parts.append(f"{i + 1}:{indent_cols}|{' ' * indent_cols}{stripped_left}")
+                # NATIVE coder view: `LINENO ⇥INDENT|<real spaces>content` — line# bare
+                # on the left, `⇥INDENT` marks the indent BOTH as a number (authoritative
+                # for edits) AND followed by real spaces (so the coder can SEE the nesting),
+                # then the code. The native edit applier reads the NUMBER and re-emits the
+                # spaces (idempotent), so the coder declares indent by number and never drops
+                # leading spaces. Blank lines → "{n} ⇥0|". (ckpt-143 naturalized the gutter.)
+                output_parts.append(f"{i + 1} ⇥{indent_cols}|{' ' * indent_cols}{stripped_left}")
             else:
                 # v10 prefix mode: LINENO:INDENT|content (line# uses ':' so a
                 # copied line pastes verbatim into SEARCH/REPLACE). Blank → "{n}:0|"
@@ -10343,31 +10343,34 @@ def _apply_extracted_code(
             continue
 
         # Check 2 — does it introduce an undefined name (runtime NameError)?
-        # APPLY-AND-WARN, not reject-and-revert: a multi-site refactor (rename a
-        # def, then fix each caller) passes through intermediate states where the
-        # name is briefly dangling — rejecting each one strands the coder in a
-        # loop it can't escape edit-by-edit, and the step ships an EMPTY patch
-        # (f327: 8× dangling-ref reject → fallover → 0). Letting the edit LAND lets
-        # the refactor accumulate toward a clean file; a partial-but-landed patch
-        # is never worse than no patch. We keep the precise GPS so the coder knows
-        # exactly what's left to resolve before it finishes — just as a ⚠, not a ✗.
+        # REJECT-AND-REVERT (restored ckpt-143): the apply-and-warn experiment let
+        # f327 ship a patch that deleted `_is_fqcn`'s def but left the call →
+        # NameError → 26 tests failed (a baseline PASS regressed). The hard reject
+        # is the safety net that FORCES the coder to either keep the def or fix the
+        # call site before the broken state can persist — exactly what salvaged the
+        # multi-site refactor in the 4/8 baseline. The audit proved warn ≠ enough
+        # for a weak coder; it ignores a ⚠ and finishes anyway.
         if original is not None:
             new_undef = _undefined_names_introduced(original, new_content)
             if new_undef:
+                del result[fp]
+                _revert_fp_apply(fp)
+                total_matched = max(0, total_matched - 1)
+                names = ", ".join(sorted(new_undef))
                 _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
-                # GPS: for each unbound name, say WHERE it's still used and whether
-                # the edit removed its def — so the coder makes a local fix instead
-                # of hunting the blast-radius it can't track.
+                # GPS, not a stop-sign: for each unbound name, say WHERE it's still
+                # used and whether the edit removed its def — so the coder makes a
+                # local fix instead of hunting the blast-radius it can't track.
                 _detail = " | ".join(
                     _dangling_ref_guidance(n, original, new_content)
                     for n in sorted(new_undef))
                 all_ambiguous_skips.append(
-                    f"- ⚠ {_en} APPLIED to {fp}, but it now references name(s) bound "
-                    f"nowhere — a NameError if shipped as-is: {_detail}. RESOLVE before "
-                    f"you finish: (a) if you meant to REMOVE the name, update each "
-                    f"use-site above to its replacement (the symbol the step routes "
-                    f"through); (b) if you still need it, restore its definition or add "
-                    f"the import. Do NOT call finish while this is unresolved."
+                    f"- ✗ {_en} REJECTED — {fp}: introduces name(s) bound nowhere "
+                    f"(NameError at runtime); file left UNCHANGED. {_detail}. "
+                    f"FIX one of: (a) if you meant to REMOVE the name, also update "
+                    f"each use-site above to the replacement (the symbol the step "
+                    f"routes through); (b) if you still need it, KEEP/restore its "
+                    f"definition or add the import. Re-issue in ONE edit."
                 )
 
         # Check 3 — INDENT verification (advisory; the parse gate already

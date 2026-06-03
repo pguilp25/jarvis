@@ -335,13 +335,17 @@ def add_line_numbers(content: str, display_mode: str = "prefix") -> str:
             expanded = line.expandtabs(TAB_WIDTH)
             out.append(f"{i+1}:{expanded}")
     elif display_mode == "prefix_ws":
-        # NATIVE coder (ckpt-140): `LINENO|<verbatim line WITH its real indentation>`. The
-        # line number is just a gutter the coder drops; the text after `|` is copied VERBATIM
-        # into edits — the coder writes REAL leading spaces, no indent-NUMBER convention.
-        # (The old `LINENO:INDENT|code` form made the coder confuse the two numbers and
-        # mis-pick the indent → reject loops on every coder, 2026-06-03.)
+        # NATIVE coder: `LINENO ⇥INDENT|<real spaces>content` — line number on the
+        # left (bare, like any editor), then `⇥INDENT` (the ⇥ tab-glyph marks the
+        # INDENT: N leading spaces; authoritative — the edit applier re-emits it),
+        # then `|` + the real spaces (so the coder SEES the nesting) + code. The two
+        # numbers are unmistakable: bare-left = line, after ⇥ = indent. (ckpt-143:
+        # naturalized the LINENO:INDENT| double-colon gutter the coder mixed up.)
         for i, line in enumerate(lines):
-            out.append(f"{i+1}|{line.expandtabs(TAB_WIDTH)}")
+            expanded = line.expandtabs(TAB_WIDTH)
+            stripped = expanded.lstrip(' ')
+            n_indent = len(expanded) - len(stripped)
+            out.append(f"{i+1} ⇥{n_indent}|{' ' * n_indent}{stripped}")
     else:
         for i, line in enumerate(lines):
             expanded = line.expandtabs(TAB_WIDTH)
