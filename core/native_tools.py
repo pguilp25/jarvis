@@ -123,14 +123,14 @@ CODER_TOOLS = [
             "real leading spaces, and the code. (So `286 ⇥4|    def foo` = line 286, indent 4.) "
             "A huge file comes back "
             "as a skeleton (top-level defs); pass start_line/end_line to expand a "
-            "region. TRUST YOUR VIEW: a file you've already been shown — the step's "
-            "injected file(s), one you read, or one you edited (its diff IS the live "
-            "state) — is already in your context; do NOT re-read it (a full re-read is "
-            "refused — it wastes context and risks acting on a stale copy). edit_file "
-            "anchors on BOTH the line number you copied AND the content, so a shifted view "
-            "self-corrects — you don't need fresh numbers. Use this only for a file you "
-            "have NOT seen, or pass start_line/end_line for a SPECIFIC region you have not "
-            "seen since your last edit."),
+            "region. You usually don't NEED to re-read a file you've already been shown "
+            "(the step's injected file(s), one you read, or one you just edited — its diff "
+            "IS the live state), because edit_file anchors on BOTH the line number you "
+            "copied AND the content, so a shifted view self-corrects. But if you're unsure "
+            "of the CURRENT state (e.g. after several edits), re-reading is SAFE and "
+            "useful: read_file returns the file's current content AND a diff of exactly "
+            "what changed since you first saw it — so you always have accurate, live line "
+            "numbers (a huge file comes back as a skeleton, not a full re-dump)."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative file path"},
             "start_line": {"type": "integer", "description": "first line, 1-based (optional)"},
@@ -370,14 +370,22 @@ def _str_or_err(args: dict, key: str, tool: str):
                   f"(got {type(v).__name__}). Re-issue with a string {key}.")
 
 
+_FULL_REREAD_CAP = 500   # files up to this many lines are re-served IN FULL; larger → skeleton
+
+
 async def _do_read(args: dict, ctx: dict) -> str:
     # Reuse the text coder's [CODE:]/[VIEW:] executor: skeleton for huge files,
-    # range expansion, the `LINENO:INDENT|content` prefix view, AND recording
-    # viewed_versions so a following replace_lines anchors on what was just read.
+    # range expansion, the `LINENO ⇥INDENT|content` prefix view, AND recording
+    # viewed_versions so a following edit anchors on what was just read.
     from core.tool_call import _run_code_reads
     path, _e = _str_or_err(args, "path", "read_file")
     if _e:
         return _e
+    # Baseline snapshot for the re-read diff (set ONCE, first time we touch this file —
+    # whichever of read/edit comes first captures the pre-edit content). (ckpt-150.)
+    _fc0 = ctx.get("file_contents", {}).get(path)
+    if _fc0 is not None:
+        ctx.setdefault("_first_seen", {}).setdefault(path, _fc0)
     s = args.get("start_line"); e = args.get("end_line")
     if (s is None) != (e is None):
         # Exactly one bound given → the model asked for a region but the bound it
@@ -385,34 +393,58 @@ async def _do_read(args: dict, ctx: dict) -> str:
         return ("✗ read_file: give BOTH start_line and end_line for a range, or "
                 "NEITHER to read the whole file (you provided only "
                 f"{'start_line' if s is not None else 'end_line'}).")
-    # TRUST-THE-VIEW short-circuit: a FULL re-read (no range) of a file already in
-    # the coder's context just re-stacks the whole file — the dominant context-
-    # exhaustion + round-thrash cause (f631: 5 full re-reads of configfiles.py →
-    # 131072-token blow-out → the create-method step aborted mid-edit). If we've
-    # already shown this file (its initial injected block, a prior full read, or
-    # the diff after an edit), DON'T re-dump it: point to the view it has and
-    # offer a targeted range for any part it genuinely hasn't seen.
+    # RE-READ of an already-seen file (no range). A coder that can't SEE the code can't
+    # reason about it → blind edits. So NEVER flatly refuse — always serve readable,
+    # CURRENT content, just BOUNDED so a repeated full re-dump of a big file can't blow
+    # the context window (f631). And when the file CHANGED since the coder first saw it,
+    # LEAD WITH THE DIFF so it's UNAMBIGUOUS the content is updated and its earlier view
+    # is stale — the strongest signal a weak model reliably catches. (ckpt-150.)
     if s is None and e is None and path in ctx.get("view_at", {}):
-        _when = ctx["view_at"][path]
-        _edited = path in ctx.get("files_changed", set())
-        _src = ("the diff after your edit" if _edited else "your read of it")
-        # Soft progress pressure: a full re-read returns this ℹ (not a ✗, so it
-        # doesn't trip the reject loop-breaker) — but if the coder keeps asking,
-        # escalate so it can't spin full-reads silently to the round budget.
-        _rc = ctx.setdefault("_reread_count", {})
-        _rc[path] = _rc.get(path, 0) + 1
-        _extra = ("" if _rc[path] < 2 else
-                  f" ⚠ You have now requested a FULL read of {path} {_rc[path]}× and I "
-                  f"keep declining — STOP. Either edit from the view you have, or request a "
-                  f"SPECIFIC start_line/end_line range. A full re-read will never return.")
-        return (
-            f"ℹ {path} is ALREADY in your context — last shown at {_when} ({_src}). "
-            f"That IS its current, live state; TRUST it. I am NOT re-reading the whole "
-            f"file: re-reading what you already have wastes your context window and "
-            f"risks you acting on an out-of-date copy. PROCEED — make your edit from the "
-            f"view you have. If you need a SPECIFIC part of {path} you have NOT seen "
-            f"since {_when}, call read_file with start_line AND end_line for just those "
-            f"lines (not the whole file)." + _extra)
+        from core.edit_diff import render_diff
+        from tools.codebase import add_line_numbers
+        cur = ctx.get("file_contents", {}).get(path)
+        if cur is None:
+            _sb0 = ctx.get("sandbox")
+            cur = _sb0.load_file(path) if _sb0 is not None else None
+        if cur is not None:
+            _base = ctx.get("_first_seen", {}).get(path)
+            _changed = _base is not None and _base != cur
+            _nlines = cur.count("\n") + 1
+            _rc = ctx.setdefault("_reread_count", {})
+            _rc[path] = _rc.get(path, 0) + 1
+            # Full content when it's small enough AND (it changed OR this is the first
+            # re-read); otherwise a navigable skeleton — bounds repeated/huge re-reads.
+            _serve_full = _nlines <= _FULL_REREAD_CAP and (_changed or _rc[path] <= 1)
+            if _serve_full:
+                _body = add_line_numbers(cur, display_mode="prefix_ws")
+                _kind = "CURRENT content"
+            else:
+                from core.tool_call import _build_file_skeleton
+                _body = (_build_file_skeleton(cur.split("\n"), filename=path)
+                         + "\n→ read_file with start_line AND end_line to see any region in full.")
+                _kind = (f"CURRENT structure ({_nlines} lines — too large to re-dump in full)"
+                         if _nlines > _FULL_REREAD_CAP else "CURRENT structure")
+            ctx.setdefault("viewed_versions", {})[path] = cur
+            _note_view(ctx, path)
+            if _changed:
+                _diff = render_diff(_base, cur, path)
+                # Cap a pathologically large diff (a near-total rewrite) so the re-read
+                # stays bounded — the CURRENT content/skeleton below is the source of truth.
+                _dl = _diff.split("\n")
+                if len(_dl) > 400:
+                    _diff = "\n".join(_dl[:400]) + (f"\n… (+{len(_dl) - 400} more changed "
+                            f"lines — see the current content below / read a range for detail)")
+                return (f"✓ {path} — UPDATED since you first saw it. Your edit(s) ARE applied; "
+                        f"the line numbers below are the CURRENT, live ones — use THESE, your "
+                        f"earlier view is now stale. The diff shows exactly what changed.\n"
+                        f"━━ what changed since you first saw it ━━\n{_diff}\n"
+                        f"━━ {_kind} ━━\n{_body}")
+            _note = ("" if _rc[path] <= 1 else
+                     f"  (re-read {_rc[path]}× with no change — edit from it, or read a "
+                     f"specific start_line/end_line range.)")
+            return (f"ℹ {path} — {_kind}; unchanged since you last saw it (your view was already "
+                    f"current).{_note}\n{_body}")
+        # cur unavailable — fall through to the normal read path.
     if s is not None and e is not None:
         try:
             s_i, e_i = int(s), int(e)
@@ -846,6 +878,9 @@ def _do_edit(args: dict, ctx: dict) -> str:
         return (f"✗ edit_file: {path} is not in context — read it with read_file "
                 f"first, then copy the exact `old` lines (and their start_line) from "
                 f"that view.")
+    # Baseline for the re-read diff: capture the PRE-edit content the first time we touch
+    # this file (so a later read_file can show what changed since the coder first saw it). (ckpt-150.)
+    ctx.setdefault("_first_seen", {}).setdefault(path, cur)
     cur_lines = cur.split("\n")
 
     # EDIT-COT grounding gate (flag-gated): reject unless the edit carries grounded
@@ -1016,12 +1051,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
                 f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
                 f"(your `old` was anchored on its line number AND content, so a shifted "
-                f"view self-corrects). Do NOT read_file {path} again. For your next change "
-                f"here, COPY the relevant line from your view/this diff VERBATIM as `old` "
-                f"(keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. "
-                f"Do NOT paste a raw `LINENO:+/- ` diff row. Only if you need a part of "
-                f"{path} you have NOT seen, read_file it "
-                f"with a start_line/end_line range.\n"
+                f"view self-corrects). For your next change here, COPY the relevant line "
+                f"from your view/this diff VERBATIM as `old` (keep its `LINENO ⇥INDENT|` so "
+                f"it anchors); write `new` as `INDENT|code`. Do NOT paste a raw `LINENO:+/- "
+                f"` diff row. If you lose track of the current state, you CAN read_file "
+                f"{path} again — it returns the current content + a diff of what changed.\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).

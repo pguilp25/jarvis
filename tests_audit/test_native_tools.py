@@ -967,17 +967,19 @@ def test_edit_file_old_not_found_message_is_stale_aware():
 
 
 def test_view_at_invariant_holds_across_a_full_sequence():
-    """STAYS-THAT-WAY guarantee: after EVERY op, the trust-the-view invariant holds —
-    (a) if view_at[path] is set, a full read is short-circuited (never re-dumps), and
-    (b) file_contents[path] equals the sandbox (the view the coder trusts is real);
-    and every edit/create/replace leaves the touched file in view_at (the coder is
-    never told to re-read what it just changed)."""
+    """STAYS-THAT-WAY guarantee: after EVERY op, the view invariant holds —
+    (a) a full read of an in-view file is SERVED, never a ✗ refusal (ckpt-150: ℹ if
+    unchanged, ✓ UPDATED with a diff if it changed since first seen — the coder can
+    always SEE the current code), and (b) file_contents[path] equals the sandbox (the
+    view the coder trusts is real); and every edit/create/replace leaves the touched
+    file in view_at (the coder is never told to re-read what it just changed)."""
     ctx, rel, root = _mk_ctx()
     try:
         def check():
             for p in list(ctx.get("view_at", {})):
                 r = _disp("read_file", {"path": p}, ctx)
-                assert r.startswith("ℹ"), f"{p} in view_at but a full read was not short-circuited:\n{r}"
+                assert r.startswith("ℹ") or r.startswith("✓"), \
+                    f"{p} in view_at but a full read was not served:\n{r[:200]}"
                 if ctx.get("sandbox") is not None:
                     assert ctx["file_contents"][p] == ctx["sandbox"].load_file(p), \
                         f"{p}: trusted view diverged from the sandbox"
@@ -1059,17 +1061,18 @@ def test_unassigned_enum_members_clean_when_all_used():
     assert _unassigned_enum_members("x = 1\n") == []
 
 
-def test_read_short_circuit_escalates_on_repeat():
-    # A full re-read of an in-context file is declined with ℹ; repeating it must
-    # escalate (no silent spin to the round budget).
+def test_reread_unchanged_serves_then_degrades_to_skeleton():
+    # ckpt-150: a coder must always be able to SEE the file. An unchanged full re-read
+    # SERVES the current content (ℹ, not a refusal); repeating it degrades to a skeleton
+    # (bounded — no context blow-out) with a nudge. Never a flat "no".
     ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set(),
            "view_at": {"m.py": "step 1 (loaded at the start)"}}
     r1 = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r1.startswith("ℹ") and "⚠" not in r1                # first decline: gentle
+    assert r1.startswith("ℹ") and "a = 1" in r1                # first re-read: serves content
     r2 = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r2.startswith("ℹ") and "⚠" in r2 and "STOP" in r2   # second: escalated
-    assert not r2.startswith("✗")                              # still inert to the fail-counter
+    assert r2.startswith("ℹ") and "re-read" in r2              # repeat: degraded + nudge
+    assert not r2.startswith("✗")                              # inert to the fail-counter
 
 
 def test_edit_file_pure_insert_with_empty_old():
@@ -1171,46 +1174,59 @@ def test_orphaned_block_reject_names_the_header():
 # (ckpt 112) f631 re-read a 900-line file 5× → blew the 131072-token context
 # window mid-step → the method-creation step aborted and the def was lost.
 
-def test_read_file_short_circuits_a_full_reread():
-    # A full read records the view; a SECOND full read is refused (not re-dumped),
-    # but a targeted RANGE read is still allowed.
+def test_reread_serves_current_content_not_refusal():
+    # ckpt-150: a SECOND full read now SERVES the current content (the coder needs to
+    # see it to reason), not a flat refusal; a range read still works.
     ctx, rel, root = _mk_ctx()
     try:
         first = _disp("read_file", {"path": rel}, ctx)
         assert "greet" in first                              # real content returned
         assert rel in ctx.get("view_at", {})                # view recorded
         second = _disp("read_file", {"path": rel}, ctx)
-        assert second.startswith("ℹ") and "ALREADY in your context" in second
-        assert "def greet" not in second                    # did NOT re-dump the file
+        assert second.startswith("ℹ") and "greet" in second  # served the content, not refused
         rng = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 3}, ctx)
         assert not rng.startswith("ℹ")                       # range read still works
     finally:
         _cleanup(root)
 
 
-def test_read_file_short_circuit_after_edit_points_to_diff():
-    # After an edit, the file is in context (diff + unchanged remainder); a full
-    # re-read is refused and points at the edit's diff — never a re-read.
+def test_reread_after_edit_shows_diff_and_current_content():
+    # ckpt-150: after an edit, a full re-read makes "UPDATED" UNMISTAKABLE — it leads
+    # with the diff of what changed and serves the CURRENT content (live line numbers),
+    # instead of telling the coder to trust a now-stale view.
     src = "a = 1\nb = 2\nc = 3\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set(), "round": 4, "step_num": 2}
     out = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 2, "old": ["b = 2"], "new": ["b = 20"]}]}, ctx)
-    assert out.startswith("✓") and "step 2, round 4" in out  # diff stamped with WHEN
+    assert out.startswith("✓")
     assert "m.py" in ctx.get("view_at", {})
     r = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r.startswith("ℹ") and "ALREADY in your context" in r
-    assert "diff after your edit" in r and "step 2, round 4" in r
+    assert r.startswith("✓") and "UPDATED" in r              # clearly flagged as updated
+    assert "what changed" in r                               # the diff is shown
+    assert "2:+ b = 20" in r                                 # diff shows the change
+    assert "2 ⇥0|b = 20" in r                                # CURRENT content w/ live line numbers
 
 
-def test_seeded_view_at_short_circuits_injected_target():
-    # The caller seeds view_at for files injected into the prompt → a redundant
-    # full read of an injected target is short-circuited.
+def test_reread_injected_target_serves_content():
+    # ckpt-150: a file injected into the prompt (view_at seeded, no read yet) is
+    # re-served on a full read — the coder can always see it.
     ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set(),
            "view_at": {"m.py": "step 1 (loaded at the start)"}}
     r = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r.startswith("ℹ") and "step 1 (loaded at the start)" in r
+    assert r.startswith("ℹ") and "a = 1" in r
+
+
+def test_reread_large_file_serves_skeleton_not_full_dump():
+    # ckpt-150: a re-read of a LARGE file must NOT re-dump it (the f631 context
+    # blow-out) — it serves a navigable skeleton, bounded.
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(600))   # ~1800 lines
+    ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "view_at": {"big.py": "step 1"}}
+    r = _disp("read_file", {"path": "big.py"}, ctx)
+    assert r.startswith("ℹ") and "too large" in r            # skeleton path, not full dump
+    assert len(r) < len(big)                                 # bounded
 
 
 def test_edit_diff_stamped_with_round_when_no_step():

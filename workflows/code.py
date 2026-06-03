@@ -12167,12 +12167,14 @@ async def _implement_one_step(
             f"{step_instructions}\n{iface_block}\n{_create_note}"
             f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{_file_block}\n\n"
             f"These files are already loaded — edit them directly (no need to read_file "
-            f"first). After each edit you get a diff = the file's new live state; TRUST "
-            f"it and keep editing from it — do NOT re-read a file you've already been "
-            f"shown (for `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; "
-            f"edit_file anchors on BOTH the line number AND the content, so a shifted view "
-            f"self-corrects). Use read_file only for OTHER files you haven't seen, or a "
-            f"specific line range you need. When the change is done and you've verified it, call finish."
+            f"first). After each edit you get a diff = the file's new live state; keep "
+            f"editing from it (for `old`, copy the view line VERBATIM with its `LINENO "
+            f"⇥INDENT|`; edit_file anchors on BOTH the line number AND the content, so a "
+            f"shifted view self-corrects). If you're EVER unsure of a file's current state "
+            f"— after several edits, or you've lost track of the live line numbers — just "
+            f"read_file it again: you'll get the CURRENT content plus a diff of what "
+            f"changed, so you can always SEE the real code before editing. When the change "
+            f"is done and you've verified it, call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
