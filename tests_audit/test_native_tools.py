@@ -1093,6 +1093,28 @@ def test_edit_file_pure_insert_with_empty_old():
 # ── comprehension GPS (ckpt 90): harness computes the blast-radius the weak ──
 # model can't hold, and hands back the exact remaining edit (not a dead-end error).
 
+def test_edit_anchors_on_copied_view_line_number():
+    # ckpt-144: copying the view line VERBATIM for `old` (keeping the `LINENO ⇥INDENT|`
+    # prefix) anchors the edit on BOTH the line number AND the content. `return x`
+    # repeats (lines 3 and 6); without a line anchor that's ambiguous, but the copied
+    # view line for line 6 must edit line 6 and leave line 3 untouched.
+    src = "def a():\n    x = 1\n    return x\n\ndef b():\n    return x\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    out = _disp("edit_file", {"path": "m.py",
+                              "old": ["6 ⇥4|    return x"], "new": ["4|return x + 1"]}, ctx)
+    assert out.startswith("✓"), out
+    res = ctx["file_contents"]["m.py"].split("\n")
+    assert res[2] == "    return x"          # line 3 (first occurrence) UNCHANGED
+    assert res[5] == "    return x + 1"      # line 6 (the anchored one) changed
+    # the bare write-form (no lineno) on a repeated line is still ambiguous → rejects
+    ctx2 = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+            "project_root": ".", "files_changed": set()}
+    out2 = _disp("edit_file", {"path": "m.py",
+                               "old": ["4|return x"], "new": ["4|return x + 1"]}, ctx2)
+    assert out2.startswith("✗") and "appears 2 times" in out2
+
+
 def test_dangling_ref_reject_points_at_the_use_site():
     # Remove a helper's DEFINITION but leave a call to it → the reject must name
     # WHERE it's still used + that the def was removed (f327's 5x NameError).
