@@ -94,7 +94,10 @@ DEEPINFRA_MODELS = {
 OPENROUTER_MODELS = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash:free",
     "minimax-m2.5":      "minimax/minimax-m2.5:free",
-    "gpt-oss-120b":      "openai/gpt-oss-120b:free",  # coder primary (non-NIM, OR :free)
+    "gpt-oss-120b":      "openai/gpt-oss-120b",       # coder primary — PAID OR, pinned to
+                                                      # DeepInfra@bf16 in call_nvidia_tools
+                                                      # (user-approved 2026-06-03; the :free
+                                                      # upstream pool 503s "Provider returned error")
     "qwen3-coder":       "qwen/qwen3-coder:free",     # 1st text-coder fallback: 429s
                                                       # INSTANTLY when full → ~ms failover
     # User reported (2026-05-18 dashboard inspection): glm-4.5-air:free on
@@ -362,6 +365,13 @@ async def call_nvidia_tools(
         "max_tokens": max(int(max_tokens), 4096),
         **_max_thinking_payload(model_id),
     }
+    # PAID gpt-oss-120b on OpenRouter: pin to DeepInfra @ bf16 (user-approved 2026-06-03).
+    # The :free upstream pool 503s; DeepInfra/bf16 is the reliable, full-precision route.
+    # allow_fallbacks=False → never silently land on a cheaper/lower-quant provider; if
+    # DeepInfra is unavailable the call errors and the coder chain falls to the next model.
+    if api_model == "openai/gpt-oss-120b":
+        payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
+                               "allow_fallbacks": False}
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     # gpt-oss serialization (night interleave): hold the cross-process lock only for
     # the duration of the actual gpt-oss HTTP call. No-op unless JARVIS_GPTOSS_LOCK is

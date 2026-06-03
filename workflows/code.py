@@ -12183,6 +12183,8 @@ async def _implement_one_step(
         #   (Reverted from the qwen-primary experiment: both free qwen routes failed as
         #   primary — qwen3-480b 429-saturated, pollinations-qwen 0-edits. gpt-oss native
         #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
+        #   gpt-oss-nim stays NEAR THE END deliberately: it doesn't fail fast — it hangs
+        #   ~5 min then 504s, so it's only an acceptable LAST-RESORT, never early.
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
                         ("mistral/medium","native"), ("nvidia/gpt-oss-nim","native"),
                         ("nvidia/glm-5.1","text")]
