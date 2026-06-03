@@ -1093,9 +1093,12 @@ def test_edit_file_pure_insert_with_empty_old():
 # ── comprehension GPS (ckpt 90): harness computes the blast-radius the weak ──
 # model can't hold, and hands back the exact remaining edit (not a dead-end error).
 
-def test_dangling_ref_reject_points_at_the_use_site():
-    # Remove a helper's DEFINITION but leave a call to it → the reject must name
-    # WHERE it's still used + that the def was removed (f327's 5x NameError).
+def test_dangling_ref_applies_and_warns_pointing_at_the_use_site():
+    # Remove a helper's DEFINITION but leave a call to it. A multi-site refactor
+    # passes through dangling-ref intermediate states, so this APPLIES the edit
+    # (so the refactor can accumulate) and WARNS — naming WHERE it's still used +
+    # that the def was removed (f327's 8x dangling-ref reject → empty patch was
+    # the failure this fixes). The edit must LAND and the warning must guide.
     src = ("def _is_fqcn(s):\n    return True\n\n"
            "def is_valid(name):\n    return _is_fqcn(name)\n")
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
@@ -1103,10 +1106,12 @@ def test_dangling_ref_reject_points_at_the_use_site():
     # delete the def of _is_fqcn (lines 1-2), leaving the call on line 5
     out = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 1, "old": ["def _is_fqcn(s):", "    return True"], "new": []}]}, ctx)
-    assert out.startswith("✗"), out
+    assert "⚠" in out and "✗" not in out, out          # warns, does NOT reject
     assert "_is_fqcn" in out and "REMOVED its definition" in out
     assert "still USED" in out and "_is_fqcn(name)" in out   # points at the dangling call
-    assert ctx["file_contents"]["m.py"] == src               # not applied
+    assert "Do NOT call finish" in out                       # gate is at finish, not here
+    assert ctx["file_contents"]["m.py"] != src              # APPLIED — refactor can continue
+    assert "def _is_fqcn" not in ctx["file_contents"]["m.py"]  # the def was removed
 
 
 def test_orphaned_block_reject_names_the_header():

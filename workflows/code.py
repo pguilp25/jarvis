@@ -10343,27 +10343,31 @@ def _apply_extracted_code(
             continue
 
         # Check 2 — does it introduce an undefined name (runtime NameError)?
+        # APPLY-AND-WARN, not reject-and-revert: a multi-site refactor (rename a
+        # def, then fix each caller) passes through intermediate states where the
+        # name is briefly dangling — rejecting each one strands the coder in a
+        # loop it can't escape edit-by-edit, and the step ships an EMPTY patch
+        # (f327: 8× dangling-ref reject → fallover → 0). Letting the edit LAND lets
+        # the refactor accumulate toward a clean file; a partial-but-landed patch
+        # is never worse than no patch. We keep the precise GPS so the coder knows
+        # exactly what's left to resolve before it finishes — just as a ⚠, not a ✗.
         if original is not None:
             new_undef = _undefined_names_introduced(original, new_content)
             if new_undef:
-                del result[fp]
-                _revert_fp_apply(fp)
-                total_matched = max(0, total_matched - 1)
-                names = ", ".join(sorted(new_undef))
                 _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
-                # GPS, not a stop-sign: for each unbound name, say WHERE it's still
-                # used and whether the edit removed its def — so the coder makes a
-                # local fix instead of hunting the blast-radius it can't track.
+                # GPS: for each unbound name, say WHERE it's still used and whether
+                # the edit removed its def — so the coder makes a local fix instead
+                # of hunting the blast-radius it can't track.
                 _detail = " | ".join(
                     _dangling_ref_guidance(n, original, new_content)
                     for n in sorted(new_undef))
                 all_ambiguous_skips.append(
-                    f"- ✗ {_en} REJECTED — {fp}: introduces name(s) bound nowhere "
-                    f"(NameError at runtime); file left UNCHANGED. {_detail}. "
-                    f"FIX one of: (a) if you meant to REMOVE the name, also update "
-                    f"each use-site above to the replacement (the symbol the step "
-                    f"routes through); (b) if you still need it, KEEP/restore its "
-                    f"definition or add the import. Re-issue in ONE edit."
+                    f"- ⚠ {_en} APPLIED to {fp}, but it now references name(s) bound "
+                    f"nowhere — a NameError if shipped as-is: {_detail}. RESOLVE before "
+                    f"you finish: (a) if you meant to REMOVE the name, update each "
+                    f"use-site above to its replacement (the symbol the step routes "
+                    f"through); (b) if you still need it, restore its definition or add "
+                    f"the import. Do NOT call finish while this is unresolved."
                 )
 
         # Check 3 — INDENT verification (advisory; the parse gate already

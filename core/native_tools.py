@@ -818,10 +818,12 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 old_list = [anchor]
                 new_list = [anchor] + new_list   # keep the anchor, add new below it
             else:
-                return (f"✗ edit_file hunk #{i}: `old` is empty. To CHANGE code, put the "
-                        f"exact existing line(s) in `old`. To INSERT new code, give "
-                        f"`start_line` = the line you want to add AFTER and put the new "
-                        f"line(s) in `new` (leave `old` empty).")
+                return (f"✗ edit_file hunk #{i}: `old` is empty. `old` must hold the "
+                        f"EXACT existing line(s) you're changing, copied verbatim from "
+                        f"your read. To INSERT new code, pick a real adjacent line, put "
+                        f"it in BOTH `old` and `new`, and add your new line(s) next to "
+                        f"it in `new` (e.g. old=[\"    return x\"], "
+                        f"new=[\"    log(x)\", \"    return x\"]).")
         sl = h.get("start_line")
         if sl is None:
             # No number given — resolve from content; reject if it's not unique.
@@ -927,6 +929,13 @@ def _do_edit(args: dict, ctx: dict) -> str:
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
         _when = _view_stamp(ctx)
+        # The edit LANDED but a post-apply gate may have flagged a ⚠ (e.g. the
+        # dangling-ref/NameError check, which now applies-and-warns rather than
+        # rejecting so a multi-site refactor can accumulate). Surface those ⚠ lines
+        # on the success return — otherwise the diff message buries them and the
+        # coder finishes with an unresolved NameError it was never told about.
+        _warns = [str(x).strip() for x in skips if "⚠" in str(x)]
+        _warn_tail = ("\n\n" + "\n".join(_warns)) if _warns else ""
         return (f"✓ Applied {len(hunks)} hunk(s) to {path} — change made at {_when}. "
                 f"The diff below is the ONLY change to {path} since your last view of it; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
@@ -936,7 +945,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"real line(s) verbatim (copy from your view, drop the LINENO| gutter) — do "
                 f"NOT paste a diff row. Only if you need a part of {path} you have NOT seen, read_file it "
                 f"with a start_line/end_line range.\n"
-                + (_diff or "(no visible line change)"))
+                + (_diff or "(no visible line change)") + _warn_tail)
 
     # Suffix-resolved key safety net (mirror _do_replace).
     _changed = {k: v for k, v in result.items()
