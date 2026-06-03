@@ -661,12 +661,56 @@ def _locate_block(cur_lines: list, old_list: list) -> "tuple[int | None, int]":
     return (hits[0] if hits else None), len(hits)
 
 
-def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None) -> str:
+def _actual_region_hint(cur_lines, start_line, old_list) -> str:
+    """RECOVERY for the #1 reject-loop cause (audit 2026-06-03): a big file is shown
+    as a SKELETON (signatures, no bodies), the coder is told to trust its view, so it
+    builds `old` for a function body it never actually saw → `_locate_block` finds
+    nothing → reject → it re-sends the same imagined `old` → fallover with only a
+    trivial top-level line landed (e.g. just an `import`). Instead of dead-ending,
+    SHOW the coder the real current lines at the intended site so it can copy a valid
+    `old`. Renders as `LINENO:INDENT|code` (the read-view form). '' if we can't localize."""
+    if not cur_lines:
+        return ""
+    n = len([o for o in (old_list or []) if str(o).strip()]) or 1
+    anchor = None
+    try:
+        sl = int(start_line)
+        if 1 <= sl <= len(cur_lines):
+            anchor = sl - 1
+    except (TypeError, ValueError):
+        anchor = None
+    if anchor is None and old_list:        # no usable start_line → fuzzy-locate the first old line
+        import difflib
+        first = next((str(o).strip() for o in old_list if str(o).strip()), "")
+        if first:
+            best, bi = 0.0, None
+            for idx, ln in enumerate(cur_lines):
+                r = difflib.SequenceMatcher(None, ln.strip(), first).ratio()
+                if r > best:
+                    best, bi = r, idx
+            if best >= 0.6:
+                anchor = bi
+    if anchor is None:
+        return ""
+    lo = max(0, anchor - 2); hi = min(len(cur_lines), anchor + n + 2)
+    rows = []
+    for idx in range(lo, hi):
+        ln = cur_lines[idx]; ind = len(ln) - len(ln.lstrip(' '))
+        rows.append(f"     {idx+1}:{ind}|{ln.strip()}")
+    return ("\n   ↪ The ACTUAL current lines at that spot are below — copy your `old` "
+            "VERBATIM from these (as INDENT|code), don't reconstruct it from memory:\n"
+            + "\n".join(rows))
+
+
+def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
+                       cur_lines=None, start_line=None) -> str:
     """`old` matched nowhere in the file. Two very different causes — name the
     likely one. If we've already edited this file, the model is almost certainly
     copying `old` from a STALE earlier read (the file moved under it); telling it
     'wrong file' would wrongly send it away from the right file. If we HAVEN'T
-    touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug)."""
+    touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug).
+    When we can localize the intended site, we APPEND the real current lines so a
+    skeleton-only view isn't a dead end (see _actual_region_hint)."""
     # Strict-input cue: if `old` looks like it was pasted from a DIFF's +/- row
     # (`N:+ ` / `N:- `), that gutter is NOT editable input and isn't silently stripped —
     # tell the coder the canonical form instead of leaving it to guess. (audit pass-4.)
@@ -685,13 +729,15 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None) -> str:
                 f"`old` as `INDENT|code` for the line as it reads NOW (the LATEST diff above "
                 f"shows the current text — read it, but don't paste the diff row); if the line "
                 f"is in a part you have NOT seen since the edit, read_file {path} with that "
-                f"exact start_line/end_line range. Don't reuse stale line text.")
+                f"exact start_line/end_line range. Don't reuse stale line text."
+                + _actual_region_hint(cur_lines, start_line, old_raw))
     return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Two causes: "
             f"(1) WRONG FILE — the code may be defined elsewhere; [SEARCH] the symbol to find "
             f"its real file, then edit THAT. (2) Your `old` doesn't match {path}'s text — copy "
             f"it EXACTLY (character-for-character) from the view of {path} you already have. If "
             f"you need a region of {path} you have NOT seen, read_file it with a start_line/"
-            f"end_line range — don't re-dump the whole file.")
+            f"end_line range — don't re-dump the whole file."
+            + _actual_region_hint(cur_lines, start_line, old_raw))
 
 
 # Indentation is declared as a NUMBER; the harness re-emits the spaces. The model can
@@ -826,7 +872,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # No number given — resolve from content; reject if it's not unique.
             sl, n_hits = _locate_block(cur_lines, old_list)
             if n_hits == 0:
-                return _old_not_found_msg(i, path, ctx, h.get("old"))
+                return _old_not_found_msg(i, path, ctx, h.get("old"),
+                                          cur_lines=cur_lines, start_line=None)
             if n_hits > 1:
                 return (f"✗ edit_file hunk #{i}: `old` appears {n_hits} times in {path} "
                         f"— add `start_line` (the read_file line number where this "
@@ -848,7 +895,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # in dataclasses.py when the class is in _collection_finder.py.
             _, _n = _locate_block(cur_lines, old_list)
             if _n == 0:
-                return _old_not_found_msg(i, path, ctx, h.get("old"))
+                return _old_not_found_msg(i, path, ctx, h.get("old"),
+                                          cur_lines=cur_lines, start_line=sl)
         resolved.append((sl, old_list, new_list))
 
     # The numbered [edit] applier requires lines top-to-bottom in FILE order.
@@ -1624,6 +1672,11 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             if (isinstance(result_str, str) and result_str.startswith("✗")
                     and name != "run_code"):
                 _total_rejects += 1
+                # Observability (ckpt-134): surface WHY each edit was rejected — the
+                # reject text used to live only in the model's tool channel, so reject
+                # loops were invisible in the run log (the 2026-06-03 audit had to guess).
+                _rj = result_str.split("\n", 1)[0]
+                status(f"  [native:{short}] round {rnd}: edit REJECTED — {_rj[:110]}")
                 # backstop: many DIFFERENT rejected edit calls (varied args evade the
                 # identical-3× check) → still stuck; fall over rather than burn the budget.
                 if _total_rejects >= 8:

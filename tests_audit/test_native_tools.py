@@ -1224,3 +1224,25 @@ def test_edit_success_messages_dont_tell_coder_to_paste_a_diff():
             "viewed_versions": {"m.py": "def f():\n    return 1\n"}}
     r2 = _do_replace({"path": "m.py", "start_line": 2, "end_line": 2, "new_content": "8|return 2"}, ctx2)
     assert "copy your next edit's `old` line(s) from this diff" not in r2
+
+
+def test_old_not_found_reject_shows_actual_lines_for_recovery():
+    """ckpt-134: the #1 reject-loop cause was a skeleton view of a big file → the coder
+    builds `old` for a body it never saw → permanent no-match loop. The no-match reject
+    must now SHOW the real current lines (LINENO:INDENT|code) at the intended site so the
+    coder can copy a valid `old` instead of re-sending an imagined one."""
+    import os
+    os.environ.pop("JARVIS_EDIT_COT", None)
+    import core.native_tools as nt
+    src = "def foo():\n    x = 1\n    y = 2\n    return x + y\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    # start_line points at a real region but `old` is imagined → must reject WITH the real lines
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 3, "old": ["8|y = 999  # imagined"], "new": ["8|y = 5"]}]}, ctx))
+    assert r.startswith("✗")
+    assert "ACTUAL current lines" in r
+    assert "3:4|y = 2" in r          # the real line 3 rendered as LINENO:INDENT|code
+    # no start_line: fuzzy-locate still surfaces the nearest real line
+    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
+        {"old": ["    return x + y - 1"], "new": ["    return x"]}]}, ctx))
+    assert r2.startswith("✗") and "ACTUAL current lines" in r2 and "return x + y" in r2
