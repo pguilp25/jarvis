@@ -1358,3 +1358,32 @@ def test_block_reject_tells_coder_to_replace_whole_block():
     assert r.startswith("✗")
     assert "whole CONTIGUOUS span" in r and "2 to 5" in r, \
         "block reject must tell the coder to put the whole span (lines 2-5) in old/new"
+
+
+def test_indent_parse_fail_retry_trusts_typed_spaces():
+    """ckpt-155: the `0|    x` dual-channel slip (number 0, but real spaces typed) makes the
+    number-based expansion produce indent 0 → IndentationError. The harness retries trusting
+    the typed spaces and the edit lands. An intentional dedent (smaller number + stale spaces)
+    PARSES, so it never reaches the retry — number stays authoritative."""
+    import core.native_tools as nt
+    # SLIP: insert a method body with `0|        return 2` (8 spaces typed, number 0).
+    src = "class C:\n    def a(self):\n        return 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "old": [
+        "2 ⇥4|    def a(self):", "3 ⇥8|        return 1"],
+        "new": ["4|def a(self):", "8|return 1", "4|def b(self):", "0|        return 2"]}, ctx))
+    assert r.startswith("✓"), r
+    assert "typed spaces" in r                      # surfaced the auto-fix
+    res = ctx["file_contents"]["m.py"]
+    assert "        return 2" in res                # body landed at indent 8, not 0
+    import ast; ast.parse(res)                      # and the file parses
+
+    # DEDENT: `8|            y = 1` (number 8, 12 spaces) — number-based parses, number wins.
+    src2 = "def f():\n    if x:\n            y = 1\n"
+    ctx2 = {"file_contents": {"m.py": src2}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "old": [
+        "2 ⇥4|    if x:", "3 ⇥12|            y = 1"],
+        "new": ["4|if x:", "8|            y = 1"]}, ctx2))
+    assert r2.startswith("✓"), r2
+    assert "typed spaces" not in r2                 # no retry: number-based already parsed
+    assert "\n        y = 1" in ctx2["file_contents"]["m.py"]   # dedented to 8 (the number)

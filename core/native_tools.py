@@ -841,11 +841,17 @@ _APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ \(#[0-9a-fA-F][^)]*\)\s*$')
 _LOOKS_COPIED_GUTTER_RE = re.compile(r'^\s*\d+:[+\-] ')
 
 
-def _expand_indent_lines(lines: list) -> list:
+def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
     """Resolve every old/new/content line to its real source form. The model declares indent
     by NUMBER (`INDENT|code`) — or copies a view line verbatim (`LINENO:INDENT|code`) — and the
     harness applies the spaces, so the coder never types (and never drops) leading spaces (the
-    col-0 dedent root cause). We transform ONLY these two UNAMBIGUOUS forms; everything else is
+    col-0 dedent root cause). `trust_spaces` (ckpt-155) is a PARSE-FAIL RETRY mode: when the
+    code part ALSO carries leading spaces that disagree with the NUMBER, use the typed spaces
+    instead of the number. It is used ONLY as a fallback after the number-based expansion failed
+    to parse — so it fixes the `0|    x` dual-channel slip (number 0 but 4 spaces typed → indent
+    4) WITHOUT touching the default (number-authoritative) path that an intentional dedent
+    `4|        x` relies on (that one parses, so the retry never fires). We transform ONLY these
+    two UNAMBIGUOUS forms; everything else is
     taken LITERALLY (so a real YAML/code line is never corrupted by a guessed transform). A
     leftover diff/whitespace gutter is NOT stripped — it simply won't match, and the reject
     explains how to re-send (see _do_edit)."""
@@ -864,7 +870,13 @@ def _expand_indent_lines(lines: list) -> list:
         ln = _APPEARS_TAIL_RE.sub('', ln)
         m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
         if m:                                    # INDENT|code or LINENO:INDENT|code
-            out.append(' ' * int(m.group(1)) + m.group(2).lstrip(' '))
+            code = m.group(2)
+            ind = int(m.group(1))
+            if trust_spaces:
+                typed = len(code) - len(code.lstrip(' '))
+                if typed > 0:                    # typed spaces disagree → trust them (retry mode)
+                    ind = typed
+            out.append(' ' * ind + code.lstrip(' '))
         else:
             out.append(ln)                       # literal — never a guessed transform
     return out
@@ -949,7 +961,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
         # the same result as `4|def foo`. (root-cause fix, 2026-06-02.)
         _raw_old = _as_list(h.get("old"))
         old_list = _expand_indent_lines(_raw_old)
-        new_list = _expand_indent_lines(_as_list(h.get("new")))
+        new_raw = _as_list(h.get("new"))          # kept un-expanded; expanded at block-build (parse-fail retry)
+        new_list = _expand_indent_lines(new_raw)
         if not any(o.strip() for o in old_list):
             # PURE INSERT ergonomics: the model naturally leaves `old` empty when
             # ADDING new code (a method/function) and gives start_line + new. Don't
@@ -964,6 +977,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 anchor = cur_lines[sl_i - 1]
                 old_list = [anchor]
                 new_list = [anchor] + new_list   # keep the anchor, add new below it
+                new_raw = [anchor] + new_raw     # keep raw in step for parse-fail re-expansion
             else:
                 return (f"✗ edit_file hunk #{i}: `old` is empty. `old` must hold the EXACT "
                         f"existing line(s) you're changing — copy them from your view (keep "
@@ -1007,7 +1021,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             if _n == 0:
                 return _old_not_found_msg(i, path, ctx, h.get("old"),
                                           cur_lines=cur_lines, start_line=sl)
-        resolved.append((sl, old_list, new_list))
+        resolved.append((sl, old_list, new_raw))
 
     # The numbered [edit] applier requires lines top-to-bottom in FILE order.
     # The model may send hunks in any order, so sort by start_line ourselves
@@ -1015,24 +1029,59 @@ def _do_edit(args: dict, ctx: dict) -> str:
     # with "edit lines out of order" and making it retry — that retry-loop is a
     # top cause of round pile-up.
     resolved.sort(key=lambda t: t[0])
-    edit_lines = []
-    for sl, old_list, new_list in resolved:
-        for j, o in enumerate(old_list):
-            edit_lines.append(f"{sl + j}:-{o}")
-        for nw in new_list:
-            edit_lines.append(f"+{nw}")
-
-    block = (f"=== EDIT: {path} ===\n[edit]\n" + "\n".join(edit_lines)
-             + "\n[/edit]\n=== END EDIT ===")
     from workflows.code import _extract_code_blocks, _apply_extracted_code
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])
-    ext = _extract_code_blocks(block)
-    result, matched, attempted, skips = _apply_extracted_code(
-        ext, ctx["file_contents"], ctx.get("sandbox"),
-        viewed_versions=ctx.get("viewed_versions"))
+
+    def _build_and_apply(trust_spaces: bool):
+        edit_lines = []
+        for sl, old_list, new_raw in resolved:
+            new_list = _expand_indent_lines(new_raw, trust_spaces=trust_spaces)
+            for j, o in enumerate(old_list):
+                edit_lines.append(f"{sl + j}:-{o}")
+            for nw in new_list:
+                edit_lines.append(f"+{nw}")
+        block = (f"=== EDIT: {path} ===\n[edit]\n" + "\n".join(edit_lines)
+                 + "\n[/edit]\n=== END EDIT ===")
+        # Start every attempt from the SAME pre-edit state (a rejected attempt
+        # reverts itself, but reset explicitly so the retry is clean).
+        ctx["file_contents"].clear(); ctx["file_contents"].update(_before_all)
+        _ext = _extract_code_blocks(block)
+        _res, _m, _a, _sk = _apply_extracted_code(
+            _ext, ctx["file_contents"], ctx.get("sandbox"),
+            viewed_versions=ctx.get("viewed_versions"))
+        return _res, list(_ext.get("malformed_edits", [])) + list(_sk)
+
+    result, skips = _build_and_apply(False)
+
+    # PARSE-FAIL INDENT RETRY (ckpt-155): if the number-based expansion produced a
+    # file that does NOT parse AND some `new` line carried typed leading spaces that
+    # DISAGREE with its `INDENT|` number (the `0|    x` dual-channel slip — number 0
+    # but 4 spaces typed), retry once trusting the typed spaces. Fires ONLY on a parse
+    # reject (so it can never alter a passing edit) and ONLY when the disagreement
+    # exists (so an unrelated SyntaxError isn't masked). An intentional dedent
+    # `4|        x` parses, so it never reaches this path — number stays authoritative.
+    _indent_autofixed = False
+    def _is_parse_reject(_res, _sk):
+        return path not in _res and any(
+            ("does NOT parse" in str(s)) or ("IndentationError" in str(s))
+            or ("SyntaxError" in str(s)) for s in _sk)
+    def _has_indent_disagreement():
+        for _sl, _ol, new_raw in resolved:
+            for ln in new_raw:
+                m = _INDENT_LINE_RE.match(str(ln)) or _VIEW_LINE_RE.match(str(ln))
+                if m:
+                    code = m.group(2); typed = len(code) - len(code.lstrip(' '))
+                    if typed > 0 and typed != int(m.group(1)):
+                        return True
+        return False
+    if _is_parse_reject(result, skips) and _has_indent_disagreement():
+        _r2, _s2 = _build_and_apply(True)
+        if path in _r2:                      # retry applied AND now parses
+            result, skips, _indent_autofixed = _r2, _s2, True
+
     _seen: set = set()
-    skips = [x for x in (list(ext.get("malformed_edits", [])) + list(skips))
+    skips = [x for x in skips
              if not (str(x).strip() in _seen or _seen.add(str(x).strip()))]
 
     if path in result:
@@ -1083,7 +1132,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
         from core.edit_diff import render_diff
         _diff = render_diff(before or "", result[path], path)
         _when = _view_stamp(ctx)
-        return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}. The consolidated diff "
+        _fixnote = (" ⚠ Your `INDENT|` number disagreed with the spaces you typed and "
+                    "wouldn't parse, so I used your typed spaces instead — verify the new "
+                    "line(s) are at the right scope in the diff." if _indent_autofixed else "")
+        return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}.{_fixnote} The consolidated diff "
                 f"below is {path}'s CURRENT state after ALL of them. "
                 f"The diff below is the ONLY change to {path} since your last view of it; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
