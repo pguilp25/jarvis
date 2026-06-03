@@ -965,7 +965,10 @@ def test_edit_file_old_not_found_message_is_stale_aware():
         base(False))
     assert r_fresh.startswith("✗") and "WRONG FILE" in r_fresh
     assert "range" in r_fresh.lower()                       # offers a targeted range
-    assert "re-read" not in r_fresh.lower()                 # never tells it to re-read the file
+    # must EXPLICITLY forbid a re-read (ckpt-154 don't-re-read steering) and never
+    # instruct re-dumping the whole file
+    assert "do not re-read" in r_fresh.lower()
+    assert "whole file" not in r_fresh.lower() or "never re-dump the whole file" in r_fresh.lower()
 
 
 def test_view_at_invariant_holds_across_a_full_sequence():
@@ -1353,5 +1356,5 @@ def test_block_reject_tells_coder_to_replace_whole_block():
         "old": ["4|a = 1", "4|b = 2", "4|c = 3", "4|return a"],
         "new": ["4|return 1", "4|dead1 = 1", "4|dead2 = 2"]}, ctx))
     assert r.startswith("✗")
-    assert "WHOLE span" in r and "2 to 5" in r, \
+    assert "whole CONTIGUOUS span" in r and "2 to 5" in r, \
         "block reject must tell the coder to put the whole span (lines 2-5) in old/new"

@@ -9677,11 +9677,21 @@ def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
     removed_def = bool(def_re.search(original)) and not bool(def_re.search(modified))
     head = (f"`{name}`: you REMOVED its definition but it's still USED"
             if removed_def else f"`{name}` is used but defined/imported nowhere")
+    if removed_def:
+        # Name WHERE the def was, so the coder can write the removal hunk too.
+        for _di, _ln in enumerate(original.split("\n"), 1):
+            if def_re.match(_ln):
+                head += f" (its def was at line {_di})"
+                break
     if uses:
-        shown = "; ".join(f"line {ln}: `{txt[:64]}`" for ln, txt in uses[:3])
+        # The reject now tells the coder to fix EVERY use-site as a hunk in ONE
+        # batch — so list them ALL (a truncated list → partial batch → the gate
+        # loops). Cap generously for a pathological high-fanout name only.
+        _cap = 15
+        shown = "; ".join(f"line {ln}: `{txt[:64]}`" for ln, txt in uses[:_cap])
         head += f" at {shown}"
-        if len(uses) > 3:
-            head += f" (+{len(uses) - 3} more)"
+        if len(uses) > _cap:
+            head += f" (+{len(uses) - _cap} more — all in your current view, no re-read needed)"
     return head
 
 
@@ -10373,12 +10383,15 @@ def _apply_extracted_code(
                     _dangling_ref_guidance(n, original, new_content)
                     for n in sorted(new_undef))
                 all_ambiguous_skips.append(
-                    f"- ✗ {_en} REJECTED — {fp}: introduces name(s) bound nowhere "
-                    f"(NameError at runtime); file left UNCHANGED. {_detail}. "
-                    f"FIX one of: (a) if you meant to REMOVE the name, also update "
-                    f"each use-site above to the replacement (the symbol the step "
-                    f"routes through); (b) if you still need it, KEEP/restore its "
-                    f"definition or add the import. Re-issue in ONE edit."
+                    f"- ✗ {_en} REJECTED — {fp}: removes/uses name(s) bound nowhere "
+                    f"→ NameError. File left UNCHANGED, so your view is STILL CURRENT "
+                    f"— do NOT re-read. {_detail}. This is a MULTI-SITE change: fix it "
+                    f"as ONE `edits` call with a SEPARATE small hunk for EACH site above "
+                    f"(the def/import AND every use) — order doesn't matter, they apply "
+                    f"together so the file is never half-refactored. Either (a) you meant "
+                    f"to REMOVE the name → change the def hunk AND every use-site hunk to "
+                    f"the replacement the step routes through; or (b) you still need it → "
+                    f"restore its def / add the import. Send ALL the hunks in this one call."
                 )
 
         # Check 3 — INDENT verification (advisory; the parse gate already

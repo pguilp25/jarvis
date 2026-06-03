@@ -218,32 +218,35 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Edit a file with a content-matched search→replace. GROUP ALL your changes to "
-            "this file into ONE call: pass `edits` = a list of {old, new} pairs (your whole "
-            "'edit section' in one shot). They all anchor to the file's CURRENT view and "
-            "apply together — so line numbers DON'T shift between them and you never have to "
-            "re-read mid-edit — and you get back ONE consolidated diff = the file's new "
-            "state. (For a single change you may pass `old`/`new` directly instead of `edits`.) "
-            "Per change: `old` = the EXACT existing block — copy the view line(s) VERBATIM, "
-            "keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def setvalue`); the "
-            "harness anchors on BOTH the line number AND the content (a stale number "
-            "self-corrects). ALWAYS bracket your change with ~2 UNCHANGED lines above and ~2 "
-            "below — copy them verbatim into BOTH `old` and `new`. Two reasons: it makes the "
-            "match UNIQUE (no 'appears N times' / 'not found' rejects), and those real "
-            "surrounding lines SHOW you the exact indent to give your changed/new lines — read "
-            "the `⇥INDENT` of the line your code belongs under and reuse that number. `new` = the "
-            "replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a pipe, then code "
-            "with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness re-emits the "
-            "spaces from the NUMBER, so put the indent in the NUMBER, never as spaces in the "
-            "code — `0|    x` is WRONG, it means indent 0). Put the WHOLE span you're changing in "
-            "`old` (don't strand part of the block). To INSERT, just keep the bracketing context "
-            "lines unchanged and add your new lines between them. To DELETE, new=[the context "
-            "lines only]. A rejection says exactly what to fix."),
+            "Edit a file with content-matched search→replace. Make ALL your changes to this "
+            "file in ONE call: `edits` = a LIST of SMALL {old, new} hunks — ONE hunk per "
+            "change. MANY small hunks beats one big hunk. Changes far apart (a def up top AND "
+            "its caller 200 lines below AND an import) are SEPARATE hunks in the SAME `edits` "
+            "list — NEVER one giant `old` swallowing the gap between them. All hunks anchor to "
+            "the file's CURRENT view and apply TOGETHER, so their ORDER doesn't matter, line "
+            "numbers never shift between them, and you get back ONE consolidated diff = the "
+            "file's new state. (For a single change you may pass `old`/`new` directly.) Per "
+            "hunk: `old` = the exact CONTIGUOUS lines THAT ONE hunk changes — copy the view "
+            "line(s) VERBATIM, keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def "
+            "setvalue`); the harness anchors on BOTH the line number AND the content (a stale "
+            "number self-corrects). Bracket each hunk with ~1-2 UNCHANGED lines above and below "
+            "— copy them verbatim into BOTH `old` and `new`: it makes the match UNIQUE (no "
+            "'appears N times' / 'not found' rejects) and the real surrounding lines SHOW you "
+            "the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
+            "`new` = the replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a "
+            "pipe, then code with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness "
+            "re-emits the spaces FROM THE NUMBER, so put indent in the NUMBER, never as spaces in "
+            "the code — `0|    x` is WRONG, it means indent 0). To INSERT, add your new lines "
+            "between the unchanged bracket lines. To DELETE, new=[the bracket lines only]. "
+            "Removing a name (a def/import) AND the code that still USES it must go in the SAME "
+            "`edits` call as separate hunks, or it's rejected. A rejection leaves the file "
+            "UNCHANGED — your view is still current, so just fix the call and resend; don't re-read."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
-            "edits": {"type": "array", "description": "ALL your changes to this file in one batch — "
-                      "a list of {old, new}; they apply together against the current view and return "
-                      "ONE consolidated diff. Prefer this over many separate edit_file calls.",
+            "edits": {"type": "array", "description": "ALL your changes to this file as a LIST of "
+                      "SMALL {old, new} hunks — one per change; changes far apart go in SEPARATE hunks "
+                      "here (not one big `old`). They apply together in ANY order against the current "
+                      "view and return ONE consolidated diff. Always prefer this over separate edit_file calls.",
                       "items": {"type": "object", "properties": {
                           "old": {"type": "array", "items": {"type": "string"}},
                           "new": {"type": "array", "items": {"type": "string"}}}}},
@@ -783,12 +786,13 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
                 f"row); if the line is in a part you have NOT seen since the edit, read_file "
                 f"{path} with that exact start_line/end_line range. Don't reuse stale line text."
                 + _actual_region_hint(cur_lines, start_line, old_raw))
-    return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Two causes: "
-            f"(1) WRONG FILE — the code may be defined elsewhere; [SEARCH] the symbol to find "
-            f"its real file, then edit THAT. (2) Your `old` doesn't match {path}'s text — copy "
-            f"it EXACTLY (character-for-character) from the view of {path} you already have. If "
-            f"you need a region of {path} you have NOT seen, read_file it with a start_line/"
-            f"end_line range — don't re-dump the whole file."
+    return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. The file is "
+            f"UNCHANGED and your view is STILL CURRENT — do NOT re-read. Two causes: (1) Your "
+            f"`old` doesn't match {path} character-for-character — copy it again EXACTLY from "
+            f"the view you ALREADY have (keep the full `LINENO ⇥INDENT|` prefix) and resend. "
+            f"(2) WRONG FILE — the symbol may live elsewhere; [SEARCH] for it and edit THAT "
+            f"file. (read_file a start_line/end_line range ONLY for a region of {path} you've "
+            f"genuinely never seen — never re-dump the whole file.)"
             + _actual_region_hint(cur_lines, start_line, old_raw))
 
 
@@ -1052,10 +1056,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
             if _is_block and resolved:
                 _start = resolved[0][0]
                 _end = max(s + len(o) - 1 for s, o, _n in resolved)
-                _gate += (f"\n↪ Your edit left part of the block behind (that's the reject "
-                          f"above). Put the WHOLE span in `old` — every line from {_start} to "
-                          f"{_end}, top to bottom — and the entire corrected block in `new`. "
-                          f"Replace the full block in ONE edit; don't patch a fragment.")
+                _gate += (f"\n↪ Your edit left part of THIS block behind (that's the reject "
+                          f"above). For THIS one block, put its whole CONTIGUOUS span in `old` "
+                          f"— every line from {_start} to {_end} — and the corrected block in "
+                          f"`new`. (Distant changes elsewhere stay as their OWN separate hunks "
+                          f"in the `edits` list — don't merge them into this one.)")
             return _gate
         sb = ctx.get("sandbox")
         if sb is not None:
