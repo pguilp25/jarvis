@@ -92,41 +92,15 @@ _HEDGE = ("likely", "probably", "maybe", "i think", "i guess", "not sure",
 
 
 def _check_edit_cot(args: dict, cur: str, is_insert: bool) -> "str | None":
-    """When _EDIT_COT: require the writing call to carry GROUNDED reasoning —
-    goal (the spec behaviour this edit makes true), traced (what the code does NOW,
-    quoting a REAL line), check (one concrete input→expected case). Returns a
-    REJECTION string (edit must NOT apply) or None. The `traced`-must-quote-a-real-line
-    rule is the teeth: a 'likely/probably' guess can't quote an actual line."""
-    if not _EDIT_COT:
-        return None
-    fields = {f: str(args.get(f, "") or "").strip() for f in ("goal", "traced", "check")}
-    missing = [f for f, v in fields.items() if len(v) < 12]
-    if missing:
-        return (f"✗ grounding required before this edit — fill {missing}: "
-                f"`goal` = the spec behaviour this edit makes true; `traced` = what the "
-                f"code does NOW (QUOTE the real line you read, don't describe it); `check` "
-                f"= one concrete input→expected-output case your edit satisfies. "
-                f"(A guess is not grounding — read the actual line/spec first.)")
-    # anti-guess: hedge words without a concrete anchor = guessing, not grounding
-    low = fields["traced"].lower()
-    if any(h in low for h in _HEDGE):
-        return (f"✗ `traced` is a GUESS ('{fields['traced'][:60]}…') — read the actual "
-                f"code/spec and state what it CONCRETELY is (quote the real line), not what "
-                f"it 'likely/probably' is. Grounding, not guessing.")
-    # the teeth: for a CHANGE (not a pure insert), `traced` must QUOTE a real line
-    # (backtick-quoted content that actually appears in the file). A guess can't.
-    if not is_insert and cur:
-        cur_norm = " ".join(cur.split())
-        quoted = [q.strip() for q in re.findall(r'`([^`]+)`', fields["traced"]) if len(q.strip()) >= 4]
-        grounded = any(" ".join(q.split()) in cur_norm for q in quoted) or \
-                   (len(fields["traced"]) >= 20 and " ".join(fields["traced"].split()) in cur_norm)
-        if not grounded:
-            if not quoted:
-                return ("✗ `traced` must QUOTE the real line you're changing IN BACKTICKS "
-                        "(e.g. traced=\"a() runs `return 1`\"), not describe it — so the edit "
-                        "is grounded in the actual code, not a guess about it.")
-            return ("✗ the line you quoted in `traced` isn't in this file — quote the ACTUAL "
-                    "current line you're changing, copied verbatim from your read.")
+    """VERIFICATION REMOVED (ckpt-133). The grounding SLOTS (goal/traced/check) and the
+    prompt that invites them are KEPT — the coder may still reason in them — but the harness
+    NO LONGER REJECTS an edit for missing/ungrounded fields. The verbatim-`traced`-quote
+    teeth were tripping weak models into 8×-reject loops on hard steps (3/8 instances on the
+    ckpt-132 run; cost 395e5e20 a timeout) — the model gamed the FORMAT instead of thinking,
+    and a forced rigid reasoning template tends to hurt, not help. The `old` field already
+    carries the real line (content-verified at apply time), so dropping the second copy loses
+    no actual grounding. Always returns None (never rejects); kept as a no-op so call sites
+    and the A/B flag stay in place and re-enabling is a one-function change."""
     return None
 
 
@@ -231,7 +205,7 @@ CODER_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path of the new file"},
             "content": {"type": "string", "description": "the full contents of the new file"},
-            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this new file provides — 1 concrete sentence"},
+            "goal": {"type": "string", "description": "GROUNDING (optional): the spec behaviour this new file provides — 1 concrete sentence"},
             "traced": {"type": "string", "description": "GROUNDING: the spec/interface line this file implements (quote it) — not a guess about what's wanted"},
             "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case the new code satisfies"},
         }, "required": ["path", "content"]},
@@ -258,7 +232,7 @@ CODER_TOOLS = [
             "Parse-checked; a rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
-            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this edit makes true — 1 concrete sentence"},
+            "goal": {"type": "string", "description": "GROUNDING (optional): the spec behaviour this edit makes true — 1 concrete sentence"},
             "traced": {"type": "string", "description": "GROUNDING: what the code does NOW at the edit site — QUOTE the real line you read (in backticks), don't guess/describe"},
             "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies (the spec's example if given)"},
             "hunks": {
@@ -291,7 +265,7 @@ CODER_TOOLS = [
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
             "new_content": {"type": "string"},
-            "goal": {"type": "string", "description": "GROUNDING (required in grounding-mode): the spec behaviour this edit makes true — 1 concrete sentence"},
+            "goal": {"type": "string", "description": "GROUNDING (optional): the spec behaviour this edit makes true — 1 concrete sentence"},
             "traced": {"type": "string", "description": "GROUNDING: what the lines you're replacing do NOW — QUOTE a real line from the range (in backticks)"},
             "check": {"type": "string", "description": "GROUNDING: one concrete input→expected-output case your edit satisfies"},
         }, "required": ["path", "start_line", "end_line", "new_content"]},
@@ -1476,23 +1450,20 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "(change only the edge, nothing extra). A subtle fix you've run a discriminating "
             "test on beats one you only reasoned about.")
     if _EDIT_COT:
-        # Bake the grounding INTO every edit: the writing tools (edit_file/replace_lines/
-        # create_file) now REQUIRE goal/traced/check, and the harness REJECTS the edit if
-        # they're missing or ungrounded. This makes guessing impossible — you cannot write
-        # without showing what you traced.
+        # Grounding SLOTS are offered (goal/traced/check) and the coder is INVITED to fill
+        # them — but they are NOT enforced. ckpt-133 removed the verification: the verbatim-
+        # `traced`-quote teeth tripped weak models into 8×-reject loops on hard steps (cost an
+        # instance a timeout) and forced a rigid template the model gamed instead of thinking.
+        # The `old` field already carries the real, content-verified line. Advisory, not a gate.
         system = system + (
-            "\n\n## EVERY EDIT MUST BE GROUNDED (enforced — ungrounded edits are REJECTED)\n"
-            "edit_file / replace_lines / create_file now take three MANDATORY fields, and an "
-            "edit missing or faking them is REJECTED (not applied):\n"
+            "\n\n## GROUND YOUR EDITS WHEN IT HELPS (optional, not enforced)\n"
+            "edit_file / replace_lines / create_file accept three OPTIONAL fields — fill them to "
+            "keep yourself honest, but an edit is NEVER rejected for omitting or paraphrasing them:\n"
             "  • goal   — the spec behaviour this edit makes true (1 concrete sentence).\n"
-            "  • traced — what the code does NOW at the edit site, QUOTING the real line you "
-            "read (in backticks). NOT 'likely'/'probably'/a description — the actual line. "
-            "(For a brand-new symbol, quote the anchor/spec line you're building from.)\n"
-            "  • check  — one concrete input→expected-output case your edit satisfies (use the "
-            "spec's own example when given).\n"
-            "You literally cannot write without showing your grounding, so DON'T GUESS the "
-            "contract — read the real line/spec and quote it. A 'basic'/'simpler' guess that "
-            "doesn't quote real code will be rejected.")
+            "  • traced — what the code does NOW at the edit site (quote the real line if handy).\n"
+            "  • check  — one concrete input→expected-output case your edit satisfies.\n"
+            "Reason in whatever way fits the change — don't force a template. What matters is a "
+            "correct edit grounded in the real code, not filled-in fields.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())

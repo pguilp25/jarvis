@@ -1174,10 +1174,15 @@ def test_edit_diff_stamped_with_round_when_no_step():
     assert out.startswith("✓") and "round 7" in out and "step" not in out.split("\n")[0]
 
 
-def test_edit_cot_gate_rejects_ungrounded_when_flag_on():
-    """ckpt 119 (JARVIS_EDIT_COT): edit tools REQUIRE grounded goal/traced/check.
-    Ungrounded / guessed / unquoted edits are REJECTED; a grounded edit (traced
-    quotes a real line) applies. Flag OFF = no enforcement (regression-safe)."""
+def test_edit_cot_verification_removed_even_when_flag_on():
+    """ckpt-133: the EDIT-COT VERIFICATION is removed. The grounding SLOTS
+    (goal/traced/check) and the prompt that invites them are KEPT — the coder may
+    still reason in them — but the harness NO LONGER REJECTS an edit for missing or
+    ungrounded fields. (The verbatim-`traced`-quote teeth tripped weak models into
+    8×-reject loops on hard steps, cost an instance a timeout, and forced a rigid
+    reasoning template that gamed the format instead of helping.) So even with the
+    flag ON, an edit with NO grounding fields APPLIES — `old` already carries the
+    real, content-verified line, so no real grounding is lost."""
     import os, importlib
     src = "class Bar:\n    def a(self):\n        return 1\n"
     mkctx = lambda: {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
@@ -1187,23 +1192,20 @@ def test_edit_cot_gate_rejects_ungrounded_when_flag_on():
     try:
         import core.native_tools as nt; importlib.reload(nt)
         run = lambda a: asyncio.run(nt._dispatch("edit_file", a, mkctx()))
-        # missing grounding → reject
-        assert run({"path": "m.py", "hunks": hunk}).startswith("✗")
-        # hedge in traced → reject
-        assert "GUESS" in run({"path": "m.py", "goal": "make a() return 2 per spec",
-            "traced": "it probably returns 1", "check": "calling a() returns 2 not 1", "hunks": hunk})
-        # traced doesn't quote a real line → reject
+        # flag ON but NO grounding fields → APPLIES (verification gone, no reject)
+        assert run({"path": "m.py", "hunks": hunk}).startswith("✓")
+        # a hedged / unquoted `traced` no longer rejects either
         assert run({"path": "m.py", "goal": "make a() return 2 per spec",
-            "traced": "the method returns the number one", "check": "a() gives 2",
-            "hunks": hunk}).startswith("✗")
-        # grounded (traced quotes `return 1`) → apply
+            "traced": "it probably returns 1", "check": "calling a() returns 2",
+            "hunks": hunk}).startswith("✓")
+        # a grounded edit still applies (slots are harmless when filled)
         ok = run({"path": "m.py", "goal": "make a() return 2 as the spec requires",
             "traced": "a() runs `return 1`", "check": "a() returns 2 not 1", "hunks": hunk})
         assert ok.startswith("✓"), ok
     finally:
         os.environ.pop("JARVIS_EDIT_COT", None)
         import core.native_tools as nt; importlib.reload(nt)
-    # flag OFF: ungrounded edit applies (no enforcement)
+    # flag OFF: ungrounded edit applies (unchanged)
     assert asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": hunk}, mkctx())).startswith("✓")
 
 
