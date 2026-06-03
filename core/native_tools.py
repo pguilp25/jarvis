@@ -127,9 +127,10 @@ CODER_TOOLS = [
             "injected file(s), one you read, or one you edited (its diff IS the live "
             "state) — is already in your context; do NOT re-read it (a full re-read is "
             "refused — it wastes context and risks acting on a stale copy). edit_file "
-            "matches by CONTENT, so your line numbers never go stale. Use this only for "
-            "a file you have NOT seen, or pass start_line/end_line for a SPECIFIC region "
-            "you have not seen since your last edit."),
+            "anchors on BOTH the line number you copied AND the content, so a shifted view "
+            "self-corrects — you don't need fresh numbers. Use this only for a file you "
+            "have NOT seen, or pass start_line/end_line for a SPECIFIC region you have not "
+            "seen since your last edit."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative file path"},
             "start_line": {"type": "integer", "description": "first line, 1-based (optional)"},
@@ -685,19 +686,19 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
     if old_raw and any(_LOOKS_COPIED_GUTTER_RE.match(str(o)) for o in old_raw):
         return (f"✗ edit_file hunk #{i}: your `old` looks like a line copied from a DIFF "
                 f"(it starts with `LINENO:+ ` / `LINENO:- `). A diff row is not editable "
-                f"input. Write each `old`/`new` line as `INDENT|code` (the indent NUMBER, a "
-                f"pipe, then the code — e.g. `8|return x`), or copy a line from a read_file "
-                f"VIEW of {path} (which shows `LINENO ⇥INDENT|code`). The harness applies the "
-                f"indent from the number.")
+                f"input. For `old`, copy the line from the read VIEW of {path} VERBATIM — it "
+                f"shows `LINENO ⇥INDENT|code` (e.g. `286 ⇥4|    def foo`); keep that whole "
+                f"prefix. Write `new` lines as `INDENT|code` (the indent NUMBER, a pipe, then "
+                f"the code — e.g. `8|return x`); the harness applies the indent from the number.")
     if path in ctx.get("files_changed", set()):
         _when = ctx.get("view_at", {}).get(path, "your last edit")
         return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
                 f"You already EDITED {path} ({_when}), so this `old` was copied from a view "
-                f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: write "
-                f"`old` as `INDENT|code` for the line as it reads NOW (the LATEST diff above "
-                f"shows the current text — read it, but don't paste the diff row); if the line "
-                f"is in a part you have NOT seen since the edit, read_file {path} with that "
-                f"exact start_line/end_line range. Don't reuse stale line text."
+                f"taken BEFORE that edit. Fix it WITHOUT re-reading the whole file: copy "
+                f"`old` from the line as it reads NOW — the LATEST diff above shows the "
+                f"current text (use it, but copy the code, don't paste the raw `:+/-` diff "
+                f"row); if the line is in a part you have NOT seen since the edit, read_file "
+                f"{path} with that exact start_line/end_line range. Don't reuse stale line text."
                 + _actual_region_hint(cur_lines, start_line, old_raw))
     return (f"✗ edit_file hunk #{i}: the `old` line(s) are NOT in {path}. Two causes: "
             f"(1) WRONG FILE — the code may be defined elsewhere; [SEARCH] the symbol to find "
@@ -858,10 +859,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 old_list = [anchor]
                 new_list = [anchor] + new_list   # keep the anchor, add new below it
             else:
-                return (f"✗ edit_file hunk #{i}: `old` is empty. To CHANGE code, put the "
-                        f"exact existing line(s) in `old`. To INSERT new code, give "
-                        f"`start_line` = the line you want to add AFTER and put the new "
-                        f"line(s) in `new` (leave `old` empty).")
+                return (f"✗ edit_file hunk #{i}: `old` is empty. `old` must hold the EXACT "
+                        f"existing line(s) you're changing — copy them from your view (keep "
+                        f"the `LINENO ⇥INDENT|` prefix). To INSERT new code, put a real "
+                        f"adjacent line in BOTH `old` and `new`, with your new line(s) next "
+                        f"to it in `new` (that anchors the insert).")
         sl = h.get("start_line")
         if sl is None:
             # ckpt-144: anchor on BOTH lineno AND content. If the model copied the view
@@ -878,9 +880,9 @@ def _do_edit(args: dict, ctx: dict) -> str:
                                           cur_lines=cur_lines, start_line=None)
             if n_hits > 1:
                 return (f"✗ edit_file hunk #{i}: `old` appears {n_hits} times in {path} "
-                        f"— copy the view line(s) VERBATIM (keep the `LINENO ⇥INDENT|` so "
-                        f"the line number anchors the right one), add `start_line`, or "
-                        f"include more surrounding lines in `old`.")
+                        f"— copy the view line(s) VERBATIM, keeping the `LINENO ⇥INDENT|` "
+                        f"prefix so the line number picks the RIGHT occurrence (or include "
+                        f"more surrounding lines in `old` to make it unique).")
         else:
             try:
                 sl = int(sl)
@@ -978,10 +980,12 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"The diff below is the ONLY change to {path} since your last view of it; "
                 f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
                 f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
-                f"(your `old` was matched by CONTENT, so line numbers never mattered). Do "
-                f"NOT read_file {path} again. For your next change here, write `old` as "
-                f"`INDENT|code` (or copy a line from your read view) — do NOT paste a diff "
-                f"row. Only if you need a part of {path} you have NOT seen, read_file it "
+                f"(your `old` was anchored on its line number AND content, so a shifted "
+                f"view self-corrects). Do NOT read_file {path} again. For your next change "
+                f"here, COPY the relevant line from your view/this diff VERBATIM as `old` "
+                f"(keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. "
+                f"Do NOT paste a raw `LINENO:+/- ` diff row. Only if you need a part of "
+                f"{path} you have NOT seen, read_file it "
                 f"with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
 
@@ -1036,7 +1040,7 @@ def _do_create(args: dict, ctx: dict) -> str:
         existing = ctx["sandbox"].load_file(path)
     if existing:
         n = existing.count("\n") + 1
-        return (f"✗ create_file: {path} already exists ({n} lines). Use replace_lines "
+        return (f"✗ create_file: {path} already exists ({n} lines). Use edit_file "
                 f"to modify an existing file, or read_file to see it first.")
     block = f"=== FILE: {path} ===\n{content}\n=== END FILE ==="
     ext = _extract_code_blocks(block)
