@@ -1267,7 +1267,12 @@ def test_old_not_found_reject_shows_actual_lines_for_recovery():
         {"start_line": 3, "old": ["8|y = 999  # imagined"], "new": ["8|y = 5"]}]}, ctx))
     assert r.startswith("✗")
     assert "ACTUAL current lines" in r
-    assert "3 ⇥4|y = 2" in r          # the real line 3 rendered as LINENO ⇥INDENT|code
+    assert "3 ⇥4|    y = 2" in r       # real line 3 in canonical view form: LINENO ⇥INDENT|<real spaces>code
+    # ckpt-147: byte-identical to a normal read-view line (no extra prefix), so copying it
+    # VERBATIM as `old` parses cleanly through _VIEW_LINE_RE instead of failing to match.
+    from core.native_tools import _expand_indent_lines as _ex
+    _hint_line = next(l.strip() for l in r.splitlines() if "⇥4|" in l and "y = 2" in l)
+    assert _ex([_hint_line]) == ["    y = 2"]   # round-trips: a verbatim copy resolves
     # no start_line: fuzzy-locate still surfaces the nearest real line
     r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
         {"old": ["    return x + y - 1"], "new": ["    return x"]}]}, ctx))

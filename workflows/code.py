@@ -12153,17 +12153,18 @@ async def _implement_one_step(
         )
         _create_note = (
             f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
-            f"replace_lines): {', '.join(_to_create)}\n" if _to_create else ""
+            f"edit_file): {', '.join(_to_create)}\n" if _to_create else ""
         )
         _nat_user = (
             f"{step_instructions}\n{iface_block}\n{_create_note}"
-            f"=== FILE(S) — current content as LINENO:INDENT|code (already loaded) ===\n{_file_block}\n\n"
+            f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{_file_block}\n\n"
             f"These files are already loaded — edit them directly (no need to read_file "
             f"first). After each edit you get a diff = the file's new live state; TRUST "
             f"it and keep editing from it — do NOT re-read a file you've already been "
-            f"shown (edit_file matches by content, so your line numbers never go stale). "
-            f"Use read_file only for OTHER files you haven't seen, or a specific line "
-            f"range you need. When the change is done and you've verified it, call finish."
+            f"shown (for `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; "
+            f"edit_file anchors on BOTH the line number AND the content, so a shifted view "
+            f"self-corrects). Use read_file only for OTHER files you haven't seen, or a "
+            f"specific line range you need. When the change is done and you've verified it, call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,

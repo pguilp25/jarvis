@@ -201,9 +201,9 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "create_file",
         "description": (
-            "Create a NEW file at `path` with `content` — the full file text. Write each line "
-            "with REAL leading spaces (or the `INDENT|code` number form); no `LINENO:` prefix. "
-            "Use this for files that don't "
+            "Create a NEW file at `path` with `content` — the full file text, written as "
+            "normal code with real indentation (no line numbers, no gutter — you're authoring "
+            "a whole new file, not editing a view). Use this for files that don't "
             "exist yet — a new module, script, or test file (greenfield builds, or "
             "adding a file to an existing project). To change a file that ALREADY "
             "exists, use edit_file instead — create_file refuses to clobber."),
@@ -218,16 +218,15 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "edit_file",
         "description": (
-            "Edit a file: give the EXACT existing block as `old` and what it becomes as `new` "
-            "— a content-matched search→replace. Each line is `INDENT|code`: the leading-space "
-            "COUNT (the number after the `⇥` in the view's `LINENO ⇥INDENT|`), a pipe, then the "
-            "code with NO leading spaces — e.g. `4|def f():` then `8|return x`. The harness re-emits the "
-            "spaces, so you never type or drop indentation. BEST PRACTICE for `old`: copy the "
-            "view line(s) VERBATIM, keeping the WHOLE `LINENO ⇥INDENT|` prefix (e.g. "
-            "`286 ⇥4|    def setvalue`) — the harness anchors on BOTH the line number (so a "
-            "repeated line lands on the RIGHT one) AND the content (so if the number is stale it "
-            "self-corrects). `new` lines are NEW code, so they have no line number — write them "
-            "as `INDENT|code`. Put the WHOLE span you're changing in `old` (every line, top to "
+            "Edit a file: `old` = the EXACT existing block, `new` = what it becomes (a "
+            "content-matched search→replace). FOR `old`: copy the view line(s) VERBATIM, "
+            "keeping the WHOLE `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def setvalue`) — the "
+            "harness anchors on BOTH the line number (so a repeated line lands on the RIGHT one) "
+            "AND the content (a stale number self-corrects). FOR `new` (new code, no line "
+            "number): write each line as `INDENT|code` — the indent NUMBER (the one after the "
+            "`⇥` in the view), a pipe, then the code with NO leading spaces (e.g. `4|def f():`, "
+            "`8|return x`); the harness re-emits the spaces, so you never type or drop "
+            "indentation. Put the WHOLE span you're changing in `old` (every line, top to "
             "bottom) and the whole replacement in `new` — don't leave part of the block out (that "
             "strands the old code). To INSERT, include a surrounding line in BOTH old and new. To "
             "DELETE, new=[]. After applying you get the file's new diff; a rejection says what to fix."),
@@ -665,7 +664,7 @@ def _actual_region_hint(cur_lines, start_line, old_list) -> str:
     rows = []
     for idx in range(lo, hi):
         ln = cur_lines[idx]; ind = len(ln) - len(ln.lstrip(' '))
-        rows.append(f"     {idx+1} ⇥{ind}|{ln.strip()}")
+        rows.append(f"{idx+1} ⇥{ind}|{' ' * ind}{ln.strip()}")
     return ("\n   ↪ The ACTUAL current lines at that spot are below — copy your `old` "
             "VERBATIM from these (as INDENT|code), don't reconstruct it from memory:\n"
             + "\n".join(rows))
@@ -1315,7 +1314,7 @@ async def _dispatch(name: str, args: dict, ctx: dict):
     hint = (f" Did you mean '{suggestion}'?" if suggestion else "")
     return (f"✗ Unknown tool '{name}'.{hint} Available: read_file, find_refs, "
             f"find_callers, search_text, file_purpose, semantic_search, depends_on, "
-            f"edit_file, create_file, replace_lines, run_code, finish.")
+            f"edit_file, create_file, run_code, finish.")
 
 
 # ── The native tool-use loop ─────────────────────────────────────────────────
@@ -1448,7 +1447,7 @@ _VERIFY_NUDGE = (
     "available, ASSERT that boundary case (construct the empty/first-run input, assert "
     "the field equals the spec's value) and RUN it — a value you ran beats one you "
     "eyeballed.\n"
-    "If you find a CONCRETE problem, fix it with replace_lines now. If the code is "
+    "If you find a CONCRETE problem, fix it with edit_file now. If the code is "
     "correct as written, call finish — do NOT change it just to change something."
 )
 
