@@ -233,6 +233,8 @@ CODER_TOOLS = [
             "— copy them verbatim into BOTH `old` and `new`: it makes the match UNIQUE (no "
             "'appears N times' / 'not found' rejects) and the real surrounding lines SHOW you "
             "the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
+            "But two changes within a line or two of each other go in ONE hunk — don't let "
+            "separate hunks' context lines OVERLAP (overlapping hunks can't apply together). "
             "`new` = the replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a "
             "pipe, then code with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness "
             "re-emits the spaces FROM THE NUMBER, so put indent in the NUMBER, never as spaces in "
@@ -1029,6 +1031,24 @@ def _do_edit(args: dict, ctx: dict) -> str:
     # with "edit lines out of order" and making it retry — that retry-loop is a
     # top cause of round pile-up.
     resolved.sort(key=lambda t: t[0])
+    # OVERLAP guard (ckpt-156): cross-hunk ORDER is handled (we just sorted), but two
+    # hunks that SHARE a line can't apply together and would hit the applier's cryptic
+    # "edit lines are out of order". The ~1-2-context-line bracketing makes nearby hunks
+    # overlap, so catch it here with a CLEAR instruction: merge them into one hunk. Only
+    # fires on a genuine shared line (adjacent, non-sharing hunks are fine).
+    for _a in range(len(resolved) - 1):
+        _sA, _oA, _ = resolved[_a]
+        _endA = _sA + max(1, len(_oA)) - 1
+        _sB, _oB, _ = resolved[_a + 1]
+        if _sB <= _endA:
+            _endB = _sB + max(1, len(_oB)) - 1
+            return (f"✗ edit_file: two of your hunks OVERLAP — one covers up to line "
+                    f"{_endA} and the next starts at line {_sB}, so they share line(s) and "
+                    f"can't apply together. Merge them into ONE hunk: make its `old` the "
+                    f"single contiguous block from line {_sA} to line {max(_endA, _endB)} "
+                    f"(copy those real lines verbatim) with ALL the changes in its `new`. "
+                    f"(Two changes within a line or two of each other belong in ONE hunk; "
+                    f"keep SEPARATE hunks only for changes that don't share lines.)")
     from workflows.code import _extract_code_blocks, _apply_extracted_code
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])

@@ -1387,3 +1387,26 @@ def test_indent_parse_fail_retry_trusts_typed_spaces():
     assert r2.startswith("✓"), r2
     assert "typed spaces" not in r2                 # no retry: number-based already parsed
     assert "\n        y = 1" in ctx2["file_contents"]["m.py"]   # dedented to 8 (the number)
+
+
+def test_overlapping_hunks_get_clear_merge_reject():
+    """ckpt-156: cross-hunk ORDER is auto-sorted, but two hunks that SHARE a line can't
+    apply together — instead of the applier's cryptic 'edit lines are out of order', give a
+    clear instruction to merge them into one hunk. Far-apart hunks (any order) still apply."""
+    import core.native_tools as nt
+    src = "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    # hunk A covers lines 2-3, hunk B covers lines 3-4 → share line 3
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "edits": [
+        {"old": ["2 ⇥0|b = 2", "3 ⇥0|c = 3"], "new": ["0|b = 20", "0|c = 3"]},
+        {"old": ["3 ⇥0|c = 3", "4 ⇥0|d = 4"], "new": ["0|c = 30", "0|d = 4"]}]}, ctx))
+    assert r.startswith("✗") and "OVERLAP" in r and "ONE hunk" in r, r
+    assert "out of order" not in r                  # cryptic message replaced
+    # far-apart hunks given in REVERSED order apply cleanly (sort handles order)
+    ctx2 = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "edits": [
+        {"old": ["5 ⇥0|e = 5"], "new": ["0|e = 50"]},
+        {"old": ["1 ⇥0|a = 1"], "new": ["0|a = 10"]}]}, ctx2))
+    assert r2.startswith("✓"), r2
+    res = ctx2["file_contents"]["m.py"]
+    assert "a = 10" in res and "e = 50" in res
