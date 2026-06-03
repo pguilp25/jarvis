@@ -227,11 +227,18 @@ CODER_TOOLS = [
             "Per change: `old` = the EXACT existing block — copy the view line(s) VERBATIM, "
             "keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def setvalue`); the "
             "harness anchors on BOTH the line number AND the content (a stale number "
-            "self-corrects). `new` = the replacement as `INDENT|code` (the indent NUMBER after "
-            "the `⇥`, a pipe, then code with NO leading spaces — e.g. `4|def f():`, `8|return "
-            "x`; the harness re-emits the spaces). Put the WHOLE span you're changing in `old` "
-            "(don't strand part of the block). To INSERT, include a surrounding line in BOTH "
-            "old and new. To DELETE, new=[]. A rejection says exactly what to fix."),
+            "self-corrects). ALWAYS bracket your change with ~2 UNCHANGED lines above and ~2 "
+            "below — copy them verbatim into BOTH `old` and `new`. Two reasons: it makes the "
+            "match UNIQUE (no 'appears N times' / 'not found' rejects), and those real "
+            "surrounding lines SHOW you the exact indent to give your changed/new lines — read "
+            "the `⇥INDENT` of the line your code belongs under and reuse that number. `new` = the "
+            "replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a pipe, then code "
+            "with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness re-emits the "
+            "spaces from the NUMBER, so put the indent in the NUMBER, never as spaces in the "
+            "code — `0|    x` is WRONG, it means indent 0). Put the WHOLE span you're changing in "
+            "`old` (don't strand part of the block). To INSERT, just keep the bracketing context "
+            "lines unchanged and add your new lines between them. To DELETE, new=[the context "
+            "lines only]. A rejection says exactly what to fix."),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative path to edit"},
             "edits": {"type": "array", "description": "ALL your changes to this file in one batch — "
@@ -241,9 +248,9 @@ CODER_TOOLS = [
                           "old": {"type": "array", "items": {"type": "string"}},
                           "new": {"type": "array", "items": {"type": "string"}}}}},
             "old": {"type": "array", "items": {"type": "string"},
-                    "description": "single-edit shorthand: the EXACT existing lines, copied VERBATIM from your read (keep the `LINENO ⇥INDENT|` prefix). Use `edits` to batch several changes."},
+                    "description": "single-edit shorthand: the EXACT existing lines, copied VERBATIM from your read (keep the `LINENO ⇥INDENT|` prefix). Include ~2 UNCHANGED lines above and below the change so the match is unique and the surrounding indent is visible. Use `edits` to batch several changes."},
             "new": {"type": "array", "items": {"type": "string"},
-                    "description": "single-edit shorthand: the replacement as `INDENT|code` (no line number); [] to delete"},
+                    "description": "single-edit shorthand: the replacement as `INDENT|code` (indent in the NUMBER, code with no leading spaces; no line number) — re-include the same ~2 bracketing context lines unchanged; [] to delete"},
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
