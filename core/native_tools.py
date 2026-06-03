@@ -1082,10 +1082,24 @@ def _do_edit(args: dict, ctx: dict) -> str:
     # exists (so an unrelated SyntaxError isn't masked). An intentional dedent
     # `4|        x` parses, so it never reaches this path — number stays authoritative.
     _indent_autofixed = False
-    def _is_parse_reject(_res, _sk):
-        return path not in _res and any(
-            ("does NOT parse" in str(s)) or ("IndentationError" in str(s))
-            or ("SyntaxError" in str(s)) for s in _sk)
+    from workflows.code import _check_syntax as _csyn
+    def _result_is_good(_res):
+        # "good" = applied AND parses. Uses _check_syntax (tokenize+compile) — NOT just
+        # ast.parse — because ast.parse is lenient about a col-0 `return`/`yield`/`break`
+        # that compile() rejects: the applier's own ast-gate lets such a file INTO `_res`,
+        # so a plain "path not in _res" check would MISS the very `0|    return x` slip the
+        # retry exists to fix (audit ckpt-157). A pre-existing breakage (before also fails)
+        # is not this edit's fault → treated as good so we don't loop on it.
+        if path not in _res:
+            return False
+        if before is not None and _res[path] == before:
+            return True
+        if not (path.endswith(".py") or path.endswith(".pyi")):
+            return True            # non-Python: no parse gate applies → applied == good
+        ok = _csyn(path, _res[path])[0]
+        if not ok and before is not None and not _csyn(path, before)[0]:
+            return True
+        return ok
     def _has_indent_disagreement():
         for _sl, _ol, new_raw in resolved:
             for ln in new_raw:
@@ -1095,10 +1109,28 @@ def _do_edit(args: dict, ctx: dict) -> str:
                     if typed > 0 and typed != int(m.group(1)):
                         return True
         return False
-    if _is_parse_reject(result, skips) and _has_indent_disagreement():
+    if not _result_is_good(result) and _has_indent_disagreement():
         _r2, _s2 = _build_and_apply(True)
-        if path in _r2:                      # retry applied AND now parses
+        if _result_is_good(_r2):             # retry now parses (tokenize+compile)
             result, skips, _indent_autofixed = _r2, _s2, True
+
+    # Reconcile ctx["file_contents"] with the CHOSEN `result`. A failed retry leaves the
+    # dict holding the retry's content while `result` may be the first attempt — and an
+    # ast-accepted-but-compile-bad result would otherwise leave BROKEN content in the dict,
+    # making the reject's "file UNCHANGED — your view is current" a LIE (audit ckpt-157,
+    # pre-existing leak amplified by ckpt-154's don't-re-read wording). Reset to the pre-edit
+    # snapshot, then re-apply ONLY a good result. A non-good `result` still flows to the
+    # gate/skip logic below to produce the precise reject, but the file is genuinely unchanged.
+    ctx["file_contents"].clear(); ctx["file_contents"].update(_before_all)
+    if _result_is_good(result) and path in result:
+        ctx["file_contents"][path] = result[path]
+        _sb_rec = ctx.get("sandbox")
+        if _sb_rec is not None:
+            try: _sb_rec.write_file(path, result[path])
+            except Exception: pass
+    elif ctx.get("sandbox") is not None and before is not None:
+        try: ctx["sandbox"].write_file(path, before)   # ensure sandbox not left broken
+        except Exception: pass
 
     _seen: set = set()
     skips = [x for x in skips

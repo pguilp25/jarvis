@@ -1410,3 +1410,28 @@ def test_overlapping_hunks_get_clear_merge_reject():
     assert r2.startswith("✓"), r2
     res = ctx2["file_contents"]["m.py"]
     assert "a = 10" in res and "e = 50" in res
+
+
+def test_indent_retry_covers_col0_statement_and_no_leak_on_reject():
+    """ckpt-157 (bigger-audit follow-up): (a) the retry must fire for a col-0 `return`
+    slip — ast.parse ACCEPTS a module-level return but compile() rejects it, so the gate
+    is compile-based; (b) a genuine syntax error must leave file_contents UNCHANGED (the
+    reject says 'file UNCHANGED — view current', which must be TRUE)."""
+    import core.native_tools as nt, ast
+    # (a) col-0 return slip WITH a content change → retry trusts typed spaces → lands at 4
+    src = "def greet(name):\n    msg = 'hi'\n    return msg + name\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "old": [
+        "2 ⇥4|    msg = 'hi'", "3 ⇥4|    return msg + name"],
+        "new": ["4|msg = 'hi'", "0|    return msg.upper() + name"]}, ctx))
+    assert r.startswith("✓"), r
+    assert "typed spaces" in r
+    out = ctx["file_contents"]["m.py"]
+    assert "    return msg.upper() + name" in out
+    ast.parse(out)
+    # (b) genuine syntax error → clean reject, file_contents identical to src (no leak)
+    ctx2 = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py",
+        "old": ["3 ⇥4|    return msg + name"], "new": ["4|return ("]}, ctx2))
+    assert r2.startswith("✗"), r2
+    assert ctx2["file_contents"]["m.py"] == src, "LEAK: rejected content left in file_contents"
