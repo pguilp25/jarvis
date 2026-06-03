@@ -344,9 +344,15 @@ def extract_patch(inst_dir: Path) -> str:
     # F12 (audit 2026-05-24): switched from naming `.jarvis_sandbox/`
     # explicitly to a glob, so any `.jarvis_*` we add later is auto-
     # excluded from the patch.
+    # ckpt-152 (2026-06-03): the glob was `.jarvis_*` (underscore), which
+    # matched `.jarvis_sandbox/` but NOT the bare `.jarvis/` index dir —
+    # so `.jarvis/maps/embeddings.json` (hundreds of MB of float vectors,
+    # written into the repo by semantic_search) was swept into the patch:
+    # a26c325b shipped a 534 MB model_patch that poisoned the preds file.
+    # Drop the underscore so the glob covers `.jarvis` AND `.jarvis_*`.
     exclude_pathspecs = [
-        ":(exclude,glob).jarvis_*",
-        ":(exclude,glob).jarvis_*/**",
+        ":(exclude,glob).jarvis*",
+        ":(exclude,glob).jarvis*/**",
     ]
     try:
         _run(

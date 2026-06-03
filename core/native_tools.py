@@ -411,9 +411,21 @@ async def _do_read(args: dict, ctx: dict) -> str:
         from core.edit_diff import render_diff
         from tools.codebase import add_line_numbers
         cur = ctx.get("file_contents", {}).get(path)
-        if cur is None:
+        # An EMPTY file_contents entry is, in this codebase, a failed-load sentinel
+        # (`sandbox.load_file(fp) or read_file(...) or ""` collapses a non-resolving
+        # path to ""). Serving it as "current content" renders a single `1 ⇥0|` line
+        # and tells the coder "unchanged since you last saw it" — locking in a lie so
+        # it edits blind. Treat empty/whitespace-only as NO content: try a real sandbox
+        # reload, else fall through to _run_code_reads (actionable FILE NOT FOUND +
+        # similar-path suggestion). A genuinely empty source file also falls through —
+        # the normal read path has a dedicated "0 lines — empty file" message. (ckpt-152.)
+        if not (cur and cur.strip()):
             _sb0 = ctx.get("sandbox")
-            cur = _sb0.load_file(path) if _sb0 is not None else None
+            _re = _sb0.load_file(path) if _sb0 is not None else None
+            if _re and _re.strip():
+                cur = _re
+            else:
+                cur = None
         if cur is not None:
             _base = ctx.get("_first_seen", {}).get(path)
             _changed = _base is not None and _base != cur
