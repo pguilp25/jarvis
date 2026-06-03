@@ -674,14 +674,17 @@ def test_coder_prompts_ground_on_spec_literals():
 
 
 def test_native_prompt_has_indent_by_scope_reasoning():
-    """ckpt 69: gpt-oss intermittently emits a new method's `def` one level too
-    deep (8| instead of 4|) → nested → AttributeError. The native coder prompt must
-    require reasoning about indent-by-SCOPE (match the sibling in the target scope,
-    not the line above) BEFORE the edit."""
+    """ckpt 69 + ckpt-135: gpt-oss emits a `def` at the wrong indent → nested/ejected →
+    IndentationError/AttributeError. The native coder prompt must require reasoning about
+    a def's SCOPE number, match a SIBLING in the target scope, and (ckpt-135) warn BOTH
+    directions — under-indent (4→0 ejection) AND over-indent (0→4 nesting, the ba3abfb6
+    regression) — not just the col-0 case."""
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
     low = IMPLEMENT_NATIVE_PROMPT.lower()
-    assert "indent by scope" in low, "native prompt missing the indent-by-scope step"
+    assert "scope" in low, "native prompt missing the scope-number indent step"
     assert "sibling" in low, "native prompt must tell the coder to match a sibling's indent"
+    assert "over-indent" in low and "under-indent" in low, \
+        "indent reflex must warn BOTH directions (over- AND under-indent), not just col-0"
 
 
 def test_native_prompt_has_anti_over_elaboration_rule():

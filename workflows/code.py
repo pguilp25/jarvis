@@ -12986,20 +12986,17 @@ async def code_agent(state: AgentState) -> AgentState:
                     f"with 10 lines of context."
                 )
 
-            # Auto-inject relevant knowledge based on the task
-            from knowledge import get_auto_inject, list_knowledge
-            knowledge_text = get_auto_inject(task)
-            if knowledge_text:
-                context_parts.append(knowledge_text)
-
-            # List available knowledge topics
-            knowledge_topics = list_knowledge()
-            if knowledge_topics:
-                kl = ", ".join(knowledge_topics)
-                context_parts.append(
-                    f"AVAILABLE KNOWLEDGE (use [KNOWLEDGE: topic] to consult):\n"
-                    f"  {kl}"
-                )
+            # Knowledge auto-injection DISABLED (ckpt-135). The matcher injected a doc
+            # whenever ANY of its keywords appeared anywhere in the task text, and the
+            # app-building docs (Game Design / UI & Design / Project Planning Guidelines)
+            # have generic keywords (design, test, state, user…) that appear in essentially
+            # every problem statement — so EVERY backend bug-fix (ansible/openlibrary/
+            # qutebrowser) got irrelevant app/UI guidance in context (50/50/39 of the 50
+            # night-run instances). Pure prompt pollution that dilutes focus and nudges
+            # wrong framings. The explicit [KNOWLEDGE: topic] tool still works on demand;
+            # only the always-on auto-inject + topic-list dump are removed. Re-enable with a
+            # task-type gate (skip for SWE-bench/backend) + a precise matcher if needed.
+            pass
 
             context_parts.append(
                 "TOOLS — use in order, escalate only if you need more:\n"

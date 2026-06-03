@@ -1588,6 +1588,13 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         if _reason:
             thought_logger.write_header(model_id, f"coder round {rnd}")
             thought_logger.write_chunk(model_id, _reason)
+            # Also surface it (capped) in the instance-prefixed RUN log so the coder's
+            # reasoning is observable per-instance for offline audits — the thought_logger
+            # writes to separate per-model files and isn't started under swe_bench, so the
+            # CoT was effectively unobservable from the run log (ckpt-135). Full text still
+            # goes to thought_logger; this is the greppable tail.
+            status(f"  [native:{short}] 💭 {_reason[:400].replace(chr(10), ' ')}"
+                   + (" …" if len(_reason) > 400 else ""))
         _CAP = 1500
         _persist = _vis
         if _reason:
