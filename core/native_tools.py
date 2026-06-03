@@ -353,14 +353,31 @@ def _note_view(ctx: dict, path: str) -> None:
     ctx.setdefault("view_at", {})[path] = _view_stamp(ctx)
 
 
+def _str_or_err(args: dict, key: str, tool: str):
+    """Coerce a tool's primary string arg, or return (None, ✗msg) for a missing /
+    empty / NON-STRING value. A weak model that passes 5 / [] / null / true for a
+    string field must get a clean ✗ to react to — never crash the tool with a
+    TypeError/AttributeError downstream (.strip(), regex, a dict key). (ckpt-149
+    stability fuzz: 6 tools raised on wrong-typed args before this.)"""
+    v = args.get(key)
+    if isinstance(v, str) and "\x00" in v:
+        # a null byte crashes ripgrep / subprocess / compile() downstream with a
+        # ValueError; reject it up front as the invalid input it is.
+        return None, f"✗ {tool}: `{key}` contains a null byte (invalid). Re-issue with clean text."
+    if isinstance(v, str) and v.strip():
+        return v, None
+    return None, (f"✗ {tool}: `{key}` must be a non-empty string "
+                  f"(got {type(v).__name__}). Re-issue with a string {key}.")
+
+
 async def _do_read(args: dict, ctx: dict) -> str:
     # Reuse the text coder's [CODE:]/[VIEW:] executor: skeleton for huge files,
     # range expansion, the `LINENO:INDENT|content` prefix view, AND recording
     # viewed_versions so a following replace_lines anchors on what was just read.
     from core.tool_call import _run_code_reads
-    path = args.get("path", "")
-    if not path:
-        return "✗ read_file needs a path."
+    path, _e = _str_or_err(args, "path", "read_file")
+    if _e:
+        return _e
     s = args.get("start_line"); e = args.get("end_line")
     if (s is None) != (e is None):
         # Exactly one bound given → the model asked for a region but the bound it
@@ -639,7 +656,9 @@ def _actual_region_hint(cur_lines, start_line, old_list) -> str:
     `old`. Renders as `LINENO ⇥INDENT|code` (the read-view form). '' if we can't localize."""
     if not cur_lines:
         return ""
-    n = len([o for o in (old_list or []) if str(o).strip()]) or 1
+    if not isinstance(old_list, list):          # defensive (ckpt-149): tolerate non-list `old`
+        old_list = [] if old_list is None else [old_list]
+    n = len([o for o in old_list if str(o).strip()]) or 1
     anchor = None
     try:
         sl = int(start_line)
@@ -679,6 +698,12 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
     touched it, the symbol probably lives elsewhere (the f327e65d wrong-file bug).
     When we can localize the intended site, we APPEND the real current lines so a
     skeleton-only view isn't a dead end (see _actual_region_hint)."""
+    # Defensive (ckpt-149): old_raw is the RAW `old` straight from the call — may be
+    # a non-list (int/str/None) for a malformed edit; coerce so we never raise here.
+    if isinstance(old_raw, str):
+        old_raw = [old_raw]
+    elif not isinstance(old_raw, list):
+        old_raw = [] if old_raw is None else [str(old_raw)]
     # Strict-input cue: if `old` looks like it was pasted from a DIFF's +/- row
     # (`N:+ ` / `N:- `), that gutter is NOT editable input and isn't silently stripped —
     # tell the coder the canonical form instead of leaving it to guess. (audit pass-4.)
@@ -761,8 +786,16 @@ def _expand_indent_lines(lines: list) -> list:
     taken LITERALLY (so a real YAML/code line is never corrupted by a guessed transform). A
     leftover diff/whitespace gutter is NOT stripped — it simply won't match, and the reject
     explains how to re-send (see _do_edit)."""
+    # Defensive (ckpt-149): a caller may hand a non-list (int/str/None) or a list with
+    # non-string items; coerce so we never raise on `for ln in lines` / regex on a non-str.
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    elif not isinstance(lines, list):
+        lines = [] if lines is None else [str(lines)]
     out = []
     for ln in lines:
+        if not isinstance(ln, str):
+            ln = str(ln)
         # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation
         # (the harness's own marker, `(#hex)`-guarded); strip it so copying that line matches.
         ln = _APPEARS_TAIL_RE.sub('', ln)
@@ -785,7 +818,9 @@ def _do_edit(args: dict, ctx: dict) -> str:
     _extract/_apply path replace_lines uses — so a stale number can't misfire AND
     a non-unique match isn't ambiguous. DELETE: new=[]. INSERT: old=[line you add
     after], new=[that line, then the additions]."""
-    path = args.get("path", "")
+    path, _pe = _str_or_err(args, "path", "edit_file")
+    if _pe:
+        return _pe
     hunks = args.get("hunks")
     if not hunks:
         # ckpt-138: model-facing form is a single old->new block (no `hunks` array, no
@@ -816,9 +851,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
     # EDIT-COT grounding gate (flag-gated): reject unless the edit carries grounded
     # goal/traced/check — a guess can't quote a real line. Pure-insert = all hunks
     # have empty `old` (no existing line to quote → relax the quote-check).
-    _hk = args.get("hunks") or []
+    _hk = args.get("hunks") if isinstance(args.get("hunks"), list) else []
     _is_insert = bool(_hk) and all(
-        not any(str(o).strip() for o in (h.get("old") or []))
+        not any(str(o).strip()
+                for o in (h.get("old") if isinstance(h.get("old"), list) else []))
         for h in _hk if isinstance(h, dict))
     _cot_reject = _check_edit_cot(args, cur, _is_insert)
     if _cot_reject:
@@ -1016,10 +1052,12 @@ def _do_create(args: dict, ctx: dict) -> str:
     # coder uses for new files) so greenfield / new-module work is possible —
     # replace_lines can only edit existing lines.
     from workflows.code import _extract_code_blocks, _apply_extracted_code
-    path = args.get("path", "")
+    path, _pe = _str_or_err(args, "path", "create_file")
+    if _pe:
+        return _pe
     content = args.get("content", "")
-    if not path:
-        return "✗ create_file needs a path."
+    if not isinstance(content, str):     # tolerate a non-string content (list/int/None)
+        content = "" if content is None else str(content)
     if not str(content).strip():
         # Empty/whitespace content would write a 0-byte file and report "✓ Created
         # (1 lines)" — a silent no-op the model can't tell from real success.
@@ -1093,33 +1131,33 @@ def _do_create(args: dict, ctx: dict) -> str:
 
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
-    sym = args.get("symbol", "")
-    if not sym:
-        return "✗ find_refs needs a symbol."
+    sym, _e = _str_or_err(args, "symbol", "find_refs")
+    if _e:
+        return _e
     return await _run_refs_searches([sym], ctx.get("project_root", ""))
 
 
 async def _do_callers(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_dependency_lookup
-    tag = args.get("tag", "")
-    if not tag:
-        return "✗ find_callers needs a #tag (from an |appears N (#tag) annotation)."
+    tag, _e = _str_or_err(args, "tag", "find_callers")
+    if _e:
+        return _e + " (a #tag from an `|appears N (#tag)` annotation)."
     return await _run_dependency_lookup([tag], ctx.get("project_root", ""))
 
 
 async def _do_search(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_code_searches
-    pat = args.get("pattern", "")
-    if not pat:
-        return "✗ search_text needs a pattern."
+    pat, _e = _str_or_err(args, "pattern", "search_text")
+    if _e:
+        return _e
     return await _run_code_searches([pat], ctx.get("project_root", ""))
 
 
 def _do_purpose(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_purpose_lookups
-    path = args.get("path", "")
-    if not path:
-        return "✗ file_purpose needs a path."
+    path, _e = _str_or_err(args, "path", "file_purpose")
+    if _e:
+        return _e
     return _run_purpose_lookups([path], ctx.get("purpose_map") or "",
                                 ctx.get("project_root", ""))
 
@@ -1128,9 +1166,9 @@ async def _do_semantic(args: dict, ctx: dict) -> str:
     # Embedding search over the CODE (same path as the text loop) — no purpose map.
     from tools.code_index import _maps_dir, _load_all_code
     from tools.embeddings import semantic_retrieve
-    q = args.get("query", "")
-    if not q:
-        return "✗ semantic_search needs a query."
+    q, _e = _str_or_err(args, "query", "semantic_search")
+    if _e:
+        return _e
     project_root = ctx.get("project_root", "")
     if not project_root:
         return "✗ semantic_search needs a project_root."
@@ -1166,9 +1204,9 @@ async def _do_semantic(args: dict, ctx: dict) -> str:
 
 def _do_dependson(args: dict, ctx: dict) -> str:
     from core.exploration_tools import extract_dependencies
-    sym = args.get("symbol", "")
-    if not sym:
-        return "✗ depends_on needs a symbol name."
+    sym, _e = _str_or_err(args, "symbol", "depends_on")
+    if _e:
+        return _e
     return extract_dependencies(sym, ctx.get("project_root", ""))
 
 
@@ -1180,9 +1218,10 @@ def _do_run(args: dict, ctx: dict) -> str:
     where edits land; the bwrap sandbox is read-only/no-net but binds the venv
     (the repo's deps + pytest), so `python -c …` / `python -m pytest …` work."""
     from core.safe_exec import run_sandboxed
-    cmd = (args.get("command") or "").strip()
+    _cmdv = args.get("command")
+    cmd = _cmdv.strip() if isinstance(_cmdv, str) else ""
     if not cmd:
-        return ("✗ run_code needs a `command` — e.g. python -c \"<a check that "
+        return ("✗ run_code needs a `command` STRING — e.g. python -c \"<a check that "
                 "constructs the object, calls your changed code, and asserts the "
                 "expected result>\", or python -m pytest <path::test> -q.")
     sb = ctx.get("sandbox")

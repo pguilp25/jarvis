@@ -6203,7 +6203,7 @@ async def _auto_rag(
                     for base in node.bases:
                         if isinstance(base, ast.Name):
                             identifiers.add(base.id)
-        except SyntaxError:
+        except (SyntaxError, ValueError):   # ValueError = null bytes etc.
             # Partial code won't parse — fall back to regex
             calls = set(re.findall(r'(?<!\w)([a-zA-Z_]\w*)\s*\(', clean_code))
             identifiers = calls
@@ -6307,6 +6307,11 @@ def _check_syntax(filepath: str, content: str) -> tuple[bool, str]:
             pass  # incomplete input — not a real error, let compile() decide
         except IndentationError as e:
             return False, _make_error(e.lineno, e.offset, e.msg, lines, "IndentationError")
+        except ValueError as e:
+            # e.g. "source code string cannot contain null bytes" — compile() would
+            # raise the SAME ValueError (NOT a SyntaxError), so handle it here as a
+            # real, reportable syntax problem rather than letting it crash the caller.
+            return False, f"SyntaxError: {e} — remove the invalid character(s) and re-issue."
 
         # ── Step 2: compile() catches all other grammar-level syntax errors.
         try:
@@ -6315,6 +6320,9 @@ def _check_syntax(filepath: str, content: str) -> tuple[bool, str]:
         except SyntaxError as e:
             kind = type(e).__name__  # SyntaxError or IndentationError subclass
             return False, _make_error(e.lineno, e.offset, e.msg, lines, kind)
+        except ValueError as e:
+            # null bytes / out-of-range constructs raise ValueError, not SyntaxError.
+            return False, f"SyntaxError: {e} — remove the invalid character(s) and re-issue."
 
     elif ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
         # Use Node.js --check for JS/TS syntax validation
@@ -6382,7 +6390,7 @@ def _unreachable_after_jump(src: str) -> dict:
     import ast as _ast
     try:
         tree = _ast.parse(src)
-    except SyntaxError:
+    except (SyntaxError, ValueError):   # ValueError = null bytes etc.
         return {}
     lines = src.splitlines()
     bad: dict = {}
@@ -6416,7 +6424,7 @@ def _duplicate_adjacent_stmts(src: str) -> dict:
     import ast as _ast
     try:
         tree = _ast.parse(src)
-    except SyntaxError:
+    except (SyntaxError, ValueError):   # ValueError = null bytes etc.
         return {}
     lines = src.splitlines()
     bad: dict = {}
@@ -9698,7 +9706,7 @@ def _undefined_names_introduced(original: str, modified: str) -> set[str]:
     def _scan(src):
         try:
             tree = _ast.parse(src)
-        except SyntaxError:
+        except (SyntaxError, ValueError):   # ValueError = null bytes etc.
             return None, None, True  # unparseable → treat as skip
         bound = set(dir(_bi)); used = set(); star = False
         # match/case binding nodes (3.10+) — version-safe.
@@ -10293,14 +10301,14 @@ def _apply_extracted_code(
         parse_err = None
         try:
             _ast.parse(new_content)
-        except SyntaxError as e:
+        except (SyntaxError, ValueError) as e:   # ValueError = null bytes etc.
             parse_err = e
         if parse_err is not None:
             # Only blame the edit if the original parsed (or file is new).
             if original is not None:
                 try:
                     _ast.parse(original)
-                except SyntaxError:
+                except (SyntaxError, ValueError):
                     continue  # pre-existing breakage — not this edit's fault
             del result[fp]
             _revert_fp_apply(fp)
