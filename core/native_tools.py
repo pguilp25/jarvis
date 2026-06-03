@@ -941,6 +941,24 @@ def _do_edit(args: dict, ctx: dict) -> str:
             path, result[path], before, tool="edit_file",
             resend="re-send the corrected hunk")
         if _gate:
+            # ROUTE TO replace_lines (ckpt-137). The gate (unreachable / duplicate / parse)
+            # fires almost only on a WHOLE-BLOCK rewrite where the coder's hunk stranded the
+            # old `return` or re-emitted the anchor. replace_lines (a clean start..end swap)
+            # has a 0% reject rate on exactly these — so on a multi-line/def-body edit, hand
+            # the coder the precise replace_lines call instead of letting it re-loop hunks.
+            _old_total = sum(len(o) for _s, o, _n in resolved)
+            _is_block = _old_total >= 4 or any(
+                re.match(r'\s*(def|class|async def)\b', str(o))
+                for _s, ol, _n in resolved for o in ol)
+            if _is_block and resolved:
+                _start = resolved[0][0]
+                _end = max(s + len(o) - 1 for s, o, _n in resolved)
+                _gate += (f"\n↪ This is a whole-block rewrite (lines {_start}-{_end}). Instead of "
+                          f"patching with hunks, swap the WHOLE range cleanly: "
+                          f"replace_lines(path=\"{path}\", start_line={_start}, end_line={_end}, "
+                          f"new_content=<the entire corrected block as INDENT|code>). A range "
+                          f"swap can't strand the old return (unreachable) or duplicate the "
+                          f"anchor — which is what just rejected.")
             return _gate
         sb = ctx.get("sandbox")
         if sb is not None:
@@ -1686,11 +1704,19 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             if (isinstance(result_str, str) and result_str.startswith("✗")
                     and name != "run_code"):
                 _total_rejects += 1
-                # Observability (ckpt-134): surface WHY each edit was rejected — the
-                # reject text used to live only in the model's tool channel, so reject
-                # loops were invisible in the run log (the 2026-06-03 audit had to guess).
+                # Observability (ckpt-134/137): surface WHY each edit was rejected. The
+                # reject text used to live only in the model's tool channel. ckpt-137 fix:
+                # reject messages are DOUBLE-PREFIXED ("✗ edit_file NOT applied to {path}: ✗
+                # edit REJECTED — {path}: {reason}"), so the old [:110] cap cut off inside the
+                # redundant path wrapper and hid the real reason as "other". Strip the
+                # wrapper(s) — keep the text after the LAST "REJECTED —"/"NOT applied to … :"
+                # so the actual cause (parse/unreachable/duplicate/old-not-found) is logged.
                 _rj = result_str.split("\n", 1)[0]
-                status(f"  [native:{short}] round {rnd}: edit REJECTED — {_rj[:110]}")
+                for _mark in (" edit REJECTED — ", " NOT applied to "):
+                    if _mark in _rj:
+                        _rj = _rj.split(_mark)[-1]
+                _rj = re.sub(r'^[^:]{0,80}\.py[^:]*:\s*', '', _rj)  # drop a leading "{path}: "
+                status(f"  [native:{short}] round {rnd}: edit REJECTED — {_rj[:150]}")
                 # backstop: many DIFFERENT rejected edit calls (varied args evade the
                 # identical-3× check) → still stuck; fall over rather than burn the budget.
                 if _total_rejects >= 8:

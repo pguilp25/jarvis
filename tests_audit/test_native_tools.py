@@ -1249,3 +1249,22 @@ def test_old_not_found_reject_shows_actual_lines_for_recovery():
     r2 = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
         {"old": ["    return x + y - 1"], "new": ["    return x"]}]}, ctx))
     assert r2.startswith("✗") and "ACTUAL current lines" in r2 and "return x + y" in r2
+
+
+def test_block_reject_routes_to_replace_lines():
+    """ckpt-137: edit_file rejects 62% of the time (vs replace_lines 0%) — mostly the
+    post-edit gate on whole-block rewrites (stranded return = unreachable, duplicated
+    anchor). On such a multi-line/def-body reject, hand the coder the exact replace_lines
+    call (with the resolved start..end range) so it stops re-looping hunks."""
+    import os
+    os.environ.pop("JARVIS_EDIT_COT", None)
+    import core.native_tools as nt
+    src = "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n"   # clean baseline, no dead code
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {}, "files_changed": set()}
+    # rewrite the 4-line body so the result leaves code unreachable after a return
+    r = asyncio.run(nt._dispatch("edit_file", {"path": "m.py", "hunks": [
+        {"start_line": 2, "old": ["4|a = 1", "4|b = 2", "4|c = 3", "4|return a"],
+         "new": ["4|return 1", "4|dead1 = 1", "4|dead2 = 2"]}]}, ctx))
+    assert r.startswith("✗")
+    assert "replace_lines(" in r and "start_line=2" in r and "end_line=5" in r, \
+        "block reject must route to replace_lines with the resolved range"
