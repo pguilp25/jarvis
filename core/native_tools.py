@@ -1384,13 +1384,15 @@ async def _do_semantic(args: dict, ctx: dict) -> str:
     if not (out or "").strip():
         return ("✗ semantic_search returned nothing for that query. Try search_text "
                 "for an exact symbol/string, or rephrase the concept.")
-    if low.startswith("(semantic search unavailable") or low.startswith("(no code to search"):
-        _detail = out.strip().strip("()")
-        if _detail.lower().startswith("semantic search unavailable:"):
-            _detail = _detail.split(":", 1)[1].strip()
-        return (f"✗ semantic_search unavailable: {_detail}. "
-                f"Fall back to search_text (exact text/regex) or find_refs (a known "
-                f"symbol name) instead.")
+    # The raw unavailable message may be prefixed with `✗ `, `(`, or nothing, and may
+    # carry TEXT-protocol [SEARCH:]/[REFS:]/[PURPOSE:] advice the NATIVE coder can't use
+    # (ckpt-164: the old check only matched the `(`-prefixed form, so the ✗ form leaked
+    # through with wrong-tool advice). Catch any prefix and hand back the NATIVE tools.
+    _stripped = low.lstrip("✗ ()").strip()
+    if _stripped.startswith("semantic search unavailable") or _stripped.startswith("no code to search"):
+        return ("✗ semantic_search is unavailable (the embedding index couldn't be built). "
+                "Do NOT retry it — use search_text (exact text/regex), find_refs (a known "
+                "symbol name), or file_purpose (a file's API) instead.")
     if "no " in low and ("match" in low or "result" in low) and len(out.strip()) < 80:
         return (f"✗ semantic_search: {out.strip()} — 0 matches. Try search_text with "
                 f"an exact term, or rephrase the concept.")

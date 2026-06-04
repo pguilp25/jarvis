@@ -353,6 +353,16 @@ async def build_code_embeddings(
         except Exception as e:
             warn(f"    Embedding batch {i // batch_size + 1} failed: {e}")
             all_vecs.extend([[0.0] * 4096] * len(batch_texts))
+            # FAST-FAIL on auth/permission errors (ckpt-164): a 401/403/missing-key never
+            # recovers on retry, so looping all ~80 batches burns ~90s of a coder round
+            # before reporting unavailable. Abort now; zero-fill the rest so the all-zero
+            # guard below fires and the caller reports unavailable cleanly.
+            if any(s in str(e) for s in ("HTTP 401", "HTTP 403", "Authorization", "Forbidden", "not set")):
+                warn("    Embedding auth/permission error — aborting build (won't recover on retry).")
+                _rest = len(chunks) - len(all_vecs)
+                if _rest > 0:
+                    all_vecs.extend([[0.0] * 4096] * _rest)
+                break
     for chunk, vec in zip(chunks, all_vecs):
         chunk["vec"] = vec
     if _build_wholly_failed(chunks):

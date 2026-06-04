@@ -223,6 +223,22 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
         "--setenv", "TERM", "dumb",
         "--chdir", cwd if (cwd and os.path.isdir(cwd)) else "/tmp",
     ]
+    # Make the EDITED repo importable from run_code (ckpt-164). The native coder's
+    # run_code routes HERE (bwrap), not tools/sandbox.py:Sandbox.run — so the
+    # ckpt-162 PYTHONPATH fix never reached the real path and `import <repo_pkg>`
+    # still failed for src/lib-layout repos (ansible etc.), the exact case it claimed
+    # to fix. Set PYTHONPATH to the working dir + its common source layouts so the
+    # coder can `import` (and py_compile) the module it just edited. (cwd is bound RO.)
+    _ppr = []
+    _base = cwd if (cwd and os.path.isdir(cwd)) else ""
+    if _base:
+        _ppr.append(_base)
+        for _sub in ("src", "lib"):
+            _d = os.path.join(_base, _sub)
+            if os.path.isdir(_d):
+                _ppr.append(_d)
+    if _ppr:
+        argv += ["--setenv", "PYTHONPATH", ":".join(_ppr)]
     return argv
 
 
