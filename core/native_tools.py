@@ -126,11 +126,11 @@ CODER_TOOLS = [
             "region. You usually don't NEED to re-read a file you've already been shown "
             "(the step's injected file(s), one you read, or one you just edited — its diff "
             "IS the live state), because edit_file anchors on BOTH the line number you "
-            "copied AND the content, so a shifted view self-corrects. But if you're unsure "
-            "of the CURRENT state (e.g. after several edits), re-reading is SAFE and "
-            "useful: read_file returns the file's current content AND a diff of exactly "
-            "what changed since you first saw it — so you always have accurate, live line "
-            "numbers (a huge file comes back as a skeleton, not a full re-dump)."),
+            "copied AND the content, so a shifted view self-corrects. If you're genuinely "
+            "unsure of the CURRENT state after several edits, re-reading a SPECIFIC unseen "
+            "range is fine — but re-dumping a whole file you've already seen wastes your turn "
+            "budget; the diff after each edit already gives you accurate, live line numbers. "
+            "(A huge file comes back as a skeleton, not a full re-dump.)"),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "repo-relative file path"},
             "start_line": {"type": "integer", "description": "first line, 1-based (optional)"},
@@ -261,22 +261,25 @@ CODER_TOOLS = [
     {"type": "function", "function": {
         "name": "run_code",
         "description": (
-            "OPTIONAL: run a shell command in your sandbox (your edits are live; repo deps "
-            "+ pytest; read-only + no network) if you want to check a concrete fact you're "
-            "unsure of — e.g. python -c \"from pkg.mod import Thing; print(Thing().method(...))\" "
-            "to see a real value, or python -m pytest path/to/test_file.py -q to run existing "
-            "tests. exit 0 = ok (a passing assert prints nothing); exit≠0 = the output is the "
-            "real behaviour. Not required — your main job is to TRACE the code and reason it "
-            "through (see HOW TO THINK)."),
+            "OPTIONAL: run a shell command in your sandbox (your edits are live; read-only + "
+            "no network; a MINIMAL python — the standard library only, NOT every framework dep) "
+            "to check ONE concrete fact — e.g. python -c \"from pkg.mod import Thing; "
+            "print(Thing().method(...))\" to see a real value. Prefer a tiny targeted python -c "
+            "over a broad `pytest` run: a full test run usually hits ModuleNotFoundError on an "
+            "un-installed dep (PyQt5, jinja2, web, test plugins) — that is an ENVIRONMENT limit, "
+            "NOT your bug, and reacting to it (editing imports, creating stub modules) corrupts "
+            "your patch. exit 0 = ok (a passing assert prints nothing); exit≠0 = the output is "
+            "the real behaviour. Not required — TRACE-and-reason is the main path (see HOW TO THINK)."),
         "parameters": {"type": "object", "properties": {
-            "command": {"type": "string", "description": "shell command, e.g. python -c \"...\" or python -m pytest <path> -q"},
+            "command": {"type": "string", "description": "shell command — prefer python -c \"...\" for one targeted fact; a single python -m pytest <path::test> only if it doesn't import a framework dep the minimal sandbox lacks"},
         }, "required": ["command"]},
     }},
     {"type": "function", "function": {
         "name": "finish",
         "description": (
             "Call ONLY when the edit is complete and you've verified it does what the "
-            "step asked — ideally by run_code, not just by reading. Ends the task."),
+            "step asked — by a targeted run_code check OR a careful re-trace of the spec's "
+            "example. Ends the task."),
         "parameters": {"type": "object", "properties": {
             "summary": {"type": "string", "description": "one line: what you changed"},
         }, "required": []},
