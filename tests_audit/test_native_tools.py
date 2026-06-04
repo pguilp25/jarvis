@@ -500,6 +500,35 @@ def test_create_file_missing_path_no_crash():
         _cleanup(root)
 
 
+def test_create_file_blocks_import_shims_and_new_toplevel_pkg():
+    # ckpt-167: after a run_code ModuleNotFoundError on a missing dep/framework module
+    # (web, infogami, yaml…), the weak coder tries to manufacture a stub package — that
+    # junk pollutes the patch and breaks `git apply` in the real env (regressed a PASSING
+    # instance, 4a5d2a7d ✓→broken). create_file must refuse import-shims while STILL
+    # allowing genuine new files inside existing packages.
+    ctx, rel, root = _mk_ctx()
+    try:
+        sbdir = ctx["sandbox"].sandbox_dir
+        # (2) DYNAMIC — a module run_code just failed to import → refuse the shim
+        ctx["_failed_imports"] = {"web"}
+        out = _disp("create_file", {"path": "web/__init__.py", "content": "x=1\n"}, ctx)
+        assert out.startswith("✗") and "web" in out and "shim" in out, out
+        ctx.pop("_failed_imports", None)
+        # (4) NEW top-level package not in the repo → refuse (no failed-import needed)
+        out2 = _disp("create_file", {"path": "infogami/core/x.py", "content": "x=1\n"}, ctx)
+        assert out2.startswith("✗") and "top-level" in out2, out2
+        # (3) root module shadowing a dep → refuse
+        out3 = _disp("create_file", {"path": "yaml.py", "content": "x=1\n"}, ctx)
+        assert out3.startswith("✗") and "yaml" in out3, out3
+        # LEGIT — a genuinely new file INSIDE an existing package must still work
+        os.makedirs(os.path.join(sbdir, "pkg"))
+        out4 = _disp("create_file",
+                     {"path": "pkg/newmod.py", "content": "def f():\n    return 1\n"}, ctx)
+        assert out4.startswith("✓ Created"), out4
+    finally:
+        _cleanup(root)
+
+
 def test_created_file_is_then_editable():
     # after create_file, the file is "viewed" so replace_lines can edit it
     ctx, rel, root = _mk_ctx()

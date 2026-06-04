@@ -1258,28 +1258,54 @@ def _do_create(args: dict, ctx: dict) -> str:
     path, _pe = _str_or_err(args, "path", "create_file")
     if _pe:
         return _pe
-    # PATH CONTAINMENT (ckpt-166): a new file MUST live inside the project. Absolute
-    # paths / `../` escapes, or a top-level module that shadows a stdlib / common
-    # third-party package (a root `yaml.py`, `jinja2.py`, …), are the signature of the
-    # missing-dep rabbit-hole — the coder manufacturing a shim to "satisfy" an import
-    # the smoke sandbox lacks. That junk leaks straight into the shipped patch (it cost
-    # an instance on the ckpt-165 night run). Reject it so the patch stays clean.
-    from os.path import isabs, normpath
+    # PATH CONTAINMENT + IMPORT-SHIM GUARD (ckpt-166/167). A new file MUST live inside
+    # the project AND must not be an import-shim. The weak coder, after a run_code
+    # ModuleNotFoundError on a missing dep/framework module (web, infogami, yaml, PyQt5…),
+    # tries to "satisfy" the import by manufacturing a stub package (web/__init__.py,
+    # infogami/…) or a root module (yaml.py). That junk pollutes the patch and breaks
+    # `git apply` in the real env — it regressed a PASSING instance (4a5d2a7d ✓→broken,
+    # ckpt-166: shipped web/__init__.py + an infogami/ create → apply_failed). Block it.
+    from os.path import isabs, normpath, exists, join
+    import sys as _sys
     _pn = path.replace("\\", "/").strip()
+    # (1) escape — absolute or ../ outside the project
     if isabs(_pn) or _pn.startswith("../") or "/../" in _pn or normpath(_pn).startswith(".."):
         return (f"✗ create_file refused: {path} is outside the project. Use a project-relative "
                 f"path (no leading '/' or '../').")
-    if "/" not in _pn.strip("/") and _pn.endswith(".py"):   # single segment → repo ROOT
-        import sys as _sys
-        _name = _pn.rsplit("/", 1)[-1][:-3]
-        _shadow = set(getattr(_sys, "stdlib_module_names", set())) | {
-            "yaml", "jinja2", "jinja", "PyQt5", "PyQt6", "web", "django", "numpy", "scipy",
-            "pandas", "requests", "six", "pytest", "setuptools", "lxml", "sqlalchemy", "resolvelib"}
-        if _name in _shadow:
-            return (f"✗ create_file refused: a root-level `{_pn}` would SHADOW the `{_name}` "
-                    f"module — this is never a real fix. If a run_code `import {_name}` failed, "
-                    f"that is an ENVIRONMENT limit of the smoke sandbox, NOT something to patch by "
-                    f"creating a stub module. Edit the real target file for your step instead.")
+    _segs = [s for s in _pn.split("/") if s and s != "."]
+    _topseg = _segs[0] if _segs else _pn
+    _topname = _topseg[:-3] if _topseg.endswith(".py") else _topseg
+    # project/sandbox base — to tell a NEW top-level package from an existing one
+    _sb0 = ctx.get("sandbox")
+    _base = (getattr(_sb0, "sandbox_dir", "") or "") if _sb0 is not None else ""
+    _base = _base or (ctx.get("project_root") or "")
+    _base_ok = bool(_base) and exists(_base)
+    _top_exists = _base_ok and exists(join(_base, _topseg))
+    # (2) DYNAMIC: the coder just failed to import this top module in run_code → it is
+    # shimming it. Highest-confidence signal, near-zero false positive.
+    if _topname in (ctx.get("_failed_imports") or set()):
+        return (f"✗ create_file refused: `{_pn}` would shim `{_topname}`, which run_code just "
+                f"failed to import. That ModuleNotFoundError is an ENVIRONMENT limit of the smoke "
+                f"sandbox, NOT a missing file — the REAL test env has `{_topname}`. Do NOT create "
+                f"it; edit your assigned target file instead.")
+    # (3) STATIC: a module (or its top package) shadowing stdlib/common deps that isn't
+    # already in the repo → a shim even if run_code was never called.
+    _shadow = set(getattr(_sys, "stdlib_module_names", set())) | {
+        "yaml", "jinja2", "jinja", "PyQt5", "PyQt6", "web", "django", "numpy", "scipy",
+        "pandas", "requests", "six", "pytest", "setuptools", "lxml", "sqlalchemy", "resolvelib"}
+    if _topname in _shadow and not _top_exists:
+        return (f"✗ create_file refused: `{_pn}` would create `{_topseg}`, shadowing the "
+                f"`{_topname}` module (not present in the repo). This is the missing-dependency "
+                f"shim rabbit-hole, never a real fix. Edit your assigned target file instead.")
+    # (4) NEW TOP-LEVEL PACKAGE: a NESTED new file whose top-level dir is NOT in the repo
+    # (e.g. web/__init__.py with no web/ package). A fix adds files to EXISTING packages;
+    # a brand-new top-level package is the shim/scratch pattern. Only enforced when the
+    # project base is visible (else we can't distinguish new from existing — e.g. tests).
+    if _base_ok and len(_segs) > 1 and not _top_exists:
+        return (f"✗ create_file refused: `{_pn}` would create a NEW top-level package "
+                f"`{_topseg}/` that isn't in the project. A fix adds files to EXISTING packages; "
+                f"a brand-new top-level package is the import-shim/scratch pattern. Put a genuinely "
+                f"new module inside an existing package, or edit your assigned target file.")
     content = args.get("content", "")
     if not isinstance(content, str):     # tolerate a non-string content (list/int/None)
         content = "" if content is None else str(content)
@@ -1498,6 +1524,12 @@ def _do_run(args: dict, ctx: dict) -> str:
     _imp = _re.search(r"No module named ['\"]([\w.]+)['\"]", out)
     if _imp:
         _mod = _imp.group(1).split('.')[0]
+        # Record it so create_file can REFUSE a shim for this module (ckpt-167): the
+        # weak coder ignores the prose below and tries to manufacture a stub package
+        # (web/__init__.py, infogami/…) which pollutes the patch and breaks `git apply`
+        # in the real env (4a5d2a7d ✓→broken on ckpt-166). The applier-side block is
+        # the safety net the prose alone didn't provide.
+        ctx.setdefault("_failed_imports", set()).add(_mod)
         return (f"⚠ run_code: `import {_mod}` failed (ModuleNotFoundError). The smoke-check "
                 f"sandbox has python + pytest + yaml/numpy/scipy/pandas/requests, but NOT every "
                 f"third-party package. If `{_mod}` is a third-party dependency (i.e. NOT a file you "
