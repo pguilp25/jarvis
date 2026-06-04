@@ -110,9 +110,13 @@ OPENROUTER_MODELS = {
 # Models that ALWAYS route via OpenRouter regardless of NVIDIA_API_KEY
 # presence — NIM endpoints for these are unresponsive 2026-05-18.
 OPENROUTER_FORCED = {
-    "deepseek-v4-flash",
-    "minimax-m2.5",
-    "gpt-oss-120b",   # coder: route OR :free FIRST, not NIM (NIM 502s on big prompts)
+    # deepseek-v4-flash REMOVED from forced-OR (ckpt-174): OR :free returns "No
+    # endpoints found" (dead pool) — it 404'd EVERY call on the ckpt-173 run, a dead
+    # planner that forced slow cascades. With the new NVIDIA key, NIM serves it
+    # (deepseek-ai/deepseek-v4-flash → 200, verified), so let it route to NIM.
+    "minimax-m2.5",   # NOT on NIM at all (404) — only OR :free (also dead); stays here
+                      # (fails fast → cascade). TODO: replace in PLAN_MODELS, it's dead weight.
+    "gpt-oss-120b",   # coder: route OR FIRST (now PAID DeepInfra@bf16 pin), not NIM
     "qwen3-coder",    # text-coder fallback on OR :free (instant-429 fast failover)
 }
 
