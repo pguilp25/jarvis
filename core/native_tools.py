@@ -233,8 +233,8 @@ CODER_TOOLS = [
             "— copy them verbatim into BOTH `old` and `new`: it makes the match UNIQUE (no "
             "'appears N times' / 'not found' rejects) and the real surrounding lines SHOW you "
             "the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
-            "But two changes within a line or two of each other go in ONE hunk — don't let "
-            "separate hunks' context lines OVERLAP (overlapping hunks can't apply together). "
+            "Nearby hunks may share those context lines — that's fine, they're merged; the only "
+            "thing to avoid is two hunks CHANGING the same line. "
             "`new` = the replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a "
             "pipe, then code with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness "
             "re-emits the spaces FROM THE NUMBER, so put indent in the NUMBER, never as spaces in "
@@ -1031,24 +1031,41 @@ def _do_edit(args: dict, ctx: dict) -> str:
     # with "edit lines out of order" and making it retry — that retry-loop is a
     # top cause of round pile-up.
     resolved.sort(key=lambda t: t[0])
-    # OVERLAP guard (ckpt-156): cross-hunk ORDER is handled (we just sorted), but two
-    # hunks that SHARE a line can't apply together and would hit the applier's cryptic
-    # "edit lines are out of order". The ~1-2-context-line bracketing makes nearby hunks
-    # overlap, so catch it here with a CLEAR instruction: merge them into one hunk. Only
-    # fires on a genuine shared line (adjacent, non-sharing hunks are fine).
-    for _a in range(len(resolved) - 1):
-        _sA, _oA, _ = resolved[_a]
-        _endA = _sA + max(1, len(_oA)) - 1
-        _sB, _oB, _ = resolved[_a + 1]
-        if _sB <= _endA:
-            _endB = _sB + max(1, len(_oB)) - 1
-            return (f"✗ edit_file: two of your hunks OVERLAP — one covers up to line "
-                    f"{_endA} and the next starts at line {_sB}, so they share line(s) and "
-                    f"can't apply together. Merge them into ONE hunk: make its `old` the "
-                    f"single contiguous block from line {_sA} to line {max(_endA, _endB)} "
-                    f"(copy those real lines verbatim) with ALL the changes in its `new`. "
-                    f"(Two changes within a line or two of each other belong in ONE hunk; "
-                    f"keep SEPARATE hunks only for changes that don't share lines.)")
+    # OVERLAP handling (ckpt-156 → ckpt-158): all hunks anchor on the file as it is BEFORE
+    # any of them apply, so two hunks SHARING only UNCHANGED context lines are harmless —
+    # the ~1-2-context-line bracketing makes nearby hunks overlap like this all the time.
+    # MERGE such hunks (dedupe the shared context) so they apply as one contiguous block
+    # (the applier's flat op-list otherwise chokes on the duplicated line). REJECT only the
+    # genuine conflict: two hunks that both CHANGE the same line (nonsensical) — or one fully
+    # nested in another. (User: "it just needs to not overlap a CHANGED line.")
+    _merged = []
+    for _h in resolved:
+        if not _merged:
+            _merged.append(list(_h)); continue
+        _sA, _oA, _nA_raw = _merged[-1]
+        _sB, _oB, _nB_raw = _h
+        _endA = _sA + len(_oA) - 1
+        if _sB > _endA:
+            _merged.append(list(_h)); continue                 # disjoint → separate hunk
+        _endB = _sB + len(_oB) - 1
+        _ov = _endA - _sB + 1                                   # shared old-line count
+        _nA = _expand_indent_lines(_nA_raw); _nB = _expand_indent_lines(_nB_raw)
+        _shared = _oA[-_ov:]
+        _conflict = (
+            _endB <= _endA                                      # B fully nested in A
+            or _oB[:_ov] != _shared                             # shared old text disagrees
+            or len(_nA) < _ov or _nA[-_ov:] != _shared          # A CHANGED the shared region
+            or len(_nB) < _ov or _nB[:_ov] != _shared)          # B CHANGED the shared region
+        if _conflict:
+            return (f"✗ edit_file: two of your hunks both change the SAME line(s) around line "
+                    f"{_sB} — that's a real conflict (overlapping CHANGES can't both apply). "
+                    f"Make ONE hunk for that region: `old` = the contiguous block from line "
+                    f"{_sA} to line {max(_endA, _endB)} (copy those real lines verbatim), with "
+                    f"all the changes in its `new`. (Sharing only UNCHANGED context lines is "
+                    f"fine — this fires only because a CHANGED line is shared.)")
+        # context-only overlap → dedupe the shared lines and fuse into one hunk
+        _merged[-1] = [_sA, _oA + _oB[_ov:], _nA_raw + _nB_raw[_ov:]]
+    resolved = _merged
     from workflows.code import _extract_code_blocks, _apply_extracted_code
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])
@@ -1196,8 +1213,9 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"view self-corrects). For your next change here, COPY the relevant line "
                 f"from your view/this diff VERBATIM as `old` (keep its `LINENO ⇥INDENT|` so "
                 f"it anchors); write `new` as `INDENT|code`. Do NOT paste a raw `LINENO:+/- "
-                f"` diff row. If you lose track of the current state, you CAN read_file "
-                f"{path} again — it returns the current content + a diff of what changed.\n"
+                f"` diff row. You do NOT need to read_file again — your earlier view + this "
+                f"diff IS {path}'s current state (read a range only for a region you've truly "
+                f"never seen).\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).

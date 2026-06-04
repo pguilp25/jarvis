@@ -9664,34 +9664,45 @@ def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
     remaining edit. (f327: removed `_is_fqcn`'s def but left a call → NameError;
     this points at the call line so the fix is a local edit, not a hunt.)"""
     import re as _re
-    mod_lines = modified.split("\n")
     word = _re.compile(rf'(?<![\w.]){_re.escape(name)}(?![\w])')
     defpat = _re.compile(rf'^\s*(?:async\s+def|def|class)\s+{_re.escape(name)}\b')
-    uses = []
-    for i, ln in enumerate(mod_lines, 1):
-        if word.search(ln) and not defpat.match(ln):
-            uses.append((i, ln.strip()))
     def_re = _re.compile(
         rf'^\s*(?:async\s+def|def|class)\s+{_re.escape(name)}\b'
         rf'|^\s*{_re.escape(name)}\s*=(?!=)', _re.M)
     removed_def = bool(def_re.search(original)) and not bool(def_re.search(modified))
+
+    def _view(i, ln):
+        # COPY-ABLE view line `LINENO ⇥INDENT|<real spaces>code` — the exact form the
+        # coder pastes as `old`, so it can build the use-site hunks WITHOUT re-reading
+        # (the use-sites are often OUTSIDE its current window — bigger-audit finding D).
+        ind = len(ln) - len(ln.lstrip(' '))
+        return f"{i} ⇥{ind}|{' ' * ind}{ln.rstrip()}".rstrip()
+
+    # Locate use-sites in the CURRENT file (original — the edit was reverted, so its line
+    # numbers are what the coder will edit). Fall back to the proposed `modified` for the
+    # rarer "you added a use of an undefined name" case (that line is the coder's own new code).
+    src_lines, src_label = original.split("\n"), "current"
+    uses = [(i, ln) for i, ln in enumerate(src_lines, 1)
+            if word.search(ln) and not defpat.match(ln)]
+    if not uses:
+        src_lines = modified.split("\n")
+        uses = [(i, ln) for i, ln in enumerate(src_lines, 1)
+                if word.search(ln) and not defpat.match(ln)]
     head = (f"`{name}`: you REMOVED its definition but it's still USED"
             if removed_def else f"`{name}` is used but defined/imported nowhere")
     if removed_def:
-        # Name WHERE the def was, so the coder can write the removal hunk too.
         for _di, _ln in enumerate(original.split("\n"), 1):
             if def_re.match(_ln):
-                head += f" (its def was at line {_di})"
+                head += f"; its def is at line {_di}: `{_ln.strip()[:64]}` (remove that too)"
                 break
     if uses:
-        # The reject now tells the coder to fix EVERY use-site as a hunk in ONE
-        # batch — so list them ALL (a truncated list → partial batch → the gate
-        # loops). Cap generously for a pathological high-fanout name only.
+        # List ALL use-sites as copy-able view lines (truncating → partial batch → the
+        # gate loops). Cap generously for a pathological high-fanout name only.
         _cap = 15
-        shown = "; ".join(f"line {ln}: `{txt[:64]}`" for ln, txt in uses[:_cap])
-        head += f" at {shown}"
+        block = "\n".join("     " + _view(i, ln) for i, ln in uses[:_cap])
+        head += (". Copy each use-site line VERBATIM as `old` (no re-read needed):\n" + block)
         if len(uses) > _cap:
-            head += f" (+{len(uses) - _cap} more — all in your current view, no re-read needed)"
+            head += f"\n     (+{len(uses) - _cap} more use-site(s) — all in the file you already hold)"
     return head
 
 
