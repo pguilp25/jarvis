@@ -643,7 +643,9 @@ def test_native_prompt_tools_match_schema():
     coder."""
     import re
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
-    named = set(re.findall(r'•\s*(\w+)\(', IMPLEMENT_NATIVE_PROMPT))
+    # Tool bullets start a line as `  - name(` or `  • name(` — anchor on the
+    # line-start bullet so trace examples like `open(` mid-sentence aren't matched.
+    named = set(re.findall(r'(?m)^\s*[-•]\s*(\w+)\(', IMPLEMENT_NATIVE_PROMPT))
     schema = {t["function"]["name"] for t in CODER_TOOLS}
     assert named == schema, f"native prompt vs schema drift: only-in-prompt={named-schema}, only-in-schema={schema-named}"
 
