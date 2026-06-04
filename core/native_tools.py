@@ -1309,6 +1309,16 @@ def _do_create(args: dict, ctx: dict) -> str:
                 f"`{_topseg}/` that isn't in the project. A fix adds files to EXISTING packages; "
                 f"a brand-new top-level package is the import-shim/scratch pattern. Put a genuinely "
                 f"new module inside an existing package, or edit your assigned target file.")
+    # (5) SCRATCH TEST (ckpt-172): a NEW root-level test_*.py / *_test.py is the coder
+    # writing its OWN verification test. It is never graded (the real tests are separate
+    # and hidden) and it pollutes the shipped patch (b748edea leaked a root test_multipart.py).
+    # Steer to run_code instead of committing a throwaway test.
+    _bn = _segs[-1] if _segs else _pn
+    if len(_segs) == 1 and _bn.endswith(".py") and (_bn.startswith("test_") or _bn[:-3].endswith("_test")):
+        return (f"✗ create_file refused: `{_pn}` is a scratch verification test at the repo root. "
+                f"Your own test is NOT graded (the real tests are separate) and it pollutes the "
+                f"patch. To CHECK your edit, use run_code with an inline `python -c \"...\"` "
+                f"assertion instead of committing a test file.")
     content = args.get("content", "")
     if not isinstance(content, str):     # tolerate a non-string content (list/int/None)
         content = "" if content is None else str(content)
