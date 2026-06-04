@@ -217,6 +217,25 @@ class Sandbox:
         Never raises.
         """
         CAP = 10000
+        # Make the EDITED repo importable from run_code (ckpt-162). The coder kept
+        # trying to `import <repo_module>` to verify an edit and failing — the
+        # subprocess had no PYTHONPATH to the sandbox, so even a pure-python module
+        # it had just edited wouldn't import. Prepend the sandbox root + the common
+        # source layouts (`lib/` for ansible-style, `src/` for src-layout) so
+        # `import <pkg>` resolves by PATH against the edited tree. (Third-party deps
+        # still come from the parent venv — this only fixes path resolution, not a
+        # missing yaml/jinja2; the coder must NOT edit source to stub those.)
+        env = dict(os.environ)
+        _roots = [str(self.sandbox_dir)]
+        for _sub in ("lib", "src"):
+            _d = self.sandbox_dir / _sub
+            if _d.is_dir():
+                _roots.append(str(_d))
+        _existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(_roots) + (os.pathsep + _existing if _existing else "")
+        # Don't litter the sandbox with __pycache__ (keeps the tree = the patch, and
+        # sidesteps the coder's "py_compile can't write bytecode" rabbit hole).
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             proc = subprocess.run(
                 cmd,
@@ -225,6 +244,7 @@ class Sandbox:
                 text=True,
                 cwd=str(self.sandbox_dir),
                 timeout=timeout,
+                env=env,
             )
             output = (proc.stdout or "") + "\n" + (proc.stderr or "")
             if len(output) > CAP:
