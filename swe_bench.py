@@ -59,7 +59,7 @@ try:
     _settings_file = Path.home() / ".jarvis" / "settings.json"
     if _settings_file.exists():
         _saved = json.loads(_settings_file.read_text(encoding="utf-8"))
-        for _k in ("NVIDIA_API_KEY", "LIGHTNING_API_KEY", "DEEPINFRA_API_KEY", "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_API_KEYS"):
+        for _k in ("NVIDIA_API_KEY", "LIGHTNING_API_KEY", "DEEPINFRA_API_KEY", "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_API_KEYS", "MISTRAL_API_KEY"):
             _v = _saved.get(_k, "")
             if _v:
                 os.environ[_k] = _v
