@@ -8824,7 +8824,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # BOTH improves the strongest baseline AND merges in the best of the others
     # (see the re-engineered MERGE_PROMPT_TEMPLATE). This roughly halves the
     # planning wall-clock that was timing instances out.
-    step("Merger: GLM-5.1 improving + merging Layer-1 plans into the final plan...")
+    step("Merger: mistral/medium improving + merging Layer-1 plans into the final plan...")
 
     preloaded_research = _format_research_cache(research_cache)
 
@@ -9341,7 +9341,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
 
     status(f"Phase 2: final plan = {len(best_plan)} chars")
     success(f"Phase 2 complete ({mode_label}, {len(research_cache)} cached lookups)")
-    _wlog.save_final_plan(best_plan, merger_model=merger_result.get("model", "nvidia/glm-5.1"))
+    _wlog.save_final_plan(best_plan, merger_model=merger_result.get("model", "mistral/medium"))
     _wlog.phase_end("plan", mode_label, chars=len(best_plan),
                     research_cache_entries=len(research_cache))
     return best_plan, research_cache

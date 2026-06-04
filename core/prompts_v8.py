@@ -1638,8 +1638,11 @@ Q-IMPACT (always) — who else depends on the line you're changing?
         this STEP, or note `MISSED SITE: <file>:<func>` in [think].
       • BEHAVIOUR change: another caller or test may pin the old result. Make the
         change as NARROW as the failing case needs — not a function rewrite.
-    Stay in scope: edit only the STEP's file(s). A related site elsewhere →
-    `MISSED SITE: <file>:<func>` in [think]; let the reviewer decide.
+    Stay in scope, BUT a caller your change BREAKS (e.g. a call site of a
+    signature you changed) must be fixed even if it's in another file — there is
+    NO reviewer after you, so a half-fixed change ships broken. Fix the breaking
+    site; note only a genuinely SEPARATE concern as `MISSED SITE: <file>:<func>`
+    in [think] (it won't be auto-fixed — you are the last gate).
 
 
 ## Conditional pre-edit checks
@@ -1664,8 +1667,8 @@ Q-LITERAL (if changing an assertable string)
 
 Q-CODEC (if editing a parser, serializer, encoder, or decoder)
     The inverse path almost always needs the matching change.
-    List both in [think]. Fix both, or write
-    `MISSED SITE: <other file>:<func>` in [think] for the reviewer.
+    List both in [think] and fix BOTH — there is no reviewer after you to catch
+    the unfixed half.
 
 
 ## Completion
@@ -1701,9 +1704,9 @@ shipping.
 
     `[think]` — your primary reasoning channel. Use it for the
         Q-checks above, for the post-edit verification trace,
-        and for `MISSED SITE: <file>:<func> — <why>` notes
-        (which the reviewer reads to decide whether to address
-        the missed site or accept it as out-of-scope).
+        and for `MISSED SITE: <file>:<func> — <why>` notes for a
+        genuinely separate concern (there is no reviewer — a site
+        your change BREAKS you must fix yourself, not note here).
 
     `[REVERT FILE: path]` — undoes the last edit you landed on
         `path`. Use after `[STOP]` when the next round's read
