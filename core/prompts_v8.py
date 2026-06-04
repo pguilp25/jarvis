@@ -1047,23 +1047,30 @@ runtime needs the closing fence to extract.
       Right: STEP 1: Fix the off-by-one slice. STEP 2: Add the
              None guard (or out-of-scope, see EDGE CASES).
              → Each STEP fails or passes independently.
-    - EVERY STEP MUST LEAVE THE CODE RUNNABLE. The coder applies
-      steps one at a time and each is parse-/NameError-checked, so a
-      step that leaves the code broken (calls a symbol it just
-      deleted, uses a name not yet defined) CANNOT pass — it is not
-      "independently-failable", it is impossible. The classic trap:
-      REMOVING a symbol and REWIRING its callers are ONE atomic unit,
-      never separate steps.
+    - EVERY STEP MUST LEAVE THE CODE RUNNABLE, and a REPLACEMENT IS ONE
+      STEP. The coder applies steps one at a time and each is parse-/
+      NameError-checked, so a step that leaves the code broken (calls a
+      symbol it just deleted, uses a name not yet defined) CANNOT pass —
+      it is not "independently-failable", it is impossible. The classic
+      trap: splitting a REPLACEMENT — removing a symbol and rewiring its
+      callers — across separate steps. When a change REPLACES something
+      (swap an implementation, rename/move a symbol, remove a helper whose
+      callers must now use a different one), put the removal, the new code,
+      AND every caller update in ONE step.
         Wrong: STEP 1 "remove helper `_is_fqcn`"; STEP 3 "update its
                caller". → After STEP 1 the caller calls a deleted
-               function → NameError → STEP 1 can never land.
-        Right: order changes so every intermediate state runs —
-               ADD the replacement → REWIRE all callers to it →
-               REMOVE the old symbol LAST; or do remove+rewire in ONE
-               step. Before a step that DELETES or RENAMES a symbol,
-               account for EVERY reference to it (use [REFS:]/[SEARCH:])
-               and make sure they're handled in this step or an
-               EARLIER one — never a later one.
+               function → NameError → STEP 1 can never land, and the
+               coder thrashes on the broken file.
+        Right: ONE step — "Replace `_is_fqcn(x)` with
+               `AnsibleCollectionRef.is_valid_collection_name(x)`: remove
+               the helper AND update its call sites (lines X, Y)." Name the
+               old thing, the new thing, and every site to rewire, in the
+               same step.
+      Before any step that DELETES or RENAMES a symbol, account for EVERY
+      reference to it ([REFS:]/[SEARCH:]) and handle them IN THAT SAME step.
+      (Only if a single step would be too large to do at once, split it so
+      every intermediate state still RUNS — ADD the new → REWIRE callers →
+      REMOVE the old LAST, never the reverse — but the default is one step.)
     - THREADING A NEW PARAMETER: when a step adds an optional arg that
       FLOWS THROUGH an existing call (e.g. `open_url` → `Request().open`),
       do NOT prescribe a specific entry point from memory ("forward it
@@ -1455,11 +1462,25 @@ PART D — Completeness meta-check:
     - One STEP per file unless tightly coupled.
     - Each STEP: imperative title, a `FILES:` line (literal token — the runtime
       parses it), then a plain-English body with file:line citations.
-    - INDEPENDENT-CHANGE RULE: STEPs are independently failable.
-    - DELETE-verb STEPs (`delete`, `remove`, `drop`): the coder
-      must produce a deletion edit OR confirm deletion already
-      happened. Don't write a delete-STEP if the deletion isn't
-      actually needed — phrase it as "verify X is absent" instead.
+    - INDEPENDENT-CHANGE RULE: STEPs are independently failable — and each must
+      leave the code in a WORKING state on its own.
+    - REPLACEMENT = ONE STEP (critical). When the change REPLACES something —
+      swap an implementation, rename or move a symbol, remove a helper whose
+      callers must now use a different one — put the removal, the new code, AND
+      every caller update in the SAME step. NEVER split it into "Step 1: remove X"
+      then "Step 3: add Y / fix callers": the coder executes steps IN ORDER and
+      finishes each before starting the next, so a split leaves the code BROKEN
+      in between (X deleted while its callers still reference it → NameError/
+      ImportError, every test errors — and the coder, seeing the now-broken file,
+      thrashes). Write it as ONE "Replace/Rewrite X with Y" step that names the
+      old thing, the new thing, and the exact sites to rewire. The two halves of a
+      replacement are NOT independently failable, so they are not separate steps.
+    - DELETE-verb STEPs (`delete`, `remove`, `drop`): only stand alone when the
+      deletion has NO replacement and NO remaining callers (dead code). If anything
+      still uses the removed thing, it is a REPLACEMENT — fold it into one step per
+      the rule above. The coder must produce a deletion edit OR confirm deletion
+      already happened; don't write a delete-STEP if the deletion isn't actually
+      needed — phrase it as "verify X is absent" instead.
 
 
 ## Output format
@@ -1937,6 +1958,7 @@ REFLEXES — trigger then do this (fire each the instant it applies):
   - Adding OR REWRITING a `def`/`class` (or any line) -> KEEP THE SCOPE NUMBER: when you rewrite a line, your `new` MUST reuse the EXACT `INDENT|` number the view showed for it — copy it, never re-derive it. A `0|` line stays `0|`; a `4|` line stays `4|`. For a BRAND-NEW `def`/`class`, copy the `INDENT|` number of the nearest SIBLING already at that level, and put its body at that number + 4. (Why it matters — shifting the number breaks the file BOTH ways: UNDER-indenting a method `286 ⇥4|    def setvalue` to `0|def setvalue` ejects it from its class; OVER-indenting a module-level `771 ⇥0|def validate_record` to `4|` nests it inside the function above and orphans its body — both have broken whole files.) Self-check before finish: every `def`/`class` in `new` carries the SAME number the view showed for the line it replaces (or its sibling's) — neither 0-when-it-was-4 nor 4-when-it-was-0.
   - A field's TYPE or meaning CHANGES (a bool becomes an enum; a value is re-specified), or the spec maps cases to specific result VALUES -> RE-MAP EVERY BRANCH: for EACH place that assigns the field, use the value the SPEC states for THAT case — never inherit the OLD code's value. The old "first-run / empty / missing → False" often becomes a DIFFERENT new value (e.g. → `unknown`, NOT → `equal`). List the spec's case→value pairs, set each branch to its spec value, and don't forget the boundary case (first-run / empty / None) — it's the one most often left on the old default.
   - run_code reports `ModuleNotFoundError` / `ImportError` for a third-party package (jinja2, PyQt5, web, django, a repo dep) -> ENVIRONMENT, NOT YOUR BUG: the smoke sandbox just lacks that one install; the REAL test environment has it. Do NOT edit or remove import lines, do NOT wrap imports in try/except, do NOT create a stub/shim module (a root `yaml.py` is never a fix), and do NOT redesign to dodge the import — every one of those CORRUPTS the patch and is the #1 way a step goes off the rails. Note it and reason about that module statically. (The ONLY real import bug is a module YOU just created or renamed in this task.)
+  - The STEP removes / renames / replaces a symbol (or you must delete a def, import, or helper that other code references) -> REPLACE IN ONE GO: the removal AND every use-site update belong in the SAME edit_file call (all hunks together, one consolidated diff). Deleting a symbol while any caller still references it is a dangling-ref REJECT and a broken file — never do the removal in isolation and "fix the callers next". If the step text says only "remove X" but X is still used anywhere, it is really a REPLACEMENT: find_refs/search_text every use, then rewire them all in this same step. Do not re-search for the symbol after you've deleted it — it's gone; act on the references you already found.
 """
 
 
