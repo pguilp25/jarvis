@@ -196,20 +196,20 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
     # python, and resolving it would point _interp_dir back at /usr/bin (which
     # has no `python` and no pytest). We want the venv bin itself.
     _interp_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
-    # CRITICAL (ckpt-166): binding the venv's BIN dir alone exposes the `python`/
-    # `pytest` executables but NOT the venv's site-packages (…/lib/pythonX.Y/
-    # site-packages), so `import yaml` / `import numpy` failed inside run_code even
-    # though they ARE installed. The coder then misread ModuleNotFoundError as a
-    # bug in its own edit and went on a destructive rabbit-hole (edited prod import
-    # lines, created shim modules like a root-level yaml.py) — this directly cost
-    # two instances on the ckpt-165 night run. Also bind the venv ROOT read-only so
-    # site-packages is importable (validated: `import yaml, pytest` → exit 0). A
-    # read-only bind adds no write/network capability — the sandbox invariant holds.
-    _venv_root = os.path.dirname(_interp_dir) if _interp_dir else ""
-    # the project + the working dir + the interpreter dir + the venv root, read-only
+    # REVERTED Fix A (ckpt-169): we bind only the venv BIN dir (the `python`
+    # executable), NOT the venv site-packages. Binding site-packages (ckpt-166)
+    # let run_code import 3rd-party deps AND run `pytest` — which BACKFIRED: the
+    # coder ran the full suite / imported app frameworks, hit ModuleNotFoundError on
+    # uninstalled plugins/deps (pytest_qt, pytest_bdd, web, infogami …), and then
+    # MANUFACTURED stub modules to "satisfy" them — polluting the patch and breaking
+    # `git apply` (regressed PASSING instances f91ace96 + 4a5d2a7d). Real test-
+    # execution needs the full installed env (the Docker grader), not this 6 GB box.
+    # So run_code is a STDLIB-ONLY smoke check: a 3rd-party import fails fast, and the
+    # coder is steered away from shimming it (_do_run msg + create_file guard, ckpt-167).
+    # the project + the working dir + the interpreter dir, read-only
     seen = set()
-    for d in (project_root, cwd, _interp_dir, _venv_root):
-        if d and d not in seen and d not in _RO_BINDS and os.path.isdir(d):
+    for d in (project_root, cwd, _interp_dir):
+        if d and d not in seen and os.path.isdir(d):
             argv += ["--ro-bind", d, d]
             seen.add(d)
     argv += ["--proc", "/proc", "--dev", "/dev"]

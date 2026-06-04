@@ -1468,11 +1468,11 @@ def _do_run(args: dict, ctx: dict) -> str:
     output — so the coder can OBSERVE its change's runtime behaviour instead of
     SIMULATING it in its head (the static gates prove a patch parses + names
     resolve; only running proves it DOES the right thing). cwd = the sandbox dir
-    where edits land; the bwrap sandbox is read-only/no-net but binds the venv
-    site-packages (pytest + common deps: yaml, numpy, scipy, pandas, requests), so
-    `python -c …` / `python -m pytest …` work for those. A missing 3rd-party dep
-    (jinja2, PyQt5, web.py, django …) is an ENVIRONMENT limit of this smoke-check
-    box, NOT a bug in the edit — see the ModuleNotFoundError branch below."""
+    where edits land; the bwrap sandbox is read-only/no-net with a STDLIB-ONLY
+    python (3rd-party packages and test plugins are NOT installed — the full test
+    suite cannot run here; that's the Docker grader's job). Use `python -c …` to
+    smoke-check standard-library-only logic. A ModuleNotFoundError for any 3rd-party
+    module is an ENVIRONMENT limit, NOT a bug in the edit — see the branch below."""
     from core.safe_exec import run_sandboxed
     _cmdv = args.get("command")
     cmd = _cmdv.strip() if isinstance(_cmdv, str) else ""
@@ -1531,8 +1531,8 @@ def _do_run(args: dict, ctx: dict) -> str:
         # the safety net the prose alone didn't provide.
         ctx.setdefault("_failed_imports", set()).add(_mod)
         return (f"⚠ run_code: `import {_mod}` failed (ModuleNotFoundError). The smoke-check "
-                f"sandbox has python + pytest + yaml/numpy/scipy/pandas/requests, but NOT every "
-                f"third-party package. If `{_mod}` is a third-party dependency (i.e. NOT a file you "
+                f"sandbox runs a MINIMAL python — the standard library only; third-party packages "
+                f"and test plugins are NOT installed. If `{_mod}` is a third-party dependency (i.e. NOT a file you "
                 f"just created or renamed in this task), this is an ENVIRONMENT limitation of the "
                 f"smoke box, NOT a bug in your edit — the real test environment has `{_mod}`.\n"
                 f"DO NOT: edit/remove import statements in the project, create stub/shim modules, "
