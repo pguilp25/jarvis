@@ -184,7 +184,7 @@ async def call_openai_compat(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=payload, headers=_headers(key),
-            timeout=aiohttp.ClientTimeout(total=3600),
+            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
@@ -232,7 +232,7 @@ async def call_openai_compat_stream(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=payload, headers=_headers(key),
-            timeout=aiohttp.ClientTimeout(total=3600),
+            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()

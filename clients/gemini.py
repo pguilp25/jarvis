@@ -93,7 +93,7 @@ async def call_gemini(
         body["systemInstruction"] = {"parts": [{"text": system}]}
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
+        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Gemini {api_model} HTTP {resp.status}: {text[:200]}")
@@ -188,7 +188,7 @@ async def grounded_search(
         body["systemInstruction"] = {"parts": [{"text": system}]}
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
+        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Gemini grounded search HTTP {resp.status}: {text[:200]}")

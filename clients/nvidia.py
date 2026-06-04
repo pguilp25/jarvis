@@ -309,7 +309,7 @@ async def call_nvidia(
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
@@ -383,7 +383,7 @@ async def call_nvidia_tools(
     async with _gptoss_serialize(model_id):
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=1800)) as resp:
+                                    timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
                 raw = await resp.text()
                 if resp.status != 200:
                     # tool_choice="required" isn't universally supported on :free
@@ -400,7 +400,7 @@ async def call_nvidia_tools(
                               f"400 body: {raw[:240]}", file=_sys.stderr, flush=True)
                         payload["tool_choice"] = "auto"
                         async with session.post(url, json=payload, headers=headers,
-                                                timeout=aiohttp.ClientTimeout(total=1800)) as resp2:
+                                                timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp2:
                             raw = await resp2.text()
                             if resp2.status != 200:
                                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp2.status}: {raw[:200]}")
@@ -527,7 +527,7 @@ async def call_nvidia_stream(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=payload, headers=headers,
-            timeout=aiohttp.ClientTimeout(total=3600),
+            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
