@@ -390,7 +390,15 @@ def _str_or_err(args: dict, key: str, tool: str):
                   f"(got {type(v).__name__}). Re-issue with a string {key}.")
 
 
-_FULL_REREAD_CAP = 500   # files up to this many lines are re-served IN FULL; larger → skeleton
+_FULL_REREAD_CAP = 1500  # files up to this many lines are re-served IN FULL; larger → skeleton.
+                         # Raised 500→1500 (ckpt-166): a 702-line file (ansible get_url) re-read
+                         # WITHOUT a range fell to a skeleton, so the coder couldn't see real
+                         # indentation and guessed it wrong → IndentationError → budget-exhaust
+                         # (the "re-read skeleton trap", recurring ≥2 instances on the ckpt-165
+                         # night run). gpt-oss intermittently drops read_file's start_line/end_line
+                         # from structured args, so the no-range re-read path MUST serve real,
+                         # navigable content for moderate files. 1500 numbered lines ≈ 20-30k chars,
+                         # well within max_history_chars=400k; files >1500 still skeleton.
 
 
 async def _do_read(args: dict, ctx: dict) -> str:
@@ -1250,6 +1258,28 @@ def _do_create(args: dict, ctx: dict) -> str:
     path, _pe = _str_or_err(args, "path", "create_file")
     if _pe:
         return _pe
+    # PATH CONTAINMENT (ckpt-166): a new file MUST live inside the project. Absolute
+    # paths / `../` escapes, or a top-level module that shadows a stdlib / common
+    # third-party package (a root `yaml.py`, `jinja2.py`, …), are the signature of the
+    # missing-dep rabbit-hole — the coder manufacturing a shim to "satisfy" an import
+    # the smoke sandbox lacks. That junk leaks straight into the shipped patch (it cost
+    # an instance on the ckpt-165 night run). Reject it so the patch stays clean.
+    from os.path import isabs, normpath
+    _pn = path.replace("\\", "/").strip()
+    if isabs(_pn) or _pn.startswith("../") or "/../" in _pn or normpath(_pn).startswith(".."):
+        return (f"✗ create_file refused: {path} is outside the project. Use a project-relative "
+                f"path (no leading '/' or '../').")
+    if "/" not in _pn.strip("/") and _pn.endswith(".py"):   # single segment → repo ROOT
+        import sys as _sys
+        _name = _pn.rsplit("/", 1)[-1][:-3]
+        _shadow = set(getattr(_sys, "stdlib_module_names", set())) | {
+            "yaml", "jinja2", "jinja", "PyQt5", "PyQt6", "web", "django", "numpy", "scipy",
+            "pandas", "requests", "six", "pytest", "setuptools", "lxml", "sqlalchemy", "resolvelib"}
+        if _name in _shadow:
+            return (f"✗ create_file refused: a root-level `{_pn}` would SHADOW the `{_name}` "
+                    f"module — this is never a real fix. If a run_code `import {_name}` failed, "
+                    f"that is an ENVIRONMENT limit of the smoke sandbox, NOT something to patch by "
+                    f"creating a stub module. Edit the real target file for your step instead.")
     content = args.get("content", "")
     if not isinstance(content, str):     # tolerate a non-string content (list/int/None)
         content = "" if content is None else str(content)
@@ -1413,7 +1443,10 @@ def _do_run(args: dict, ctx: dict) -> str:
     SIMULATING it in its head (the static gates prove a patch parses + names
     resolve; only running proves it DOES the right thing). cwd = the sandbox dir
     where edits land; the bwrap sandbox is read-only/no-net but binds the venv
-    (the repo's deps + pytest), so `python -c …` / `python -m pytest …` work."""
+    site-packages (pytest + common deps: yaml, numpy, scipy, pandas, requests), so
+    `python -c …` / `python -m pytest …` work for those. A missing 3rd-party dep
+    (jinja2, PyQt5, web.py, django …) is an ENVIRONMENT limit of this smoke-check
+    box, NOT a bug in the edit — see the ModuleNotFoundError branch below."""
     from core.safe_exec import run_sandboxed
     _cmdv = args.get("command")
     cmd = _cmdv.strip() if isinstance(_cmdv, str) else ""
@@ -1454,6 +1487,27 @@ def _do_run(args: dict, ctx: dict) -> str:
                     "add a print(...) to your command and run again.")
         return (f"✓ ran in your edited sandbox — exit 0 (success). This output IS your "
                 f"edit's real behaviour:\n{shown}")
+    # A ModuleNotFoundError/ImportError is, AFTER the venv site-packages bind
+    # (ckpt-166), almost always a genuinely-absent 3rd-party dep (jinja2, PyQt5,
+    # web.py, django …) — an ENVIRONMENT limit of this smoke-check box, NOT a bug
+    # in the edit. Two ckpt-165 night-run instances were LOST when the coder misread
+    # this and rabbit-holed (edited prod import lines, created shim modules like a
+    # root-level yaml.py). Name the module and steer hard away from "fixing" it,
+    # while still allowing the rare real case (a module the coder itself just made).
+    import re as _re
+    _imp = _re.search(r"No module named ['\"]([\w.]+)['\"]", out)
+    if _imp:
+        _mod = _imp.group(1).split('.')[0]
+        return (f"⚠ run_code: `import {_mod}` failed (ModuleNotFoundError). The smoke-check "
+                f"sandbox has python + pytest + yaml/numpy/scipy/pandas/requests, but NOT every "
+                f"third-party package. If `{_mod}` is a third-party dependency (i.e. NOT a file you "
+                f"just created or renamed in this task), this is an ENVIRONMENT limitation of the "
+                f"smoke box, NOT a bug in your edit — the real test environment has `{_mod}`.\n"
+                f"DO NOT: edit/remove import statements in the project, create stub/shim modules, "
+                f"wrap imports in try/except, or change your design to dodge `{_mod}`. Those are all "
+                f"wrong — they corrupt the patch. Reason about `{_mod}` statically and move on.\n"
+                f"ONLY if `{_mod}` is a module YOU just created/renamed is this a real bug to fix.\n"
+                f"--- output (tail) ---\n{shown or '(no output)'}")
     return (f"✗ ran in your edited sandbox — exit {code}{timed}. This is YOUR EDIT'S "
             f"real runtime behaviour, NOT a tool error.\n"
             f"WHAT WENT WRONG (last line): {last[:200] or '(no output)'}\n"

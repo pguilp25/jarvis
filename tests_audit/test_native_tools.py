@@ -1246,13 +1246,30 @@ def test_reread_injected_target_serves_content():
 
 def test_reread_large_file_serves_skeleton_not_full_dump():
     # ckpt-150: a re-read of a LARGE file must NOT re-dump it (the f631 context
-    # blow-out) — it serves a navigable skeleton, bounded.
-    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(600))   # ~1800 lines
+    # blow-out) — it serves a navigable skeleton, bounded. "Large" = above
+    # _FULL_REREAD_CAP (raised 500→1500 in ckpt-166), so use >1500 lines here.
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(900))   # 1800 lines (>1500 cap)
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set(), "view_at": {"big.py": "step 1"}}
     r = _disp("read_file", {"path": "big.py"}, ctx)
     assert r.startswith("ℹ") and "too large" in r            # skeleton path, not full dump
     assert len(r) < len(big)                                 # bounded
+
+
+def test_reread_moderate_file_serves_full_not_skeleton():
+    # ckpt-166 (re-read skeleton trap fix): a MODERATE file (≤ _FULL_REREAD_CAP=1500
+    # lines) re-read WITHOUT a range must serve the REAL, line-numbered content — NOT
+    # a skeleton. The old cap of 500 turned a ~700-line file into a skeleton on re-read,
+    # so the coder couldn't see real indentation and guessed it wrong → IndentationError
+    # → budget-exhaust (ansible a26c325b / 395e5e20 on the ckpt-165 night run).
+    mod = "".join(f"def f{i}():\n    return {i}\n" for i in range(350))   # 700 lines (≤1500)
+    ctx = {"file_contents": {"mid.py": mod}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "view_at": {"mid.py": "step 1"}}
+    r = _disp("read_file", {"path": "mid.py"}, ctx)
+    assert r.startswith("ℹ") and "CURRENT content" in r      # full-content path
+    assert "too large" not in r                              # NOT the skeleton path
+    assert "return 349" in r                                 # real body lines present, not just defs
+    assert "    return 0" in r or "⇥4|    return 0" in r     # real indentation visible
 
 
 def test_edit_diff_stamped_with_round_when_no_step():

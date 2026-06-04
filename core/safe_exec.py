@@ -187,20 +187,29 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
         argv += ["--ro-bind", d, d]
     for d in _RO_BINDS_TRY:
         argv += ["--ro-bind-try", d, d]
-    # The interpreter JARVIS runs in (the venv) carries pytest + the repo's deps;
-    # the bare system python3 on the default PATH does not, and there's no bare
-    # `python` at all. Without this a [VERIFY:]/[RUN:] `python …` resolved to
-    # nothing (exit 127 "python not found") so verification SILENTLY never ran.
-    # Bind the venv bin read-only and put it first on PATH so python / python3 /
-    # pytest resolve to it. (Read-only bind → no new write/network capability.)
+    # The interpreter JARVIS runs in (the venv) carries pytest + many common deps
+    # (yaml, numpy, scipy, pandas, requests …); the bare system python3 on the
+    # default PATH does not, and there's no bare `python` at all. Without the venv
+    # on PATH a `python …` resolved to nothing (exit 127) so verification silently
+    # never ran. Put the venv bin first on PATH so python / python3 / pytest resolve.
     # NOTE: do NOT realpath() — a venv's bin/python is a symlink to the system
     # python, and resolving it would point _interp_dir back at /usr/bin (which
     # has no `python` and no pytest). We want the venv bin itself.
     _interp_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
-    # the project + the working dir + the interpreter dir, read-only
+    # CRITICAL (ckpt-166): binding the venv's BIN dir alone exposes the `python`/
+    # `pytest` executables but NOT the venv's site-packages (…/lib/pythonX.Y/
+    # site-packages), so `import yaml` / `import numpy` failed inside run_code even
+    # though they ARE installed. The coder then misread ModuleNotFoundError as a
+    # bug in its own edit and went on a destructive rabbit-hole (edited prod import
+    # lines, created shim modules like a root-level yaml.py) — this directly cost
+    # two instances on the ckpt-165 night run. Also bind the venv ROOT read-only so
+    # site-packages is importable (validated: `import yaml, pytest` → exit 0). A
+    # read-only bind adds no write/network capability — the sandbox invariant holds.
+    _venv_root = os.path.dirname(_interp_dir) if _interp_dir else ""
+    # the project + the working dir + the interpreter dir + the venv root, read-only
     seen = set()
-    for d in (project_root, cwd, _interp_dir):
-        if d and d not in seen and os.path.isdir(d):
+    for d in (project_root, cwd, _interp_dir, _venv_root):
+        if d and d not in seen and d not in _RO_BINDS and os.path.isdir(d):
             argv += ["--ro-bind", d, d]
             seen.add(d)
     argv += ["--proc", "/proc", "--dev", "/dev"]

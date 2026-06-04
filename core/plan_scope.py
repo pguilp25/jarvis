@@ -205,8 +205,23 @@ def completeness_lint(plan_text: str, scope_files, required_files) -> list:
 
 
 def format_plan_gaps(gaps: list) -> str:
-    """Append-able note the coder will see when the static lint found gaps."""
+    """Append-able note the coder will see when the static lint found gaps.
+
+    Framed IMPERATIVELY (ckpt-166): these are files an independent check says the
+    change must touch (the spec names them, or several planner drafts agreed on
+    them) but the merged plan dropped — the dominant under-scope failure (a merger
+    that prunes behavior-bearing files ships a patch that applies cleanly yet fails
+    every test; openlibrary-111347e9 lost exactly this way). The old wording was a
+    buried conditional ("if you must, add a step") and the coder ignored it. Now it
+    is a directive WITH an escape hatch (read-and-decline) so it can't over-scope a
+    file that genuinely needs no change."""
     if not gaps:
         return ""
-    return ("\n\n## ⚠ PLAN GAPS (auto-detected — resolve before/while coding)\n"
+    return ("\n\n## ⛔ REQUIRED SCOPE THE PLAN OMITTED — treat each as an ADDITIONAL STEP\n"
+            "An independent scope check flagged these (the spec names them, or several planner "
+            "drafts agreed on them), but the plan's steps don't cover them. A plan that drops a "
+            "behavior-bearing file is the #1 reason a clean-looking patch still fails the tests. "
+            "For EACH item: OPEN the file, decide what THIS task needs there, and edit it as if it "
+            "were an explicit numbered step — UNLESS reading it proves it genuinely needs no change "
+            "(then say so briefly and move on; do not edit a file that doesn't need it).\n"
             + "\n".join(f"- {g}" for g in gaps))
