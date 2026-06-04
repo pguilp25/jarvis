@@ -8,6 +8,7 @@ import json as _json
 import os
 import asyncio
 import aiohttp
+from core.http_timeout import http_timeout
 from typing import Optional
 from config import GROQ_MODEL_IDS
 from core.cli import thinking, warn
@@ -60,7 +61,7 @@ async def call_groq(
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(GROQ_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
+        async with session.post(GROQ_API_URL, json=payload, headers=headers, timeout=http_timeout(GROQ_API_URL, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"Groq {api_model} HTTP {resp.status}: {body[:200]}")
@@ -122,7 +123,7 @@ async def call_groq_stream(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             GROQ_API_URL, json=payload, headers=headers,
-            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
+            timeout=http_timeout(GROQ_API_URL, payload),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()

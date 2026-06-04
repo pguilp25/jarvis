@@ -7,6 +7,7 @@ import json as _json
 import os
 import asyncio
 import aiohttp
+from core.http_timeout import http_timeout
 from core.cli import thinking
 from core import thought_logger
 from config import STREAM_TTFT_TIMEOUT
@@ -66,7 +67,7 @@ async def call_openrouter(
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
+        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=http_timeout(OPENROUTER_URL, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")
@@ -113,7 +114,7 @@ async def call_openrouter_stream(
     in_thinking = False
     done = False
     async with aiohttp.ClientSession() as session:
-        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30)) as resp:
+        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=http_timeout(OPENROUTER_URL, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")

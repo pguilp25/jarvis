@@ -18,6 +18,7 @@ import json as _json
 import os
 import asyncio
 import aiohttp
+from core.http_timeout import http_timeout
 from config import STREAM_TTFT_TIMEOUT
 from core.cli import thinking, warn
 from core import thought_logger
@@ -184,7 +185,7 @@ async def call_openai_compat(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=payload, headers=_headers(key),
-            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
+            timeout=http_timeout(url, payload),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
@@ -232,7 +233,7 @@ async def call_openai_compat_stream(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=payload, headers=_headers(key),
-            timeout=aiohttp.ClientTimeout(total=1200, sock_connect=30),
+            timeout=http_timeout(url, payload),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
