@@ -1162,11 +1162,12 @@ def _do_edit(args: dict, ctx: dict) -> str:
             path, result[path], before, tool="edit_file",
             resend="re-send the corrected hunk")
         if _gate:
-            # ROUTE TO replace_lines (ckpt-137). The gate (unreachable / duplicate / parse)
-            # fires almost only on a WHOLE-BLOCK rewrite where the coder's hunk stranded the
-            # old `return` or re-emitted the anchor. replace_lines (a clean start..end swap)
-            # has a 0% reject rate on exactly these — so on a multi-line/def-body edit, hand
-            # the coder the precise replace_lines call instead of letting it re-loop hunks.
+            # WHOLE-BLOCK route (ckpt-137; replace_lines retired from CODER_TOOLS — the
+            # message now routes to edit_file itself). The gate (unreachable / duplicate /
+            # parse) fires almost only on a WHOLE-BLOCK rewrite where the coder's hunk
+            # stranded the old `return` or re-emitted the anchor — so hand the coder the
+            # precise "put the whole contiguous block in ONE hunk" edit_file move below
+            # instead of letting it re-loop fragments.
             _old_total = sum(len(o) for _s, o, _n in resolved)
             _is_block = _old_total >= 4 or any(
                 re.match(r'\s*(def|class|async def)\b', str(o))
