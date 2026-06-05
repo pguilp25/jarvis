@@ -138,6 +138,20 @@ CODER_TOOLS = [
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
+        "name": "list_dir",
+        "description": (
+            "See the project's filesystem TREE — the planner's view, EXPANDABLE one level at "
+            "a time. With no path (or path=''), it lists the top-level folders (each with a "
+            "recursive file count) and the root files (each with its LINE count). Pass a "
+            "folder path to expand THAT folder. Use it to find WHERE a file lives before "
+            "read_file — never guess a path; every path it shows is exact and copy-paste-ready. "
+            "It shows ONE level per call (it's not the whole tree at once) — expand the folder "
+            "you care about."),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "folder to expand (repo-relative); omit or '' for the top level"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "find_refs",
         "description": (
             "Find usages of a symbol (function/class/variable name) across the project "
@@ -393,15 +407,140 @@ def _str_or_err(args: dict, key: str, tool: str):
                   f"(got {type(v).__name__}). Re-issue with a string {key}.")
 
 
-_FULL_REREAD_CAP = 1500  # files up to this many lines are re-served IN FULL; larger → skeleton.
-                         # Raised 500→1500 (ckpt-166): a 702-line file (ansible get_url) re-read
-                         # WITHOUT a range fell to a skeleton, so the coder couldn't see real
-                         # indentation and guessed it wrong → IndentationError → budget-exhaust
-                         # (the "re-read skeleton trap", recurring ≥2 instances on the ckpt-165
-                         # night run). gpt-oss intermittently drops read_file's start_line/end_line
-                         # from structured args, so the no-range re-read path MUST serve real,
-                         # navigable content for moderate files. 1500 numbered lines ≈ 20-30k chars,
-                         # well within max_history_chars=400k; files >1500 still skeleton.
+_FULL_VIEW_CAP = 3000    # a file up to this many lines is shown IN FULL (first read OR re-read);
+                         # larger → STRUCTURE only + "read it range-by-range" (never a full dump,
+                         # which is what blew f631's context). Replaces the old _FULL_REREAD_CAP:
+                         # the coder must SEE real, navigable content for any normal-sized file
+                         # (gpt-oss intermittently drops the start_line/end_line range args, so a
+                         # too-eager skeleton starved it of real indentation → IndentationError),
+                         # but a genuinely huge file is navigated by explicit ranges, not dumped.
+_FULL_REREAD_CAP = _FULL_VIEW_CAP   # back-compat alias (a few call sites / tests still name it)
+
+
+def _repo_base(ctx: dict) -> str:
+    """Absolute dir holding the live repo for THIS run — the sandbox (edits are live
+    there) if present, else the project root. '' if neither is set."""
+    sb = ctx.get("sandbox")
+    base = (getattr(sb, "sandbox_dir", "") or "") if sb is not None else ""
+    return base or (ctx.get("project_root") or "")
+
+
+def _file_line_count(ctx: dict, rel: str, full_abs: str = "") -> int:
+    """Best-effort line count of a repo file. Prefer the LIVE in-memory content
+    (current — includes this step's edits), then the sandbox, then disk. 0 if the
+    file can't be read (shown as '?'). Never raises."""
+    c = ctx.get("file_contents", {}).get(rel)
+    if not isinstance(c, str):
+        sb = ctx.get("sandbox")
+        if sb is not None:
+            try:
+                c = sb.load_file(rel)
+            except Exception:
+                c = None
+    if not isinstance(c, str) and full_abs:
+        try:
+            with open(full_abs, "r", errors="replace") as _f:
+                c = _f.read()
+        except Exception:
+            c = None
+    if not isinstance(c, str) or not c:
+        return 0
+    return c.count("\n") + (0 if c.endswith("\n") else 1)
+
+
+def _incrusted_tree(ctx: dict, rel_path: str) -> str:
+    """Render WHERE `rel_path` sits in the filesystem — its folder breadcrumb plus the
+    sibling entries in its immediate folder (sub-dirs with recursive file-counts, files
+    with LINE counts), marking the viewed file with ◀ VIEWING. So a file view is never a
+    bare floating block: the coder always sees the file's place in the tree and what's
+    beside it (the planner's tree, incrusted into the read). Bounded (≤ ~40 entries) and
+    best-effort — returns '' on any failure so a read can never break. Expand elsewhere
+    with list_dir."""
+    try:
+        import os as _os
+        from core.exploration_tools import _tree_visible, _count_tree_files
+        base = _repo_base(ctx)
+        if not base or not _os.path.isdir(base):
+            return ""
+        rp = rel_path.replace("\\", "/").strip("/")
+        parent_rel = _os.path.dirname(rp)
+        fname = _os.path.basename(rp)
+        parent_abs = _os.path.join(base, parent_rel) if parent_rel else base
+        if not _os.path.isdir(parent_abs):
+            return ""
+        # containment (defense-in-depth: case-b reaches here gated only on view_at): a `..`
+        # path must not list a folder outside the repo. Separator boundary, not bare prefix.
+        _rb, _rp = _os.path.realpath(base), _os.path.realpath(parent_abs)
+        if _rp != _rb and not _rp.startswith(_rb + _os.sep):
+            return ""
+        crumb_parts = [p for p in parent_rel.split("/") if p]
+        crumb = "(project root)" if not crumb_parts else " ▸ ".join(crumb_parts) + "/"
+        try:
+            names = sorted(_os.listdir(parent_abs))
+        except OSError:
+            return ""
+        dir_ents, file_ents, view_ent = [], [], None
+        for nm in names:
+            full = _os.path.join(parent_abs, nm)
+            isd = _os.path.isdir(full)
+            if not _tree_visible(nm, isd):
+                continue
+            if isd:
+                dir_ents.append(f"{nm}/ ({_count_tree_files(full)} files)")
+            else:
+                rel_n = f"{parent_rel}/{nm}" if parent_rel else nm
+                ln = _file_line_count(ctx, rel_n, full)
+                if nm == fname:
+                    view_ent = f"[▸ {nm} ({ln} lines)  ◀ VIEWING]"
+                else:
+                    file_ents.append(f"{nm} ({ln} lines)")
+        # The incrusted header is for ORIENTATION (where am I + a few neighbours), not the full
+        # listing — that's what list_dir is for. Keep it tight so a read in a big folder doesn't
+        # dump 40 siblings every time. Always keep the viewed file visible.
+        ents = dir_ents + ([view_ent] if view_ent else []) + file_ents
+        _MAX = 12
+        shown = ents[:_MAX]
+        if view_ent and view_ent not in shown:
+            shown = shown[:_MAX - 1] + [view_ent]
+        more = len(ents) - len(shown)
+        tail = (f"   … +{more} more here (list_dir '{parent_rel or '.'}' for the full folder)"
+                if more > 0 else "")
+        return f"  {crumb}  — folder ({len(ents)} entries):\n      {'   '.join(shown)}{tail}"
+    except Exception:
+        return ""
+
+
+def _view_header(ctx: dict, rel_path: str, total_lines: int,
+                 *, range_desc: str = "", structure_only: bool = False) -> str:
+    """The incrusted VIEW header: a clear, unambiguous 'THIS file / FULL vs RANGE vs
+    STRUCTURE' banner, then the file's position in the tree (breadcrumb + siblings)."""
+    if structure_only:
+        head = (f"=== VIEW: {rel_path} — {total_lines} lines — TOO LARGE to show in full; "
+                f"STRUCTURE only (read it range-by-range) ===")
+    elif range_desc:
+        head = (f"=== VIEW: {rel_path} — {range_desc} of {total_lines}  "
+                f"(RANGE — NOT the full file) ===")
+    else:
+        head = f"=== VIEW: {rel_path} — {total_lines} lines (FULL file) ==="
+    tree = _incrusted_tree(ctx, rel_path)
+    sep = "  " + "─" * 46
+    return (f"{head}\n{tree}\n{sep}" if tree else f"{head}\n{sep}")
+
+
+def _reframe_read_body(body: str, header: str) -> str:
+    """Swap _run_code_reads' own `=== Code: … ===` line (and its text-coder-only
+    `[KEEP: …]` large-file hint, which the native coder cannot emit) for the incrusted
+    VIEW header. Everything else — line-numbered content, tab warnings, #tag
+    annotations — is kept verbatim."""
+    kept = []
+    for ln in body.split("\n"):
+        st = ln.strip()
+        if st.startswith("=== Code:"):
+            continue
+        if "[KEEP:" in ln and "Large file" in ln:
+            continue
+        kept.append(ln)
+    return header + "\n" + "\n".join(kept).lstrip("\n")
 
 
 async def _do_read(args: dict, ctx: dict) -> str:
@@ -424,70 +563,109 @@ async def _do_read(args: dict, ctx: dict) -> str:
         return ("✗ read_file: give BOTH start_line and end_line for a range, or "
                 "NEITHER to read the whole file (you provided only "
                 f"{'start_line' if s is not None else 'end_line'}).")
-    # RE-READ of an already-seen file (no range). A coder that can't SEE the code can't
-    # reason about it → blind edits. So NEVER flatly refuse — always serve readable,
-    # CURRENT content, just BOUNDED so a repeated full re-dump of a big file can't blow
-    # the context window (f631). And when the file CHANGED since the coder first saw it,
-    # LEAD WITH THE DIFF so it's UNAMBIGUOUS the content is updated and its earlier view
-    # is stale — the strongest signal a weak model reliably catches. (ckpt-150.)
+    # RE-READ of an already-seen file (no range). The coder ALREADY holds this file's
+    # current view — loaded at step start, read earlier this step, or handed back inside an
+    # edit's diff — and (point 1) its full reasoning + those views are uncapped in history.
+    # So re-dumping the file wastes a ~3-minute round AND clutters context with a duplicate
+    # block the model can't tell apart from the live one (the #1 confusion + f631 blow-out).
+    # If its view is current → ONE line saying so, no body. If the file actually CHANGED
+    # since it last saw it (a non-edit_file mutation that didn't sync the view) → serve the
+    # current content + the cumulative diff vs the START of this step.
     if s is None and e is None and path in ctx.get("view_at", {}):
-        from core.edit_diff import render_diff
-        from tools.codebase import add_line_numbers
         cur = ctx.get("file_contents", {}).get(path)
         # An EMPTY file_contents entry is, in this codebase, a failed-load sentinel
         # (`sandbox.load_file(fp) or read_file(...) or ""` collapses a non-resolving
-        # path to ""). Serving it as "current content" renders a single `1 ⇥0|` line
-        # and tells the coder "unchanged since you last saw it" — locking in a lie so
-        # it edits blind. Treat empty/whitespace-only as NO content: try a real sandbox
-        # reload, else fall through to _run_code_reads (actionable FILE NOT FOUND +
-        # similar-path suggestion). A genuinely empty source file also falls through —
-        # the normal read path has a dedicated "0 lines — empty file" message. (ckpt-152.)
+        # path to ""). Treat empty/whitespace-only as NO content: try a real sandbox
+        # reload, else fall through to _run_code_reads (actionable FILE NOT FOUND).
         if not (cur and cur.strip()):
             _sb0 = ctx.get("sandbox")
             _re = _sb0.load_file(path) if _sb0 is not None else None
-            if _re and _re.strip():
-                cur = _re
-            else:
-                cur = None
+            cur = _re if (_re and _re.strip()) else None
         if cur is not None:
-            _base = ctx.get("_first_seen", {}).get(path)
-            _changed = _base is not None and _base != cur
-            _nlines = cur.count("\n") + 1
+            # The freshest version the coder has actually seen — its last view if recorded,
+            # else what it was first shown this step (injected target / first read).
+            _last = ctx.get("viewed_versions", {}).get(path)
+            if _last is None:
+                _last = ctx.get("_first_seen", {}).get(path)
+            _base = ctx.get("_first_seen", {}).get(path)   # step-start baseline (see point 2)
             _rc = ctx.setdefault("_reread_count", {})
             _rc[path] = _rc.get(path, 0) + 1
-            # Full content when it's small enough AND (it changed OR this is the first
-            # re-read); otherwise a navigable skeleton — bounds repeated/huge re-reads.
-            _serve_full = _nlines <= _FULL_REREAD_CAP and (_changed or _rc[path] <= 1)
-            if _serve_full:
-                _body = add_line_numbers(cur, display_mode="prefix_ws")
-                _kind = "CURRENT content"
-            else:
-                from core.tool_call import _build_file_skeleton
-                _body = (_build_file_skeleton(cur.split("\n"), filename=path)
-                         + "\n→ read_file with start_line AND end_line to see any region in full.")
-                _kind = (f"CURRENT structure ({_nlines} lines — too large to re-dump in full)"
-                         if _nlines > _FULL_REREAD_CAP else "CURRENT structure")
+            # (a) the coder's view is CURRENT (identical to what it last saw) → say so in one
+            # line, no body, nothing capped. This is the common case (it just re-asked).
+            if _last is not None and _last == cur:
+                _where = ctx.get("view_at", {}).get(path, "earlier this step")
+                _editnote = ""
+                if _base is not None and _base != cur:
+                    _editnote = (" Your edit(s) to it this step ARE applied — they're in the "
+                                 "diff you already received; the view you hold is current.")
+                _again = (f" (asked {_rc[path]}× now — edit straight from the view you have, or "
+                          f"read a SPECIFIC start_line/end_line range for a region you haven't "
+                          f"seen.)" if _rc[path] >= 2 else "")
+                return (f"ℹ {path} — you ALREADY have THIS file's current view ({_where}) and it "
+                        f"is UP TO DATE (unchanged since you last saw it).{_editnote} No need to "
+                        f"re-read — edit straight from the view you hold.{_again}")
+            # (b) it CHANGED since the coder last saw it → re-serve the CURRENT content (incrusted
+            # in the tree), leading with the cumulative diff vs step-start. Honours the >3000 redirect.
             ctx.setdefault("viewed_versions", {})[path] = cur
             _note_view(ctx, path)
-            if _changed:
-                _diff = render_diff(_base, cur, path)
-                # Cap a pathologically large diff (a near-total rewrite) so the re-read
-                # stays bounded — the CURRENT content/skeleton below is the source of truth.
+            _nlines = cur.count("\n") + (0 if cur.endswith("\n") else 1)
+            if _nlines > _FULL_VIEW_CAP:
+                from core.tool_call import _build_file_skeleton
+                _body = (_view_header(ctx, path, _nlines, structure_only=True)
+                         + "\n→ read_file(path, start_line=N, end_line=M) around a def below to "
+                           "see real content.\n" + _build_file_skeleton(cur.split("\n"), filename=path))
+            else:
+                from tools.codebase import add_line_numbers
+                _body = (_view_header(ctx, path, _nlines) + "\n"
+                         + add_line_numbers(cur, display_mode="prefix_ws"))
+            _diff_base = _base if _base is not None else _last
+            if _diff_base is not None and _diff_base != cur:
+                from core.edit_diff import render_diff
+                _diff = render_diff(_diff_base, cur, path)
                 _dl = _diff.split("\n")
                 if len(_dl) > 400:
-                    _diff = "\n".join(_dl[:400]) + (f"\n… (+{len(_dl) - 400} more changed "
-                            f"lines — see the current content below / read a range for detail)")
-                return (f"✓ {path} — UPDATED since you first saw it. Your edit(s) ARE applied; "
-                        f"the line numbers below are the CURRENT, live ones — use THESE, your "
-                        f"earlier view is now stale. The diff shows exactly what changed.\n"
-                        f"━━ what changed since you first saw it ━━\n{_diff}\n"
-                        f"━━ {_kind} ━━\n{_body}")
-            _note = ("" if _rc[path] <= 1 else
-                     f"  (re-read {_rc[path]}× with no change — edit from it, or read a "
-                     f"specific start_line/end_line range.)")
-            return (f"ℹ {path} — {_kind}; unchanged since you last saw it (your view was already "
-                    f"current).{_note}\n{_body}")
+                    _diff = "\n".join(_dl[:400]) + (f"\n… (+{len(_dl) - 400} more changed lines "
+                            f"— see the current content below / read a range for detail)")
+                return (f"✓ {path} — UPDATED since you last saw it; the line numbers below are the "
+                        f"CURRENT, live ones. The diff is the cumulative change since the START of "
+                        f"this step.\n━━ what changed this step ━━\n{_diff}\n{_body}")
+            return _body
         # cur unavailable — fall through to the normal read path.
+    # WHOLE-FILE read (no range, and either never seen or its view fell through): enforce the
+    # >3000-line redirect ourselves so the native coder gets STRUCTURE + range guidance, never
+    # a multi-thousand-line dump (the text loop's own cap is 8000 — too high for this coder).
+    if s is None and e is None:
+        _cur = ctx.get("file_contents", {}).get(path)
+        if not (_cur and _cur.strip()):
+            _sbx = ctx.get("sandbox")
+            _cur = _sbx.load_file(path) if _sbx is not None else _cur
+        if not (_cur and _cur.strip()):
+            # disk fallback so the >3000 redirect fires before _run_code_reads' 8000 cap can
+            # full-dump a huge file. Read from the SAME place _run_code_reads does (the sandbox
+            # dir via _repo_base) first, then the project root.
+            import os as _os
+            for _root in (_repo_base(ctx), ctx.get("project_root") or ""):
+                if not _root:
+                    continue
+                _fp = _os.path.join(_root, path)
+                try:
+                    if _os.path.isfile(_fp):
+                        with open(_fp, "r", errors="replace") as _f:
+                            _cur = _f.read()
+                        if _cur and _cur.strip():
+                            break
+                except Exception:
+                    pass
+        if isinstance(_cur, str) and _cur.strip():
+            _nl = _cur.count("\n") + (0 if _cur.endswith("\n") else 1)
+            if _nl > _FULL_VIEW_CAP:
+                from core.tool_call import _build_file_skeleton
+                ctx["file_contents"][path] = _cur          # keep the base in step with disk
+                # STRUCTURE is not a full view → do NOT _note_view (force explicit range reads).
+                return (_view_header(ctx, path, _nl, structure_only=True)
+                        + "\n→ read_file(path, start_line=N, end_line=M) around a def below to see "
+                          "real content (this file is too large to show in full).\n"
+                        + _build_file_skeleton(_cur.split("\n"), filename=path))
     if s is not None and e is not None:
         try:
             s_i, e_i = int(s), int(e)
@@ -536,10 +714,30 @@ async def _do_read(args: dict, ctx: dict) -> str:
         cur = sb.load_file(path)
         if cur is not None:
             ctx["file_contents"][path] = cur
-    # A successful FULL read means the coder now holds the whole current file —
-    # record it so a later full re-read is short-circuited. (A RANGE read shows
-    # only a slice, so it must NOT mark the file as fully in-context.)
-    if s is None and e is None and isinstance(out, str) and not out.startswith("✗"):
+    # INCRUST the view in the tree: swap _run_code_reads' bare `=== Code: ===` header for the
+    # tree-positioned VIEW banner (THIS file, FULL vs RANGE, breadcrumb + siblings + line counts).
+    # CRITICAL: _run_code_reads does NOT signal errors with a ✗ — a FILE NOT FOUND / IS A
+    # DIRECTORY / EMPTY / SKELETON ONLY / PERMISSION-DENIED result carries that word IN the
+    # `=== Code: … ===` title. So reframe ONLY a GENUINE full/range view (title is
+    # `(N lines …)` or `(lines A-B of …)` AND not a skeleton) — otherwise we'd relabel an
+    # error/skeleton as a "FULL file" view AND _note_view it, making a later re-read falsely
+    # short-circuit to "you already have it, up to date" on a file the coder never actually saw.
+    _hdr_line = ""
+    if isinstance(out, str) and "=== Code:" in out:
+        _hdr_line = next((ln for ln in out.split("\n") if ln.strip().startswith("=== Code:")), "")
+    _is_real_view = bool(re.search(r"\((?:\d+ lines|lines \d)", _hdr_line)) and "SKELETON" not in _hdr_line
+    if _is_real_view:
+        _full = ctx.get("file_contents", {}).get(path) or ""
+        _tot = _full.count("\n") + (0 if (_full and _full.endswith("\n")) else (1 if _full else 0))
+        if s is not None and e is not None:
+            _hdr = _view_header(ctx, path, _tot or e_i, range_desc=f"lines {s_i}-{e_i}")
+        else:
+            _hdr = _view_header(ctx, path, _tot)
+        out = _reframe_read_body(out, _hdr)
+    # A successful FULL read means the coder now holds the whole current file — record it so a
+    # later full re-read is short-circuited. (A RANGE read shows only a slice → NOT fully in
+    # context; an error/skeleton is NOT a view → never marked, so the coder keeps trying.)
+    if s is None and e is None and _is_real_view:
         _note_view(ctx, path)
     return out
 
@@ -670,15 +868,16 @@ def _do_replace(args: dict, ctx: dict) -> str:
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
-        _diff = render_diff(before or "", result[path], path)
+        _dbase = ctx.get("_first_seen", {}).get(path, before)   # step-start baseline (point 2)
+        _diff = render_diff(_dbase or "", result[path], path)
         _when = _view_stamp(ctx)
         return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — change made at {_when}. "
-                f"The diff below is the ONLY change to {path} since your last view; "
-                f"EVERYTHING ELSE in {path} is UNCHANGED. Your earlier view + this diff = "
-                f"its CURRENT, live state — TRUST it, your view is NOT stale. Do NOT "
-                f"read_file {path} again; for your next edit write `old` as `INDENT|code` "
-                f"(or copy a line from your read view) — do NOT paste a diff row. Only for a "
-                f"part of {path} you have NOT seen, read it with a start_line/end_line range.\n"
+                f"The diff below is the CUMULATIVE change to {path} since the START of this step "
+                f"(the file you were given / first read). That start-state + this diff = {path}'s "
+                f"CURRENT, live state — TRUST it, your view is NOT stale. Do NOT read_file {path} "
+                f"again; for your next edit write `old` as `INDENT|code` (or copy a line from your "
+                f"read view) — do NOT paste a diff row. Only for a part of {path} you have NOT seen, "
+                f"read it with a start_line/end_line range.\n"
                 + (_diff or "(no visible line change)"))
     # Safety net: the coder may spell `path` differently from a known file, and
     # _match_fp can suffix-resolve it to another key — mutating file_contents
@@ -1211,23 +1410,23 @@ def _do_edit(args: dict, ctx: dict) -> str:
         # churn was the #1 cause of round pile-up: f327 burned ~16-33 edits nibbling
         # blind). The coder no longer needs read_file between consecutive edits.
         from core.edit_diff import render_diff
-        _diff = render_diff(before or "", result[path], path)
+        _dbase = ctx.get("_first_seen", {}).get(path, before)   # step-start baseline (point 2)
+        _diff = render_diff(_dbase or "", result[path], path)
         _when = _view_stamp(ctx)
         _fixnote = (" ⚠ Your `INDENT|` number disagreed with the spaces you typed and "
                     "wouldn't parse, so I used your typed spaces instead — verify the new "
                     "line(s) are at the right scope in the diff." if _indent_autofixed else "")
-        return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}.{_fixnote} The consolidated diff "
-                f"below is {path}'s CURRENT state after ALL of them. "
-                f"The diff below is the ONLY change to {path} since your last view of it; "
-                f"EVERYTHING ELSE in {path} is UNCHANGED. So your earlier view of {path} + "
-                f"this diff = its CURRENT, live state — TRUST that, your view is NOT stale "
-                f"(your `old` was anchored on its line number AND content, so a shifted "
-                f"view self-corrects). For your next change here, COPY the relevant line "
-                f"from your view/this diff VERBATIM as `old` (keep its `LINENO ⇥INDENT|` so "
-                f"it anchors); write `new` as `INDENT|code`. Do NOT paste a raw `LINENO:+/- "
-                f"` diff row. You do NOT need to read_file again — your earlier view + this "
-                f"diff IS {path}'s current state (read a range only for a region you've truly "
-                f"never seen).\n"
+        return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}.{_fixnote} The diff below is "
+                f"the CUMULATIVE change to {path} since the START of this step (the file you were "
+                f"given / first read) — EVERY edit you've made to it this step, against ONE stable "
+                f"baseline. That start-state + this diff = {path}'s CURRENT, live state; everything "
+                f"NOT in the diff is UNCHANGED. TRUST that — your view is NOT stale (your `old` was "
+                f"anchored on its line number AND content, so a shifted view self-corrects). For "
+                f"your next change here, COPY the relevant line from your view/this diff VERBATIM as "
+                f"`old` (keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. Do "
+                f"NOT paste a raw `LINENO:+/- ` diff row. You do NOT need to read_file again — your "
+                f"start-state + this diff IS {path}'s current state (read a range only for a region "
+                f"you've truly never seen).\n"
                 + (_diff or "(no visible line change)"))
 
     # Suffix-resolved key safety net (mirror _do_replace).
@@ -1391,6 +1590,61 @@ def _do_create(args: dict, ctx: dict) -> str:
     reason = " | ".join(str(x).strip().lstrip("-").strip() for x in skips) or \
         "no file produced (content may be empty or malformed)"
     return f"✗ create_file NOT applied for {path}: {reason}"
+
+
+def _do_list_dir(args: dict, ctx: dict) -> str:
+    """Expandable filesystem tree (the planner's view): the IMMEDIATE children of a folder —
+    sub-dirs (with recursive file counts) then files (with LINE counts). path='' / omitted →
+    the project top level; a folder path expands it one level. Real filesystem (exact,
+    copy-paste-ready paths). Bounded; never raises."""
+    import os as _os
+    rel = args.get("path")
+    if rel is None:
+        rel = args.get("dir") or args.get("folder") or ""
+    if not isinstance(rel, str):
+        rel = ""
+    rel = rel.replace("\\", "/").strip().strip("/")
+    base = _repo_base(ctx)
+    if not base or not _os.path.isdir(base):
+        return "✗ list_dir: no project root is available for this run."
+    target = _os.path.normpath(_os.path.join(base, rel)) if rel else _os.path.normpath(base)
+    _rb, _rt = _os.path.realpath(base), _os.path.realpath(target)
+    if _rt != _rb and not _rt.startswith(_rb + _os.sep):   # separator boundary: 'bar2' must not match 'bar'
+        return f"✗ list_dir: '{rel}' escapes the project root — refused. Use a repo-relative folder."
+    if not _os.path.exists(target):
+        return (f"✗ list_dir: no such folder '{rel}'. Start at the top (list_dir with no path) and "
+                f"expand one folder at a time.")
+    if not _os.path.isdir(target):
+        return f"✗ list_dir: '{rel}' is a FILE, not a folder — read it with read_file."
+    try:
+        from core.exploration_tools import _tree_visible, _count_tree_files
+        names = sorted(_os.listdir(target))
+    except OSError as ex:
+        return f"✗ list_dir: cannot list '{rel}': {str(ex)[:120]}"
+    dirs, files = [], []
+    for nm in names:
+        full = _os.path.join(target, nm)
+        isd = _os.path.isdir(full)
+        if not _tree_visible(nm, isd):
+            continue
+        child = f"{rel}/{nm}" if rel else nm
+        if isd:
+            dirs.append(f"  {child}/   ({_count_tree_files(full)} files)")
+        else:
+            ln = _file_line_count(ctx, child, full)
+            files.append(f"  {child}   ({ln} lines)")
+    label = rel or "(project root)"
+    _MAX = 300
+    body = dirs + files
+    out = [f"=== TREE: {label} — folders (expand with list_dir) then files (read with read_file) ==="]
+    if not body:
+        out.append("  (empty)")
+    else:
+        out += body[:_MAX]
+        if len(body) > _MAX:
+            out.append(f"  … {len(body) - _MAX} more — expand a subfolder to narrow.")
+    out.append("→ expand a folder: list_dir(path='<folder>');  read a file: read_file(path='<file>').")
+    return "\n".join(out)
 
 
 async def _do_refs(args: dict, ctx: dict) -> str:
@@ -1597,6 +1851,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         res = _do_create(args, ctx)
         _debug_edit_trace("create_file", args, res)
         return res
+    if name == "list_dir":
+        return _do_list_dir(args, ctx)
     if name == "find_refs":
         return await _do_refs(args, ctx)
     if name == "find_callers":
@@ -2029,9 +2285,13 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         # model does it, lives there. (1) LOG it so the coder's reasoning is finally
         # visible in the thinking log (the non-streaming native path never logged it
         # before — only the streaming planner/summary phases did). (2) PERSIST a
-        # CAPPED copy into the assistant turn so the coder builds on its own prior
-        # reasoning across rounds; capped to avoid the context-bloat that timed out
-        # f631 (and _trim_history bounds the total).
+        # FULL copy into the assistant turn so the coder builds on its OWN prior reasoning
+        # across rounds — UNCAPPED within the step (point 1): the old 1500-char cap truncated
+        # the conclusion of a hard multi-file CoT (the part the next round needs), forcing the
+        # coder to re-derive (= re-read = redundant lookups). The f631 bloat it guarded against
+        # was the repeated full-file RE-DUMPS, not reasoning text — and those are now killed by
+        # the re-read short-circuit, so the freed budget pays for full reasoning. The step resets
+        # the history every step, and _trim_history(400k) stays as the context-overflow backstop.
         _reason = (msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
         _vis = (msg.get("content") or "").strip()
         if _reason:
@@ -2044,11 +2304,9 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # goes to thought_logger; this is the greppable tail.
             status(f"  [native:{short}] 💭 {_reason[:400].replace(chr(10), ' ')}"
                    + (" …" if len(_reason) > 400 else ""))
-        _CAP = 1500
         _persist = _vis
         if _reason:
-            _r = _reason if len(_reason) <= _CAP else _reason[:_CAP] + " …[reasoning truncated]"
-            _persist = (f"[my reasoning] {_r}\n{_vis}").strip()
+            _persist = (f"[my reasoning] {_reason}\n{_vis}").strip()
         # The assistant message that issued tool_calls MUST precede the tool
         # results in history, with its tool_calls intact.
         messages.append({

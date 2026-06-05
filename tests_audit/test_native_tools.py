@@ -69,7 +69,7 @@ def _disp(name, args, ctx):
 def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     # ckpt-138: collapsed to ONE edit tool (edit_file old→new). replace_lines removed.
-    assert names == {"read_file", "find_refs", "find_callers", "search_text",
+    assert names == {"read_file", "list_dir", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "depends_on",
                      "edit_file", "create_file", "run_code", "finish"}
 
@@ -552,6 +552,32 @@ def test_find_refs():
         assert isinstance(out, str) and len(out) > 0
     finally:
         _cleanup(root)
+
+
+def test_list_dir_tree_with_line_counts():
+    # list_dir lists folders (file counts) + files (LINE counts); no path = project root,
+    # a folder path expands it; escapes/missing/file paths are clean ✗, never a crash.
+    import os as _os
+    root = tempfile.mkdtemp(prefix="listdir_")
+    try:
+        _os.makedirs(_os.path.join(root, "pkg"))
+        with open(_os.path.join(root, "top.py"), "w") as f:
+            f.write("x = 1\ny = 2\nz = 3\n")            # 3 lines
+        with open(_os.path.join(root, "pkg", "mod.py"), "w") as f:
+            f.write("def a():\n    return 1\n")
+        ctx = {"file_contents": {}, "sandbox": None, "project_root": root, "files_changed": set()}
+        top = _disp("list_dir", {}, ctx)                 # project root
+        assert "=== TREE:" in top
+        assert "pkg/" in top and "files)" in top         # a folder with a file count
+        assert "top.py" in top and "3 lines" in top      # a file with its line count
+        sub = _disp("list_dir", {"path": "pkg"}, ctx)    # expand one level
+        assert "pkg/mod.py" in sub and "2 lines" in sub
+        assert _disp("list_dir", {"path": "../etc"}, ctx).startswith("✗")     # escape refused
+        assert _disp("list_dir", {"path": "nope"}, ctx).startswith("✗")       # missing folder
+        assert _disp("list_dir", {"path": "top.py"}, ctx).startswith("✗")     # a file, not a folder
+        assert isinstance(_disp("list_dir", {"path": 5}, ctx), str)           # wrong type → no crash
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.skipif(not _HAS_RG, reason="ripgrep not installed")
@@ -1097,17 +1123,19 @@ def test_unassigned_enum_members_clean_when_all_used():
     assert _unassigned_enum_members("x = 1\n") == []
 
 
-def test_reread_unchanged_serves_then_degrades_to_skeleton():
-    # ckpt-150: a coder must always be able to SEE the file. An unchanged full re-read
-    # SERVES the current content (ℹ, not a refusal); repeating it degrades to a skeleton
-    # (bounded — no context blow-out) with a nudge. Never a flat "no".
-    ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
+def test_reread_unchanged_shortcircuits_no_body():
+    # NEW CONTRACT (view-redesign): the coder ALREADY holds an unchanged file's view, so a
+    # re-read does NOT re-dump it — it returns one line ("you already have this, up to date"),
+    # no body, nothing capped. Repeating escalates the nudge. Never a ✗ (inert to fail-counter).
+    src = "a = 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {"m.py": src},
            "project_root": ".", "files_changed": set(),
            "view_at": {"m.py": "step 1 (loaded at the start)"}}
     r1 = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r1.startswith("ℹ") and "a = 1" in r1                # first re-read: serves content
+    assert r1.startswith("ℹ") and "ALREADY have" in r1 and "UP TO DATE" in r1
+    assert "a = 1" not in r1                                   # no re-dump of the body
     r2 = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r2.startswith("ℹ") and "re-read" in r2              # repeat: degraded + nudge
+    assert r2.startswith("ℹ") and "2×" in r2                   # repeat: escalated nudge
     assert not r2.startswith("✗")                              # inert to the fail-counter
 
 
@@ -1192,7 +1220,7 @@ def test_edit_file_batch_applies_atomically_with_one_diff():
     res = ctx["file_contents"]["m.py"]
     assert "def _h" not in res and "_h(" not in res         # both edits landed
     assert "return n + 1" in res
-    assert "Applied 2 edit(s)" in out and "consolidated" in out
+    assert "Applied 2 edit(s)" in out and "CUMULATIVE change" in out
 
 
 def test_dangling_ref_reject_points_at_the_use_site():
@@ -1230,75 +1258,89 @@ def test_orphaned_block_reject_names_the_header():
 # window mid-step → the method-creation step aborted and the def was lost.
 
 def test_reread_serves_current_content_not_refusal():
-    # ckpt-150: a SECOND full read now SERVES the current content (the coder needs to
-    # see it to reason), not a flat refusal; a range read still works.
+    # NEW CONTRACT: the FIRST full read serves the content (incrusted in the tree); a SECOND
+    # full read short-circuits ("already have it") instead of re-dumping; a RANGE read of an
+    # unseen slice still works (never refused).
     ctx, rel, root = _mk_ctx()
     try:
         first = _disp("read_file", {"path": rel}, ctx)
         assert "greet" in first                              # real content returned
+        assert "=== VIEW:" in first and rel in first         # incrusted VIEW header names THIS file
         assert rel in ctx.get("view_at", {})                # view recorded
         second = _disp("read_file", {"path": rel}, ctx)
-        assert second.startswith("ℹ") and "greet" in second  # served the content, not refused
+        assert second.startswith("ℹ") and "ALREADY have" in second   # short-circuit, no re-dump
         rng = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 3}, ctx)
-        assert not rng.startswith("ℹ")                       # range read still works
+        assert not rng.startswith("ℹ") and "RANGE" in rng    # range read still works, flagged RANGE
     finally:
         _cleanup(root)
 
 
 def test_reread_after_edit_shows_diff_and_current_content():
-    # ckpt-150: after an edit, a full re-read makes "UPDATED" UNMISTAKABLE — it leads
-    # with the diff of what changed and serves the CURRENT content (live line numbers),
-    # instead of telling the coder to trust a now-stale view.
+    # NEW CONTRACT: after an edit, the edit RESULT already handed the coder the cumulative
+    # diff = the file's live state, so a full re-read short-circuits ("already have it; your
+    # edits are applied") rather than re-dumping. The edit's own diff is vs the STEP-START
+    # baseline (cumulative), with live line numbers.
     src = "a = 1\nb = 2\nc = 3\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
-           "project_root": ".", "files_changed": set(), "round": 4, "step_num": 2}
+           "project_root": ".", "files_changed": set(), "round": 4, "step_num": 2,
+           "_first_seen": {"m.py": src}}
     out = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 2, "old": ["b = 2"], "new": ["b = 20"]}]}, ctx)
     assert out.startswith("✓")
+    assert "CUMULATIVE change" in out and "START of this step" in out   # diff framed vs step-start
+    assert "2:+ b = 20" in out                               # the diff shows the change
     assert "m.py" in ctx.get("view_at", {})
     r = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r.startswith("✓") and "UPDATED" in r              # clearly flagged as updated
-    assert "what changed" in r                               # the diff is shown
-    assert "2:+ b = 20" in r                                 # diff shows the change
-    assert "2 ⇥0|b = 20" in r                                # CURRENT content w/ live line numbers
+    assert r.startswith("ℹ") and "ALREADY have" in r         # short-circuit, not a re-dump
+    assert "applied" in r                                    # told its edits are applied
 
 
-def test_reread_injected_target_serves_content():
-    # ckpt-150: a file injected into the prompt (view_at seeded, no read yet) is
-    # re-served on a full read — the coder can always see it.
-    ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None, "viewed_versions": {},
-           "project_root": ".", "files_changed": set(),
+def test_reread_injected_target_shortcircuits():
+    # NEW CONTRACT: a file injected into the prompt (view_at + viewed_versions seeded at step
+    # start) is ALREADY in the coder's context, so a full re-read short-circuits — it doesn't
+    # re-dump the block that's already sitting in the user turn.
+    ctx = {"file_contents": {"m.py": "a = 1\n"}, "sandbox": None,
+           "viewed_versions": {"m.py": "a = 1\n"}, "project_root": ".", "files_changed": set(),
            "view_at": {"m.py": "step 1 (loaded at the start)"}}
     r = _disp("read_file", {"path": "m.py"}, ctx)
-    assert r.startswith("ℹ") and "a = 1" in r
+    assert r.startswith("ℹ") and "ALREADY have" in r and "a = 1" not in r
 
 
-def test_reread_large_file_serves_skeleton_not_full_dump():
-    # ckpt-150: a re-read of a LARGE file must NOT re-dump it (the f631 context
-    # blow-out) — it serves a navigable skeleton, bounded. "Large" = above
-    # _FULL_REREAD_CAP (raised 500→1500 in ckpt-166), so use >1500 lines here.
-    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(900))   # 1800 lines (>1500 cap)
+def test_large_file_first_read_is_structure_not_full_dump():
+    # NEW CONTRACT: a file over _FULL_VIEW_CAP (3000 lines) is NEVER dumped in full — even on
+    # the FIRST read it comes back as STRUCTURE with a "read it range-by-range" redirect, so a
+    # multi-thousand-line file can't blow the context (f631). It is NOT marked fully-in-view.
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(1600))   # 3200 lines (>3000)
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
-           "project_root": ".", "files_changed": set(), "view_at": {"big.py": "step 1"}}
+           "project_root": ".", "files_changed": set()}
     r = _disp("read_file", {"path": "big.py"}, ctx)
-    assert r.startswith("ℹ") and "too large" in r            # skeleton path, not full dump
+    assert "TOO LARGE" in r and "STRUCTURE only" in r        # structure path
+    assert "range" in r.lower()                              # tells it to range-read
     assert len(r) < len(big)                                 # bounded
+    assert "big.py" not in ctx.get("view_at", {})            # NOT a full view → range reads required
 
 
-def test_reread_moderate_file_serves_full_not_skeleton():
-    # ckpt-166 (re-read skeleton trap fix): a MODERATE file (≤ _FULL_REREAD_CAP=1500
-    # lines) re-read WITHOUT a range must serve the REAL, line-numbered content — NOT
-    # a skeleton. The old cap of 500 turned a ~700-line file into a skeleton on re-read,
-    # so the coder couldn't see real indentation and guessed it wrong → IndentationError
-    # → budget-exhaust (ansible a26c325b / 395e5e20 on the ckpt-165 night run).
-    mod = "".join(f"def f{i}():\n    return {i}\n" for i in range(350))   # 700 lines (≤1500)
+def test_moderate_file_first_read_serves_full_not_skeleton():
+    # The skeleton trap fix, under the new contract: a MODERATE file (≤ _FULL_VIEW_CAP=3000
+    # lines) read WITHOUT a range serves the REAL, line-numbered content — NOT a skeleton — so
+    # the coder sees real indentation (guessing it wrong → IndentationError was the a26c325b /
+    # 395e5e20 budget-exhaust on the ckpt-165 night run). Tested on the FIRST read (a re-read of
+    # an unchanged file now short-circuits — see test_reread_unchanged_shortcircuits_no_body).
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="midfile_")
+    mod = "".join(f"def f{i}():\n    return {i}\n" for i in range(350))   # 700 lines (≤3000)
+    with open(_os.path.join(root, "mid.py"), "w") as _f:
+        _f.write(mod)
     ctx = {"file_contents": {"mid.py": mod}, "sandbox": None, "viewed_versions": {},
-           "project_root": ".", "files_changed": set(), "view_at": {"mid.py": "step 1"}}
-    r = _disp("read_file", {"path": "mid.py"}, ctx)
-    assert r.startswith("ℹ") and "CURRENT content" in r      # full-content path
-    assert "too large" not in r                              # NOT the skeleton path
-    assert "return 349" in r                                 # real body lines present, not just defs
-    assert "    return 0" in r or "⇥4|    return 0" in r     # real indentation visible
+           "project_root": root, "files_changed": set()}
+    try:
+        r = _disp("read_file", {"path": "mid.py"}, ctx)
+        assert "=== VIEW:" in r and "FULL file" in r             # full-content path, clearly labelled
+        assert "TOO LARGE" not in r and "STRUCTURE only" not in r  # NOT the structure path
+        assert "return 349" in r                                # real body lines present, not just defs
+        assert "    return 0" in r or "⇥4|    return 0" in r     # real indentation visible
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_edit_diff_stamped_with_round_when_no_step():
@@ -1307,7 +1349,8 @@ def test_edit_diff_stamped_with_round_when_no_step():
            "project_root": ".", "files_changed": set(), "round": 7}
     out = _disp("edit_file", {"path": "m.py", "hunks": [
         {"start_line": 1, "old": ["a = 1"], "new": ["a = 2"]}]}, ctx)
-    assert out.startswith("✓") and "round 7" in out and "step" not in out.split("\n")[0]
+    # the WHEN-stamp (right after the em-dash) must be round-only, not the "step S, round R" form
+    assert out.startswith("✓") and "— round 7." in out and ", round 7" not in out
 
 
 def test_edit_cot_verification_removed_even_when_flag_on():

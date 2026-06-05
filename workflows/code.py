@@ -12213,7 +12213,13 @@ async def _implement_one_step(
                 # lets every diff/view be stamped with WHEN it changed.
                 "step_num": step_num,
                 "view_at": {fp: f"step {step_num} (loaded at the start)"
-                            for fp in _nat_targets}}
+                            for fp in _nat_targets},
+                # Step-START baseline: every diff the coder gets (edit-success AND re-read) is
+                # computed against THIS, so it's the CUMULATIVE change since the step began —
+                # one stable reference the coder composes with the injected file block, instead
+                # of chaining incremental per-edit diffs. Files first read mid-step add their
+                # own baseline on first touch (_do_read/_do_edit setdefault _first_seen).
+                "_first_seen": dict(_nat_targets)}
         async def _native_pass(_model):
             _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
