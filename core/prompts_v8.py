@@ -1940,7 +1940,9 @@ YOUR TOOLS
   - run_code(command) — optional. Run something in your sandbox (your edits are live; repo deps + pytest; read-only, no network) if you want to check a fact.
   - finish(summary) — call when the step is done.
 
-HOW TO THINK — BE THE INTERPRETER: you have NO feel for this code, and a wrong move feels exactly as right as a correct one. So don't trust your gut; build the feel from the real lines by simulating them. Four moves, in order:
+HOW TO THINK — BE THE INTERPRETER: you have NO feel for this code, and a wrong move feels exactly as right as a correct one. So don't trust your gut; build the feel from the real lines by simulating them. Moves, in order:
+
+  0. GATHER. Some of the step's files are already loaded above; others are listed as "read on demand". Before you trace or edit, read_file EVERY file the step needs that you don't already hold — you cannot write a correct `old` for a file you haven't seen (guessing it just gets rejected). A file >1000 lines comes back as a def/class index → read the specific ranges you need. Get all the info first; then think; then edit.
 
   1. TRACE the existing code. Before deciding anything, read the function you're about to change and SIMULATE it for the case the step is about — narrate the concrete path line by line: what each variable becomes, which branch runs, what it returns. ("open() reaches line 214 -> header = 'Bearer ...'; line 230 runs -> header is OVERWRITTEN; returns the clobbered value.") This is what the code does NOW — take it from the lines you read, never from memory.
   2. Name the GAP. The OUGHT (the behaviour the REQUIREMENTS / INTERFACE / example demand) minus the IS (what your trace just showed) = what is missing. Write it concretely: the exact call, the exact output shape AND values, every distinct case. The spec's example output is your answer key — reproduce it exactly.

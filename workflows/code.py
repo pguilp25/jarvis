@@ -12179,18 +12179,36 @@ async def _implement_one_step(
         _to_create = [fp for fp in step_files
                       if fp not in _nat_targets
                       and (sandbox is None or sandbox.load_file(fp) is None)]
-        # ckpt-179: do NOT inject file CONTENT. Injecting all step-target files in full
-        # overflowed gpt-oss-120b's 131072-token window on the FIRST call (a26c325b: a 10-file
-        # "implement all changes" step → ~104k tokens → HTTP 400 → cascade into the slow
-        # gpt-oss-nim fallback → timeout). The coder reads what it needs on demand anyway
-        # (≤1000 lines = full; larger = a def/class index → read ranges) and uses `keep` to
-        # bound context. Inject only the file LIST (paths + line counts, flagging the big ones).
-        _file_list = "\n".join(
-            f"  {fp}  ({c.count(chr(10)) + 1} lines"
-            + ("  — >1000, read_file specific ranges" if c.count(chr(10)) + 1 > _FULL_VIEW_HINT else "")
-            + ")"
-            for fp, c in _nat_targets.items()
-        ) or "  (none pre-identified — use search_text / list_dir to find the file)"
+        # ckpt-180: CAPPED injection. ckpt-178 injected ALL step files in full → a 10-file
+        # mega-step (a26c325b) = ~104k tokens > gpt-oss-120b's 131072 window → first-call 400 →
+        # slow-fallback timeout. ckpt-179 removed injection entirely → the weak coder couldn't
+        # construct correct `old` lines from a view it didn't hold → reject-loop thrash (f91:
+        # 56→248 rounds, PASS→FAIL). SO: inject files in full UP TO a budget (the common 1-3 file
+        # step is fully preloaded → coder edits immediately, no read-storm); files that DON'T fit
+        # are listed as "read on demand" (the coder reads them — >1000 lines come back as a
+        # def-index). Best of both: no overflow on mega-steps, no regression on normal steps.
+        _INJECT_BUDGET_CHARS = 160_000   # ~40k tokens; leaves room for system+history+32k output reserve
+        _injected, _overflow, _used = {}, [], 0
+        for fp, c in _nat_targets.items():
+            _blk = _aln(c, display_mode="prefix_ws")
+            # a file bigger than the whole budget must NOT be force-injected (it would overflow
+            # the window) — it goes to read-on-demand, where >1000 lines come back as a def-index.
+            if len(_blk) <= _INJECT_BUDGET_CHARS and _used + len(_blk) <= _INJECT_BUDGET_CHARS:
+                _injected[fp] = c
+                _used += len(_blk)
+            else:
+                _overflow.append(fp)
+        _file_block = "\n\n".join(
+            f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n" + _aln(c, display_mode="prefix_ws")
+            for fp, c in _injected.items()
+        ) or "(call read_file on the file(s) named in the step)"
+        _overflow_note = ""
+        if _overflow:
+            _overflow_note = (
+                "\n=== OTHER STEP FILE(S) — too big to preload together; read on demand ===\n"
+                + "\n".join(f"  {fp} ({_nat_targets[fp].count(chr(10)) + 1} lines)" for fp in _overflow)
+                + "\n(read_file these when you work on them; a file >1000 lines returns a def-index "
+                  "→ read the ranges you need, and `keep` ranges you're done with to save context.)\n")
         _nat_system = (
             IMPLEMENT_NATIVE_PROMPT
             + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
@@ -12201,29 +12219,25 @@ async def _implement_one_step(
         )
         _nat_user = (
             f"{step_instructions}\n{iface_block}\n{_create_note}"
-            f"=== YOUR STEP'S FILE(S) — NOT preloaded; read what you need ===\n{_file_list}\n\n"
-            f"read_file a file to see it (≤1000 lines = full content; larger = a def/class index "
-            f"→ then read_file the ranges you need). Edit with edit_file: copy the view line "
-            f"VERBATIM (with its `LINENO ⇥INDENT|`) as `old`. After each edit you get a diff = the "
-            f"file's new live state — keep editing from it; don't re-read a file you already hold. "
-            f"For a step touching MANY files, read a few → `keep` the ranges that matter → read "
-            f"more → keep, so your context stays small. When done and verified, call finish."
+            f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{_file_block}\n{_overflow_note}\n"
+            f"The files above are already loaded — edit them directly (no need to read_file first). "
+            f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
+            f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
+            f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
+            f"hold). Read the 'read on demand' files only when you reach them. When done and verified, "
+            f"call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
-                # ckpt-179: NOTHING preloaded — view_at + viewed_versions start EMPTY so the
-                # coder's first read of each file actually SERVES content (seeding them would
-                # short-circuit the first read → the coder edits blind). They get set on the
-                # first real read. (Reverts the inject-and-seed of ckpt-177/178.)
-                "viewed_versions": {},
+                # Seed view_at + viewed_versions ONLY for the fully-INJECTED files (the coder holds
+                # them → edit immediately, and a redundant full re-read short-circuits). Overflow
+                # files are NOT seeded → their first read actually serves content (ckpt-180).
+                "viewed_versions": dict(_injected),
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
                 "files_changed": set(),
                 "step_num": step_num,
-                "view_at": {},
-                # Step-START baseline for the CUMULATIVE diff (edit-success + re-read): the
-                # target files' content as it is NOW (before any coder edit). This does NOT gate
-                # reads (the short-circuit gates on view_at, which is empty) — it's only the diff
-                # reference. Files first read mid-step add their own baseline on first touch.
+                "view_at": {fp: f"step {step_num} (loaded at the start)" for fp in _injected},
+                # Step-START baseline for the CUMULATIVE diff — ALL targets (doesn't gate reads).
                 "_first_seen": dict(_nat_targets)}
         async def _native_pass(_model):
             _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
