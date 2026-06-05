@@ -74,7 +74,8 @@ from tools.sandbox import Sandbox
 UNDERSTAND_MODELS = [
     "zai/glm-4.7-flash",          # GLM — reliable, 203k ctx
     "nvidia/glm-5.1",             # GLM (NIM) — reliable, large ctx
-    "nvidia/deepseek-v4-flash",   # DeepSeek (NIM now, ckpt-178) — replaced dead minimax-m2.5
+    # ckpt-178b: deepseek-v4-flash + minimax-m2.5 removed (dead on all routes) — these run
+    # in a gather where each must return, so a dead member only adds fallback latency.
 ]
 
 # Coder: glm-5.1 (NIM) — reliable, large-context. A free non-OpenRouter
@@ -89,12 +90,11 @@ IMPLEMENT_MODEL = "nvidia/gpt-oss-120b"   # coder via NATIVE tool calling (2026-
 # OR :free first (non-NIM, no 502s). REVIEWER + merger stay on glm-5.1 (text).
 
 NVIDIA_5 = [
-    "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
+    "nvidia/qwen3-coder",
 ]
 
 NVIDIA_3 = [
-    "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
 ]
 
@@ -8660,13 +8660,16 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # core/retry.py remembers a downed model so the chain isn't re-walked.
     PLAN_MODELS = [
         "zai/glm-4.7-flash",          # LEAD — GLM (z.ai, 203k ctx)
-        "nvidia/deepseek-v4-flash",   # DeepSeek (→ NIM now, ckpt-178: ~5.9s, fastest)
-        "nvidia/glm-5.1",             # GLM-5.1 (→ NIM, ~53s) — replaced dead minimax-m2.5
+        "nvidia/glm-5.1",             # GLM-5.1 (→ NIM, ~53s)
         "mistral/medium",          # Mistral reasoning
+        "nvidia/qwen3-coder",         # Qwen (NIM) — diversity; the cancellable 4th racer
     ]
-    # ckpt-178: minimax-m2.5 DROPPED from the planner pool — not on NIM at all (404) and
-    # OR :free is also 404, so it cascaded through dead fallbacks on every instance,
-    # wasting PLAN-phase wall-time (a26c325b etc.). glm-5.1 (NIM, working) takes its slot.
+    # ckpt-178b: BOTH minimax-m2.5 AND deepseek-v4-flash dropped from the planner pool —
+    # they are DEAD on every route (minimax: NIM 404 + OR:free 404; deepseek-v4-flash: OR:free
+    # 404, DeepInfra 402, AND NIM 400 `literal_error` — NIM has no such model; the ckpt-178
+    # reroute-to-NIM was wrong). Both just cascaded through dead fallbacks, wasting PLAN time.
+    # 3 reliable racers (glm-4.7-flash, glm-5.1, mistral/medium) + qwen3-coder as the
+    # cancellable 4th ("first 3 of 4 win" → a flaky qwen never gates the layer).
 
     cot = PLAN_COT_NEW if is_new_project else PLAN_COT_EXISTING
     # GROUND the file list in the REAL filesystem: a collapsed tree (top-level
