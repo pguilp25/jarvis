@@ -74,7 +74,7 @@ from tools.sandbox import Sandbox
 UNDERSTAND_MODELS = [
     "zai/glm-4.7-flash",          # GLM — reliable, 203k ctx
     "nvidia/glm-5.1",             # GLM (NIM) — reliable, large ctx
-    "nvidia/minimax-m2.5",        # MiniMax (→ OR :free, fails fast)
+    "nvidia/deepseek-v4-flash",   # DeepSeek (NIM now, ckpt-178) — replaced dead minimax-m2.5
 ]
 
 # Coder: glm-5.1 (NIM) — reliable, large-context. A free non-OpenRouter
@@ -91,13 +91,11 @@ IMPLEMENT_MODEL = "nvidia/gpt-oss-120b"   # coder via NATIVE tool calling (2026-
 NVIDIA_5 = [
     "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
-    "nvidia/minimax-m2.5",
 ]
 
 NVIDIA_3 = [
     "nvidia/deepseek-v4-flash",
     "nvidia/glm-5.1",
-    "nvidia/minimax-m2.5",
 ]
 
 
@@ -8662,10 +8660,13 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # core/retry.py remembers a downed model so the chain isn't re-walked.
     PLAN_MODELS = [
         "zai/glm-4.7-flash",          # LEAD — GLM (z.ai, 203k ctx)
-        "nvidia/deepseek-v4-flash",   # DeepSeek (→ OR :free, fails fast)
-        "nvidia/minimax-m2.5",        # MiniMax (→ OR :free, fails fast)
+        "nvidia/deepseek-v4-flash",   # DeepSeek (→ NIM now, ckpt-178: ~5.9s, fastest)
+        "nvidia/glm-5.1",             # GLM-5.1 (→ NIM, ~53s) — replaced dead minimax-m2.5
         "mistral/medium",          # Mistral reasoning
     ]
+    # ckpt-178: minimax-m2.5 DROPPED from the planner pool — not on NIM at all (404) and
+    # OR :free is also 404, so it cascaded through dead fallbacks on every instance,
+    # wasting PLAN-phase wall-time (a26c325b etc.). glm-5.1 (NIM, working) takes its slot.
 
     cot = PLAN_COT_NEW if is_new_project else PLAN_COT_EXISTING
     # GROUND the file list in the REAL filesystem: a collapsed tree (top-level

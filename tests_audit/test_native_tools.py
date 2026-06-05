@@ -1070,19 +1070,76 @@ def test_view_at_invariant_holds_across_a_full_sequence():
         _cleanup(root)
 
 
-def test_range_read_of_unseen_file_does_not_mark_it_fully_in_context():
-    """A RANGE read shows only a slice, so it must NOT enter view_at — otherwise a
-    later FULL read the coder genuinely needs would be wrongly short-circuited."""
+def test_range_read_small_file_serves_whole_and_marks_viewed():
+    """ckpt-178 range-nibbling fix: a range read of a SMALL (≤3000) file serves the WHOLE
+    file once (it's cheap to hold) and marks it viewed → every later read short-circuits,
+    so the coder can't nibble it in dozens of overlapping ranges (the f631/a26 timeout)."""
     ctx, rel, root = _mk_ctx()
     try:
         r = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 2}, ctx)
-        assert not r.startswith("ℹ")
-        assert rel not in ctx.get("view_at", {})        # partial view ≠ full view
-        full = _disp("read_file", {"path": rel}, ctx)   # the needed full read is allowed
-        assert not full.startswith("ℹ") and "class Counter" in full
-        assert rel in ctx["view_at"]                    # now it's fully in context
+        assert "FULL file" in r and "class Counter" in r     # served WHOLE, not just lines 1-2
+        assert "asked for lines 1-2" in r                    # tells coder why it got the whole file
+        assert rel in ctx["view_at"]                         # marked viewed → later reads short-circuit
+        again = _disp("read_file", {"path": rel, "start_line": 5, "end_line": 6}, ctx)
+        assert again.startswith("ℹ") and "WHOLE file" in again   # no re-fetch
     finally:
         _cleanup(root)
+
+
+def test_range_read_large_file_serves_slice_and_caches():
+    """ckpt-178: a >3000-line file CAN'T be dumped whole, so a range read serves the slice
+    (does NOT enter view_at) and CACHES it; a later read fully covered by a served range
+    short-circuits (kills the overlapping re-read), while a fresh region still serves."""
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="bigrange_")
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(2000))   # 4000 lines (>3000)
+    with open(_os.path.join(root, "big.py"), "w") as _f:
+        _f.write(big)
+    ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "step_num": 1}
+    try:
+        r = _disp("read_file", {"path": "big.py", "start_line": 100, "end_line": 200}, ctx)
+        assert "RANGE" in r and "return 50" in r                 # served the slice
+        assert "big.py" not in ctx.get("view_at", {})            # partial view ≠ full view
+        covered = _disp("read_file", {"path": "big.py", "start_line": 120, "end_line": 180}, ctx)
+        assert covered.startswith("ℹ") and "already read" in covered   # fully covered → short-circuit
+        fresh = _disp("read_file", {"path": "big.py", "start_line": 900, "end_line": 1000}, ctx)
+        assert "RANGE" in fresh and "return 450" in fresh        # a new region still serves
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_expand_indent_strips_stray_tab_marker():
+    # ckpt-178: a stray ⇥ (U+21E5, the view's indent glyph) copied into code must be removed —
+    # it's never valid Python and caused an endless SyntaxError reject-loop (c580 via mistral).
+    from core.native_tools import _expand_indent_lines as ex
+    assert ex(["0|⇥def f():"]) == ["def f():"]          # ⇥ after the INDENT| gutter, in the code
+    assert ex(["4|⇥    return 1"]) == ["    return 1"]   # indent from the number, ⇥ gone
+    assert "⇥" not in "".join(ex(["⇥x = 1"]))           # literal path also stripped
+
+
+def test_edit_with_stray_tab_marker_applies_not_loops():
+    # The ⇥ must be stripped so the edit LANDS (parses) instead of looping on SyntaxError.
+    src = "def f():\n    return 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"old": ["8|    return 1"], "new": ["8|⇥    return 2"]}]}, ctx)
+    assert out.startswith("✓"), out
+    assert "⇥" not in ctx["file_contents"]["m.py"] and "return 2" in ctx["file_contents"]["m.py"]
+
+
+def test_edit_rejects_duplicate_toplevel_def():
+    # ckpt-178: adding a SECOND top-level def of an existing name (the c580 dup-def, far apart)
+    # is rejected — the gate previously only caught ADJACENT duplicates.
+    src = "def widen(h):\n    return h\n\n\ndef other():\n    return 1\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}
+    # insert a SECOND `def widen` after other() — a far-apart duplicate
+    out = _disp("edit_file", {"path": "m.py", "hunks": [
+        {"old": ["6|    return 1"], "new": ["0|    return 1", "0|", "0|", "0|def widen(h):", "4|    return h.upper()"]}]}, ctx)
+    assert out.startswith("✗") and "widen" in out and "shadows" in out
+    assert ctx["file_contents"]["m.py"] == src              # rejected → file unchanged
 
 
 def test_unassigned_enum_members_flags_forgotten_case():
@@ -1269,8 +1326,10 @@ def test_reread_serves_current_content_not_refusal():
         assert rel in ctx.get("view_at", {})                # view recorded
         second = _disp("read_file", {"path": rel}, ctx)
         assert second.startswith("ℹ") and "ALREADY have" in second   # short-circuit, no re-dump
+        # ckpt-178 range-nibbling fix: a range read of an already-fully-viewed ≤3000 file
+        # short-circuits too (you hold the whole file) — no wasteful slice re-fetch.
         rng = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 3}, ctx)
-        assert not rng.startswith("ℹ") and "RANGE" in rng    # range read still works, flagged RANGE
+        assert rng.startswith("ℹ") and "WHOLE file" in rng
     finally:
         _cleanup(root)
 

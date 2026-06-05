@@ -557,6 +557,7 @@ async def _do_read(args: dict, ctx: dict) -> str:
     if _fc0 is not None:
         ctx.setdefault("_first_seen", {}).setdefault(path, _fc0)
     s = args.get("start_line"); e = args.get("end_line")
+    _whole_note = ""   # set when a ≤3000 range read is upgraded to a whole-file serve (ckpt-178)
     if (s is None) != (e is None):
         # Exactly one bound given → the model asked for a region but the bound it
         # dropped would be silently ignored (whole file returned). Tell it.
@@ -696,7 +697,42 @@ async def _do_read(args: dict, ctx: dict) -> str:
                 return (f"✗ read_file: start_line {s_i} is out of range — {path} has "
                         f"only {_total} line(s). Read within 1-{_total}, or omit the "
                         f"range to read the whole file.")
-        arg = f"{path} {s_i}-{e_i}"
+        # RANGE-NIBBLING FIX (ckpt-178). The coder reads a big-but-≤3000 file in MANY narrow,
+        # often-overlapping ranges (f631: 119 reads, a26c325b: ~30 ranges) — each a full ~180s
+        # round, because range reads never enter view_at and so never short-circuit. Two cures:
+        #  (a) ≤3000 lines → serve the WHOLE file ONCE (it's small enough to hold) and mark it
+        #      viewed; every later read (range or full) then short-circuits. One bounded read
+        #      beats dozens of round-trips. (set arg=path + clear the range so the tail FULL-frames.)
+        #  (b) >3000 lines → can't dump; CACHE served ranges and short-circuit a re-read whose
+        #      span is already fully covered by one we served (kills the overlapping nibble).
+        _rc_cur = ctx.get("file_contents", {}).get(path)
+        if not (_rc_cur and _rc_cur.strip()):
+            _sbx = ctx.get("sandbox")
+            _rc_cur = _sbx.load_file(path) if _sbx is not None else _rc_cur
+        if isinstance(_rc_cur, str) and _rc_cur.strip():
+            _rc_nl = _rc_cur.count("\n") + (0 if _rc_cur.endswith("\n") else 1)
+            if _rc_nl <= _FULL_VIEW_CAP:
+                _seen = ctx.get("viewed_versions", {}).get(path)
+                if path in ctx.get("view_at", {}) and _seen == _rc_cur:
+                    return (f"ℹ {path} — you already hold this WHOLE file ({_rc_nl} lines) in your "
+                            f"view; lines {s_i}-{e_i} are in it. No need to re-read — edit straight "
+                            f"from the view you have.")
+                _whole_note = (f"(You asked for lines {s_i}-{e_i}; this file is only {_rc_nl} lines "
+                               f"(≤{_FULL_VIEW_CAP}), so here is ALL of it — you now hold the whole "
+                               f"file, no need to read it again.)\n")
+                s, e = None, None          # serve WHOLE: tail FULL-frames + _note_views it
+                arg = path
+            else:
+                _sr = ctx.setdefault("_served_ranges", {}).setdefault(path, [])
+                for (a, b) in _sr:
+                    if a <= s_i and e_i <= b:
+                        return (f"ℹ {path} — you already read lines {a}-{b}, which COVER the "
+                                f"lines {s_i}-{e_i} you asked for (they're in your context above). "
+                                f"Read a region you have NOT seen, or edit from what you have.")
+                _sr.append((s_i, e_i))
+                arg = f"{path} {s_i}-{e_i}"
+        else:
+            arg = f"{path} {s_i}-{e_i}"
     else:
         arg = path
     try:
@@ -734,6 +770,9 @@ async def _do_read(args: dict, ctx: dict) -> str:
         else:
             _hdr = _view_header(ctx, path, _tot)
         out = _reframe_read_body(out, _hdr)
+        if _whole_note:                       # ≤3000 range read upgraded to a whole-file serve
+            out = out.split("\n", 1)
+            out = out[0] + "\n" + _whole_note + (out[1] if len(out) > 1 else "")
     # A successful FULL read means the coder now holds the whole current file — record it so a
     # later full re-read is short-circuited. (A RANGE read shows only a slice → NOT fully in
     # context; an error/skeleton is NOT a view → never marked, so the coder keeps trying.)
@@ -778,6 +817,30 @@ def _post_edit_syntax_gate(path: str, new_content: str, before, *,
                     f"adjacent code — {where} repeats the statement right before it "
                     f"(the file is unchanged). You likely re-emitted an anchor block "
                     f"AND your new copy. Keep ONE; {resend}.")
+        # Duplicate TOP-LEVEL def/class (ckpt-178): the adjacent check above misses two defs of
+        # the SAME name FAR APART — c580 added `def widened_hostnames` at line 77 AND line 546,
+        # the 2nd silently shadowing the 1st so half the logic was dead. Flag a module-level
+        # name this edit made appear 2+ times when it didn't before (pre-existing dups pass).
+        import ast as _ast
+        def _toplevel_dupes(src):
+            try:
+                _t = _ast.parse(src)
+            except Exception:
+                return {}
+            _seen = {}
+            for _node in _t.body:
+                if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    _seen[_node.name] = _seen.get(_node.name, 0) + 1
+            return {k: c for k, c in _seen.items() if c > 1}
+        _new_dd = _toplevel_dupes(new_content)
+        _old_dd = _toplevel_dupes(before) if before else {}
+        _newly = [k for k, c in _new_dd.items() if c > _old_dd.get(k, 0)]
+        if _newly:
+            _nm = _newly[0]
+            return (f"✗ {tool} NOT applied to {path}: your edit defines `{_nm}` {_new_dd[_nm]}× "
+                    f"at the top level of {path} — a SECOND `def {_nm}`/`class {_nm}` silently "
+                    f"shadows the first, so half your logic is dead code. Keep ONE definition "
+                    f"(edit the existing one in place, don't add a new copy); {resend}.")
     return None
 
 
@@ -1082,7 +1145,13 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
         ln = _APPEARS_TAIL_RE.sub('', ln)
         m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
         if m:                                    # INDENT|code or LINENO:INDENT|code
-            code = m.group(2)
+            # STRIP a stray `⇥`/U+21E5 from the CODE part (ckpt-178): a weak coder copying the
+            # view's `LINENO ⇥INDENT|` gutter sloppily can leave a ⇥ inside the code (e.g.
+            # `0|⇥def f` → `\d+\|` matches `0|`, the ⇥ rides along in `code`). ⇥ is the harness's
+            # display glyph, NEVER valid in Python source, so a leftover is always a leaked marker
+            # — it caused an endless `SyntaxError: invalid character '⇥'` reject-loop (c580 via
+            # mistral). Strip it BEFORE lstrip so the spaces it shielded aren't kept as indent.
+            code = m.group(2).replace("⇥", "")
             ind = int(m.group(1))
             if trust_spaces:
                 typed = len(code) - len(code.lstrip(' '))
@@ -1090,7 +1159,7 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
                     ind = typed
             out.append(' ' * ind + code.lstrip(' '))
         else:
-            out.append(ln)                       # literal — never a guessed transform
+            out.append(ln.replace("⇥", ""))      # literal — drop a leaked marker, else verbatim
     return out
 
 
@@ -1372,6 +1441,15 @@ def _do_edit(args: dict, ctx: dict) -> str:
             path, result[path], before, tool="edit_file",
             resend="re-send the corrected hunk")
         if _gate:
+            # REVERT (ckpt-178): a PARSEABLE-but-bad result (unreachable / duplicate / dup-def)
+            # was tentatively written to file_contents + sandbox just above, so a bare reject
+            # would leave the file CHANGED while telling the coder "the file is unchanged" — a
+            # lie that makes it edit blind. Reset to the pre-edit snapshot so "unchanged" is TRUE.
+            ctx["file_contents"].clear(); ctx["file_contents"].update(_before_all)
+            _sbr = ctx.get("sandbox")
+            if _sbr is not None and before is not None:
+                try: _sbr.write_file(path, before)
+                except Exception: pass
             # WHOLE-BLOCK route (ckpt-137; replace_lines retired from CODER_TOOLS — the
             # message now routes to edit_file itself). The gate (unreachable / duplicate /
             # parse) fires almost only on a WHOLE-BLOCK rewrite where the coder's hunk

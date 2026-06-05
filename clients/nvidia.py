@@ -82,7 +82,11 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 # and 1M native), so we keep Pro on NVIDIA/Lightning. Flash on DeepInfra
 # keeps the full 1M context, which is what we want for huge code repos.
 DEEPINFRA_MODELS = {
-    "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
+    # deepseek-v4-flash REMOVED (ckpt-178): DeepInfra returns HTTP 402 "need positive
+    # balance" → it 402'd on EVERY planner round in the ckpt-177 run. ckpt-174 un-forced
+    # it from OR but left it here, so _route hit DeepInfra (line 210) BEFORE NIM. With it
+    # gone (and LIGHTNING_API_KEY unset), _route falls through to NIM (line 226) →
+    # "deepseek-ai/deepseek-v4-flash" which is VERIFIED 200 @ ~5.9s — the FASTEST planner.
 }
 
 # OpenRouter slugs — every entry MUST be a :free model (user-confirmed
