@@ -69,7 +69,7 @@ def _disp(name, args, ctx):
 def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     # ckpt-138: collapsed to ONE edit tool (edit_file old→new). replace_lines removed.
-    assert names == {"read_file", "list_dir", "find_refs", "find_callers", "search_text",
+    assert names == {"read_file", "list_dir", "keep", "find_refs", "find_callers", "search_text",
                      "file_purpose", "semantic_search", "depends_on",
                      "edit_file", "create_file", "run_code", "finish"}
 
@@ -1109,6 +1109,38 @@ def test_range_read_large_file_serves_slice_and_caches():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_keep_errors_if_file_not_viewed():
+    # ckpt-179: keep must reject a file/range the coder hasn't actually viewed.
+    ctx = {"file_contents": {"m.py": "a=1\nb=2\nc=3\n"}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set()}   # nothing viewed (view_at absent)
+    r = _disp("keep", {"path": "m.py", "ranges": [[1, 2]]}, ctx)
+    assert r.startswith("✗") and "haven't viewed" in r
+
+
+def test_keep_after_view_succeeds_and_validates_range():
+    # After reading a ≤1k file (whole-viewed), keep a real range → ✓; an out-of-file range → ✗.
+    ctx, rel, root = _mk_ctx()
+    try:
+        _disp("read_file", {"path": rel}, ctx)                 # now fully viewed
+        ok = _disp("keep", {"path": rel, "ranges": [[1, 3]]}, ctx)
+        assert ok.startswith("✓") and "keeping lines 1-3" in ok
+        assert ctx["_kept"][rel] == [(1, 3)]
+        bad = _disp("keep", {"path": rel, "ranges": [[1, 99999]]}, ctx)
+        assert bad.startswith("✗") and "outside" in bad
+        junk = _disp("keep", {"path": rel, "ranges": "notalist"}, ctx)  # wrong type → clean ✗, no crash
+        assert junk.startswith("✗")
+    finally:
+        _cleanup(root)
+
+
+def test_def_index_lists_defs_no_bodies():
+    from core.native_tools import _def_index
+    src = "import os\nclass Foo:\n    def bar(self):\n        return 1\ndef baz():\n    return 2\n"
+    idx = _def_index(src, "m.py")
+    assert "class Foo" in idx and "def bar" in idx and "def baz" in idx
+    assert "return 1" not in idx and "import os" not in idx     # names only, no bodies/other lines
+
+
 def test_expand_indent_strips_stray_tab_marker():
     # ckpt-178: a stray ⇥ (U+21E5, the view's indent glyph) copied into code must be removed —
     # it's never valid Python and caused an endless SyntaxError reject-loop (c580 via mistral).
@@ -1365,16 +1397,17 @@ def test_reread_injected_target_shortcircuits():
     assert r.startswith("ℹ") and "ALREADY have" in r and "a = 1" not in r
 
 
-def test_large_file_first_read_is_structure_not_full_dump():
-    # NEW CONTRACT: a file over _FULL_VIEW_CAP (3000 lines) is NEVER dumped in full — even on
-    # the FIRST read it comes back as STRUCTURE with a "read it range-by-range" redirect, so a
-    # multi-thousand-line file can't blow the context (f631). It is NOT marked fully-in-view.
-    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(1600))   # 3200 lines (>3000)
+def test_large_file_first_read_is_def_index_not_full_dump():
+    # ckpt-179 CONTRACT: a file over _FULL_VIEW_CAP (1000 lines) is NEVER dumped in full — even on
+    # the FIRST read it comes back as a DEF/CLASS INDEX (names + line numbers, no bodies) + a
+    # "read a range" redirect, so it can't blow gpt-oss-120b's 131072 window. NOT marked viewed.
+    big = "".join(f"def f{i}():\n    x = 1\n    y = 2\n    return {i}\n" for i in range(300))  # 1200 lines, 300 defs
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set()}
     r = _disp("read_file", {"path": "big.py"}, ctx)
-    assert "TOO LARGE" in r and "STRUCTURE only" in r        # structure path
-    assert "range" in r.lower()                              # tells it to range-read
+    assert "TOO LARGE" in r and "line range" in r            # the >1000 view
+    assert "def f0" in r and "def f299" in r                 # the def INDEX (names + lines, ≤500 cap)
+    assert "return 0" not in r and "x = 1" not in r          # but NO bodies (just the index)
     assert len(r) < len(big)                                 # bounded
     assert "big.py" not in ctx.get("view_at", {})            # NOT a full view → range reads required
 

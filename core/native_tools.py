@@ -152,6 +152,22 @@ CODER_TOOLS = [
         }, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "keep",
+        "description": (
+            "Free up context by KEEPING only the line ranges of a file you still need and "
+            "dropping the rest of that file's view from your context. Use it when you've read "
+            "several files/ranges and only a few spots actually matter: read a few → keep the "
+            "relevant ranges → read more → keep — so a many-file step never overflows. You can "
+            "ONLY keep ranges of a file you have already VIEWED (read_file first); keeping a "
+            "file or range you haven't viewed is an error. The kept ranges stay; everything else "
+            "of that file is replaced by a short pointer (read_file a range to bring it back)."),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "repo-relative file you've already read"},
+            "ranges": {"type": "array", "description": "the line ranges to KEEP, each as [start, end] (1-based, inclusive)",
+                       "items": {"type": "array", "items": {"type": "integer"}}},
+        }, "required": ["path", "ranges"]},
+    }},
+    {"type": "function", "function": {
         "name": "find_refs",
         "description": (
             "Find usages of a symbol (function/class/variable name) across the project "
@@ -407,13 +423,14 @@ def _str_or_err(args: dict, key: str, tool: str):
                   f"(got {type(v).__name__}). Re-issue with a string {key}.")
 
 
-_FULL_VIEW_CAP = 3000    # a file up to this many lines is shown IN FULL (first read OR re-read);
-                         # larger → STRUCTURE only + "read it range-by-range" (never a full dump,
-                         # which is what blew f631's context). Replaces the old _FULL_REREAD_CAP:
-                         # the coder must SEE real, navigable content for any normal-sized file
-                         # (gpt-oss intermittently drops the start_line/end_line range args, so a
-                         # too-eager skeleton starved it of real indentation → IndentationError),
-                         # but a genuinely huge file is navigated by explicit ranges, not dumped.
+_FULL_VIEW_CAP = 1000    # a file up to this many lines is shown IN FULL (first read OR re-read);
+                         # larger → a compact DEF/CLASS INDEX (names + line numbers, NO bodies) +
+                         # "use read_file with a line range" — never a full dump or a verbose
+                         # skeleton. Lowered 3000→1000 (ckpt-179): even a single >1k file in
+                         # context, ×several files, overflowed gpt-oss-120b's 131072 window and
+                         # forced the slow gpt-oss-nim fallback → timeout (a26c325b/f631/111347e9).
+                         # The coder navigates a big file by the def-index then reads ranges, and
+                         # `keep` discards ranges it no longer needs so context stays bounded.
 _FULL_REREAD_CAP = _FULL_VIEW_CAP   # back-compat alias (a few call sites / tests still name it)
 
 
@@ -510,13 +527,50 @@ def _incrusted_tree(ctx: dict, rel_path: str) -> str:
         return ""
 
 
+def _def_index(content: str, path: str) -> str:
+    """A compact navigation INDEX for a too-large (>cap) file: every def/class with its line
+    number, NO bodies — just enough to know WHERE to look, then read a range. (ckpt-179: the
+    big-file view is this index, not a full dump or a verbose skeleton.) Best-effort; falls back
+    to a def/class line-grep for non-Python / unparseable files. Never raises."""
+    try:
+        import ast as _ast
+        _t = _ast.parse(content)
+        rows = []
+        for _n in _ast.walk(_t):
+            if isinstance(_n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                _kind = "class" if isinstance(_n, _ast.ClassDef) else "def"
+                _ind = "  " * (getattr(_n, "col_offset", 0) // 4)
+                rows.append((_n.lineno, f"  {_n.lineno}: {_ind}{_kind} {_n.name}"))
+        rows.sort()
+        body = "\n".join(r[1] for r in rows[:500])
+        if body:
+            return body
+    except Exception:
+        pass
+    # non-Python / unparseable → grep def/class/function-ish lines
+    import re as _re2
+    out = [f"  {i+1}: {ln.strip()[:90]}" for i, ln in enumerate(content.split("\n"))
+           if _re2.match(r'\s*(def |class |async def |function |[A-Za-z_]+\s*=\s*function)', ln)]
+    return "\n".join(out[:500]) or "  (no def/class lines detected — read a range to see content)"
+
+
+def _too_large_view(ctx: dict, path: str, nlines: int, content: str) -> str:
+    """The >cap big-file view (ckpt-179): incrusted header + the def/class INDEX + a pointer to
+    read a range. NO bodies, NO full dump — keeps the footprint tiny so many files fit in context."""
+    return (_view_header(ctx, path, nlines, structure_only=True)
+            + "\nThis file's defs/classes — just to see WHERE to look; read_file a range for the "
+              "actual code (or search_text/find_refs to locate a symbol's line):\n"
+            + _def_index(content, path)
+            + f"\n→ read_file(path='{path}', start_line=N, end_line=M) around the line you need.")
+
+
 def _view_header(ctx: dict, rel_path: str, total_lines: int,
                  *, range_desc: str = "", structure_only: bool = False) -> str:
     """The incrusted VIEW header: a clear, unambiguous 'THIS file / FULL vs RANGE vs
     STRUCTURE' banner, then the file's position in the tree (breadcrumb + siblings)."""
     if structure_only:
-        head = (f"=== VIEW: {rel_path} — {total_lines} lines — TOO LARGE to show in full; "
-                f"STRUCTURE only (read it range-by-range) ===")
+        head = (f"=== VIEW: {rel_path} — {total_lines} lines — TOO LARGE to show in full "
+                f"(>{_FULL_VIEW_CAP}); use read_file with a line range ===")
     elif range_desc:
         head = (f"=== VIEW: {rel_path} — {range_desc} of {total_lines}  "
                 f"(RANGE — NOT the full file) ===")
@@ -611,10 +665,7 @@ async def _do_read(args: dict, ctx: dict) -> str:
             _note_view(ctx, path)
             _nlines = cur.count("\n") + (0 if cur.endswith("\n") else 1)
             if _nlines > _FULL_VIEW_CAP:
-                from core.tool_call import _build_file_skeleton
-                _body = (_view_header(ctx, path, _nlines, structure_only=True)
-                         + "\n→ read_file(path, start_line=N, end_line=M) around a def below to "
-                           "see real content.\n" + _build_file_skeleton(cur.split("\n"), filename=path))
+                _body = _too_large_view(ctx, path, _nlines, cur)
             else:
                 from tools.codebase import add_line_numbers
                 _body = (_view_header(ctx, path, _nlines) + "\n"
@@ -660,13 +711,9 @@ async def _do_read(args: dict, ctx: dict) -> str:
         if isinstance(_cur, str) and _cur.strip():
             _nl = _cur.count("\n") + (0 if _cur.endswith("\n") else 1)
             if _nl > _FULL_VIEW_CAP:
-                from core.tool_call import _build_file_skeleton
                 ctx["file_contents"][path] = _cur          # keep the base in step with disk
-                # STRUCTURE is not a full view → do NOT _note_view (force explicit range reads).
-                return (_view_header(ctx, path, _nl, structure_only=True)
-                        + "\n→ read_file(path, start_line=N, end_line=M) around a def below to see "
-                          "real content (this file is too large to show in full).\n"
-                        + _build_file_skeleton(_cur.split("\n"), filename=path))
+                # the def-index is NOT a full view → do NOT _note_view (force explicit range reads).
+                return _too_large_view(ctx, path, _nl, _cur)
     if s is not None and e is not None:
         try:
             s_i, e_i = int(s), int(e)
@@ -1725,6 +1772,66 @@ def _do_list_dir(args: dict, ctx: dict) -> str:
     return "\n".join(out)
 
 
+def _render_ranges(content: str, ranges: list) -> str:
+    """Render specific 1-based line ranges of `content` in the `LINENO ⇥INDENT|code` view form
+    (real line numbers). Used to replace a dropped full view with just the kept ranges."""
+    lines = content.split("\n")
+    out = []
+    for (s, e) in ranges:
+        out.append(f"  ── lines {s}-{e} ──")
+        for i in range(max(1, s), min(len(lines), e) + 1):
+            ln = lines[i - 1]
+            ind = len(ln) - len(ln.lstrip(' '))
+            out.append(f"{i} ⇥{ind}|{ln}")
+    return "\n".join(out)
+
+
+def _do_keep(args: dict, ctx: dict) -> str:
+    """KEEP only the given line ranges of an already-VIEWED file; the loop then drops the rest of
+    that file's view from context (ckpt-179). Errors if the file or a range wasn't viewed."""
+    path, _e = _str_or_err(args, "path", "keep")
+    if _e:
+        return _e
+    raw = args.get("ranges")
+    norm = []
+    if isinstance(raw, list):
+        for r in raw:
+            if isinstance(r, (list, tuple)) and len(r) >= 2:
+                try:
+                    norm.append((int(r[0]), int(r[1])))
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(r, str):
+                m = re.match(r'\s*(\d+)\s*-\s*(\d+)', r)
+                if m:
+                    norm.append((int(m.group(1)), int(m.group(2))))
+    if not norm:
+        return ("✗ keep: `ranges` must be a list of [start, end] line pairs "
+                "(e.g. [[40, 60], [120, 135]]).")
+    cur = ctx.get("file_contents", {}).get(path)
+    if cur is None:
+        _sb = ctx.get("sandbox")
+        cur = _sb.load_file(path) if _sb is not None else None
+    viewed = path in ctx.get("view_at", {}) or path in ctx.get("_served_ranges", {})
+    if cur is None or not viewed:
+        return (f"✗ keep: you haven't viewed {path} — read_file it first, then keep the "
+                f"ranges you need.")
+    filelen = cur.count("\n") + 1 if cur else 0
+    fully = path in ctx.get("view_at", {})            # a whole-file view → every line is viewed
+    served = ctx.get("_served_ranges", {}).get(path, [])
+    for (s, e) in norm:
+        if s < 1 or e < s or e > filelen:
+            return (f"✗ keep: range {s}-{e} is outside {path} (it has {filelen} lines). "
+                    f"Keep only ranges you actually read.")
+        if not fully and not any(a <= s and e <= b for (a, b) in served):
+            return (f"✗ keep: you haven't viewed lines {s}-{e} of {path} — read_file that "
+                    f"range first, then keep it.")
+    ctx.setdefault("_kept", {})[path] = norm
+    _rng = ", ".join(f"{s}-{e}" for s, e in norm)
+    return (f"✓ keep: keeping lines {_rng} of {path}; the rest of its view is dropped from your "
+            f"context (read_file a range to bring any of it back).")
+
+
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
     sym, _e = _str_or_err(args, "symbol", "find_refs")
@@ -1931,6 +2038,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         return res
     if name == "list_dir":
         return _do_list_dir(args, ctx)
+    if name == "keep":
+        return _do_keep(args, ctx)
     if name == "find_refs":
         return await _do_refs(args, ctx)
     if name == "find_callers":
@@ -2546,7 +2655,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     for _m in messages[:-1]:
                         _c = _m.get("content")
                         if (_m.get("role") == "tool" and isinstance(_c, str)
-                                and "=== Code:" in _c and _ep in _c
+                                and ("=== Code:" in _c or "=== VIEW:" in _c) and _ep in _c
                                 and "⟪SUPERSEDED" not in _c):
                             _m["content"] = (
                                 f"⟪SUPERSEDED — {_ep} was edited after this read ({_when}). "
@@ -2554,6 +2663,25 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                 f"result above; the REST of this view is still accurate. "
                                 f"Don't re-read the whole file — your view + the diff is "
                                 f"current.⟫\n" + _c)
+            # KEEP eviction (ckpt-179): the coder called keep(path, ranges) → DROP the rest of
+            # that file's view from history, leaving only the kept ranges, to free context. Pure
+            # content-replacement on existing tool messages (no add/remove → API pairing intact).
+            if (name == "keep" and isinstance(result_str, str) and result_str.startswith("✓")):
+                _kp = (args.get("path") or "") if isinstance(args, dict) else ""
+                _kr = ctx.get("_kept", {}).get(_kp)
+                _kc = ctx.get("file_contents", {}).get(_kp)
+                if _kp and _kr and _kc:
+                    _krender = _render_ranges(_kc, _kr)
+                    _rngs = ", ".join(f"{s}-{e}" for s, e in _kr)
+                    for _m in messages:
+                        _c = _m.get("content")
+                        if (_m.get("role") == "tool" and isinstance(_c, str)
+                                and ("=== VIEW:" in _c or "=== Code:" in _c) and _kp in _c
+                                and "⟪KEPT" not in _c):
+                            _m["content"] = (
+                                f"⟪KEPT only lines {_rngs} of {_kp} (you called keep); the rest "
+                                f"of this view was dropped to save context — read_file a range "
+                                f"to bring any of it back.⟫\n{_krender}")
         # TRACE grounding (JARVIS_TRACE): if the coder filled a trace this round,
         # check its `@ file:line | code` citations against the REAL files. An
         # imagined flow gets a concrete re-trace nudge — the SAME enforcement the

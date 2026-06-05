@@ -365,3 +365,34 @@ def test_loop_hard_stops_on_repeated_identical_reject():
         assert model.calls <= 4
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_loop_keep_evicts_old_view_from_history():
+    # ckpt-179: keep(path, ranges) rewrites the file's prior view messages in history down to
+    # just the kept ranges, so context shrinks. Drive the real loop and inspect what the model
+    # was handed on the call AFTER keep.
+    root = tempfile.mkdtemp(prefix="natloopkeep_")
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(800))   # 1600 lines (>1000)
+    rel = "big.py"
+    with open(os.path.join(root, rel), "w") as f:
+        f.write(big)
+    sb = Sandbox(root); sb.setup(); sb.load_file(rel)
+    ctx = {"file_contents": {rel: big}, "sandbox": sb, "project_root": root,
+           "viewed_versions": {}, "purpose_map": "", "detailed_map": "", "files_changed": set(),
+           "step_num": 1, "_first_seen": {}}
+    try:
+        script = [
+            _msg(tool_calls=[_tc("1", "read_file", path=rel)]),                     # def-index
+            _msg(tool_calls=[_tc("2", "read_file", path=rel, start_line=10, end_line=30)]),  # a range
+            _msg(tool_calls=[_tc("3", "keep", path=rel, ranges=[[10, 30]])]),       # keep → evict
+            _msg(tool_calls=[_tc("4", "finish", summary="done")]),
+        ]
+        res, model = _run(script, ctx)
+        # the finish call (last) saw the rewritten history
+        final_msgs = model.seen_messages[-1]
+        blob = "\n".join(str(m.get("content")) for m in final_msgs if m.get("role") == "tool")
+        assert "⟪KEPT only lines 10-30" in blob          # the view was rewritten to kept ranges
+        assert "TOO LARGE" not in blob                    # the big def-index view is gone
+        assert "10 ⇥0|def f4" in blob or "11 ⇥" in blob   # kept range content is present
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

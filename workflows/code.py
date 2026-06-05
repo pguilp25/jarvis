@@ -82,6 +82,9 @@ UNDERSTAND_MODELS = [
 # deepseek-v4-flash does NOT exist (Pollinations charges for it = 402, NIM
 # forbids it = 403), so glm-5.1 is the realistic free coder primary.
 IMPLEMENT_MODEL = "nvidia/gpt-oss-120b"   # coder via NATIVE tool calling (2026-05-27)
+# Mirror of core.native_tools._FULL_VIEW_CAP (ckpt-179): files larger than this are NOT shown
+# in full (def-index + ranges instead). Used only to FLAG big files in the step's file list.
+_FULL_VIEW_HINT = 1000
 # gpt-oss is the most redundant free model (Groq/OR/DeepInfra/NIM → distributes
 # compute at scale) and fast/reliable, but it's built for NATIVE function calling,
 # not JARVIS's text [edit]/[tool use] protocol (it emitted bare tags). So when the
@@ -12176,13 +12179,18 @@ async def _implement_one_step(
         _to_create = [fp for fp in step_files
                       if fp not in _nat_targets
                       and (sandbox is None or sandbox.load_file(fp) is None)]
-        _file_block = "\n\n".join(
-            f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n"
-            + _aln(c, display_mode="prefix_ws")
+        # ckpt-179: do NOT inject file CONTENT. Injecting all step-target files in full
+        # overflowed gpt-oss-120b's 131072-token window on the FIRST call (a26c325b: a 10-file
+        # "implement all changes" step → ~104k tokens → HTTP 400 → cascade into the slow
+        # gpt-oss-nim fallback → timeout). The coder reads what it needs on demand anyway
+        # (≤1000 lines = full; larger = a def/class index → read ranges) and uses `keep` to
+        # bound context. Inject only the file LIST (paths + line counts, flagging the big ones).
+        _file_list = "\n".join(
+            f"  {fp}  ({c.count(chr(10)) + 1} lines"
+            + ("  — >1000, read_file specific ranges" if c.count(chr(10)) + 1 > _FULL_VIEW_HINT else "")
+            + ")"
             for fp, c in _nat_targets.items()
-        ) or "(call read_file on the file(s) named in the step)"
-        # Native coder system prompt is the maintained IMPLEMENT_NATIVE_PROMPT (its
-        # tool list stays in lockstep with CODER_TOOLS); append per-step feedback.
+        ) or "  (none pre-identified — use search_text / list_dir to find the file)"
         _nat_system = (
             IMPLEMENT_NATIVE_PROMPT
             + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
@@ -12193,36 +12201,29 @@ async def _implement_one_step(
         )
         _nat_user = (
             f"{step_instructions}\n{iface_block}\n{_create_note}"
-            f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{_file_block}\n\n"
-            f"These files are already loaded — edit them directly (no need to read_file "
-            f"first). After each edit you get a diff = the file's new live state; keep "
-            f"editing from it (for `old`, copy the view line VERBATIM with its `LINENO "
-            f"⇥INDENT|`; edit_file anchors on BOTH the line number AND the content, so a "
-            f"shifted view self-corrects). If you're EVER unsure of a file's current state "
-            f"— after several edits, or you've lost track of the live line numbers — just "
-            f"read_file it again: you'll get the CURRENT content plus a diff of what "
-            f"changed, so you can always SEE the real code before editing. When the change "
-            f"is done and you've verified it, call finish."
+            f"=== YOUR STEP'S FILE(S) — NOT preloaded; read what you need ===\n{_file_list}\n\n"
+            f"read_file a file to see it (≤1000 lines = full content; larger = a def/class index "
+            f"→ then read_file the ranges you need). Edit with edit_file: copy the view line "
+            f"VERBATIM (with its `LINENO ⇥INDENT|`) as `old`. After each edit you get a diff = the "
+            f"file's new live state — keep editing from it; don't re-read a file you already hold. "
+            f"For a step touching MANY files, read a few → `keep` the ranges that matter → read "
+            f"more → keep, so your context stays small. When done and verified, call finish."
         )
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
-                # Seed viewed_versions from the injected file block so the coder's
-                # FIRST replace_lines lands (no wasted "read first" round).
-                "viewed_versions": dict(_nat_targets),
+                # ckpt-179: NOTHING preloaded — view_at + viewed_versions start EMPTY so the
+                # coder's first read of each file actually SERVES content (seeding them would
+                # short-circuit the first read → the coder edits blind). They get set on the
+                # first real read. (Reverts the inject-and-seed of ckpt-177/178.)
+                "viewed_versions": {},
                 "purpose_map": purpose_map, "detailed_map": detailed_map,
                 "files_changed": set(),
-                # The step's target files are injected into the prompt in FULL, so
-                # they're already in the coder's context — seed view_at so a redundant
-                # full re-read of them is short-circuited (trust-the-view). step_num
-                # lets every diff/view be stamped with WHEN it changed.
                 "step_num": step_num,
-                "view_at": {fp: f"step {step_num} (loaded at the start)"
-                            for fp in _nat_targets},
-                # Step-START baseline: every diff the coder gets (edit-success AND re-read) is
-                # computed against THIS, so it's the CUMULATIVE change since the step began —
-                # one stable reference the coder composes with the injected file block, instead
-                # of chaining incremental per-edit diffs. Files first read mid-step add their
-                # own baseline on first touch (_do_read/_do_edit setdefault _first_seen).
+                "view_at": {},
+                # Step-START baseline for the CUMULATIVE diff (edit-success + re-read): the
+                # target files' content as it is NOW (before any coder edit). This does NOT gate
+                # reads (the short-circuit gates on view_at, which is empty) — it's only the diff
+                # reference. Files first read mid-step add their own baseline on first touch.
                 "_first_seen": dict(_nat_targets)}
         async def _native_pass(_model):
             _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
