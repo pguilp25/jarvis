@@ -168,6 +168,23 @@ CODER_TOOLS = [
         }, "required": ["path", "ranges"]},
     }},
     {"type": "function", "function": {
+        "name": "batch",
+        "description": (
+            "Run SEVERAL read-only LOOKUPS in ONE round. (Each normal tool call costs a whole "
+            "model round-trip; your opening 'look' at a step usually needs several files — do "
+            "them together here instead of one-per-round.) `calls` = a list of {tool, args}; you "
+            "get every result back at once. Batchable: read_file, search_text, find_refs, "
+            "file_purpose, semantic_search, depends_on, list_dir. NOT batchable: edit_file / "
+            "create_file (edits have order dependencies — one per round), keep, run_code, finish. "
+            "Name what each lookup answers; don't ask the same thing two ways."),
+        "parameters": {"type": "object", "properties": {
+            "calls": {"type": "array", "description": "the lookups to run together, each {\"tool\": <name>, \"args\": {...}}",
+                      "items": {"type": "object", "properties": {
+                          "tool": {"type": "string", "description": "read_file / search_text / find_refs / file_purpose / semantic_search / depends_on / list_dir"},
+                          "args": {"type": "object", "description": "that tool's arguments"}}}},
+        }, "required": ["calls"]},
+    }},
+    {"type": "function", "function": {
         "name": "find_refs",
         "description": (
             "Find usages of a symbol (function/class/variable name) across the project "
@@ -1832,6 +1849,49 @@ def _do_keep(args: dict, ctx: dict) -> str:
             f"context (read_file a range to bring any of it back).")
 
 
+_BATCHABLE = {"read_file", "search_text", "find_refs", "file_purpose",
+              "semantic_search", "depends_on", "list_dir"}
+
+
+async def _do_batch(args: dict, ctx: dict) -> str:
+    """Run several READ-ONLY lookups in ONE round (ckpt-181): native tool-calling otherwise does
+    one call per round (gpt-oss emitted 1/round in 128/128 rounds), so the opening 'look' at a
+    multi-file step wasted a round-trip per file. `calls` = [{tool, args}, …]; dispatch each via
+    _dispatch and concatenate. Read-only tools ONLY — edits/keep/run_code/finish are their own
+    rounds (edits have order dependencies). Never raises; caps at 8 lookups."""
+    calls = args.get("calls")
+    if not isinstance(calls, list) or not calls:
+        return ("✗ batch: `calls` must be a non-empty list of {\"tool\": <name>, \"args\": {...}} "
+                "read-only lookups.")
+    _capnote = ""
+    if len(calls) > 8:
+        _capnote = f"\n\n(ran the first 8 of {len(calls)} lookups — batch ≤8 at a time.)"
+        calls = calls[:8]
+    out = []
+    for i, c in enumerate(calls, 1):
+        if not isinstance(c, dict):
+            out.append(f"── batch[{i}] ✗ each call must be {{\"tool\": <name>, \"args\": {{...}}}} "
+                       f"(got {type(c).__name__}).")
+            continue
+        tname = c.get("tool") or c.get("name") or ""
+        targs = c.get("args")
+        if not isinstance(targs, dict):
+            # tolerate the flat form {tool, path, ...} — treat the non-tool keys as args
+            targs = {k: v for k, v in c.items() if k not in ("tool", "name", "args")}
+        if tname not in _BATCHABLE:
+            out.append(f"── batch[{i}] {tname or '?'}: ✗ not batchable — batch runs read-only "
+                       f"lookups only ({', '.join(sorted(_BATCHABLE))}); call {tname or 'it'} on "
+                       f"its own round.")
+            continue
+        try:
+            r = await _dispatch(tname, targs, ctx)
+        except Exception as e:
+            r = f"✗ {tname} failed internally: {str(e)[:140]}"
+        _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or targs.get("tag") or ""
+        out.append(f"── batch[{i}] {tname}({str(_lbl)[:70]}) ──\n{r}")
+    return "\n\n".join(out) + _capnote
+
+
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
     sym, _e = _str_or_err(args, "symbol", "find_refs")
@@ -2040,6 +2100,8 @@ async def _dispatch(name: str, args: dict, ctx: dict):
         return _do_list_dir(args, ctx)
     if name == "keep":
         return _do_keep(args, ctx)
+    if name == "batch":
+        return await _do_batch(args, ctx)
     if name == "find_refs":
         return await _do_refs(args, ctx)
     if name == "find_callers":

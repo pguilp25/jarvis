@@ -69,8 +69,8 @@ def _disp(name, args, ctx):
 def test_schemas_cover_full_toolset():
     names = {t["function"]["name"] for t in CODER_TOOLS}
     # ckpt-138: collapsed to ONE edit tool (edit_file old→new). replace_lines removed.
-    assert names == {"read_file", "list_dir", "keep", "find_refs", "find_callers", "search_text",
-                     "file_purpose", "semantic_search", "depends_on",
+    assert names == {"read_file", "list_dir", "keep", "batch", "find_refs", "find_callers",
+                     "search_text", "file_purpose", "semantic_search", "depends_on",
                      "edit_file", "create_file", "run_code", "finish"}
 
 
@@ -1107,6 +1107,28 @@ def test_range_read_large_file_serves_slice_and_caches():
         assert "RANGE" in fresh and "return 450" in fresh        # a new region still serves
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_batch_runs_multiple_lookups_one_round():
+    # ckpt-181: batch runs several read-only lookups in one round; refuses edits; never crashes.
+    ctx, rel, root = _mk_ctx()
+    try:
+        out = _disp("batch", {"calls": [
+            {"tool": "read_file", "args": {"path": rel}},
+            {"tool": "search_text", "args": {"pattern": "class Counter"}},
+            {"tool": "find_refs", "args": {"symbol": "greet"}},
+        ]}, ctx)
+        assert "batch[1] read_file" in out and "batch[2] search_text" in out and "batch[3] find_refs" in out
+        assert "greet" in out                                    # the read_file result is in there
+        assert rel in ctx.get("view_at", {})                     # the batched read marked it viewed
+        # an edit sub-call is refused (edits aren't batchable)
+        bad = _disp("batch", {"calls": [{"tool": "edit_file", "args": {"path": rel}}]}, ctx)
+        assert "not batchable" in bad
+        # malformed / wrong-type calls don't crash
+        assert isinstance(_disp("batch", {"calls": "nope"}, ctx), str)
+        assert isinstance(_disp("batch", {"calls": [5, {"tool": "list_dir"}]}, ctx), str)
+    finally:
+        _cleanup(root)
 
 
 def test_keep_errors_if_file_not_viewed():
