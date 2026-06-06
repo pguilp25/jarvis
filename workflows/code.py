@@ -8892,8 +8892,15 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         all_plans_text=all_plans_text[:30000],
         preloaded_research=preloaded_research,
     ) + _consensus_line
+    # ckpt-188: merger → owl-alpha (was mistral/medium). mistral/medium frequently
+    # emitted an EMPTY `=== PLAN ===` block → raw-prose salvage whose step structure
+    # is inconsistent (sometimes 0 parseable steps → the weak single-pass IMPLEMENT
+    # fallback → coder under-delivers, e.g. a26 only edited uri.py, never urls.py).
+    # owl-alpha proved stable + clean text-tool/plan emission in the planner trial.
+    # Its NVIDIA_FALLBACKS chain ends at mistral/medium, so the old merger remains a
+    # last-resort. Keeps the pipeline non-frontier.
     merger_result = await _call_with_tools(
-        "mistral/medium", merge_prompt, project_root,
+        "openrouter/owl-alpha", merge_prompt, project_root,
         detailed_map=detailed_map, purpose_map=purpose_map,
         research_cache=research_cache,
         log_label="merging plans (final)",
@@ -9381,7 +9388,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
 
     status(f"Phase 2: final plan = {len(best_plan)} chars")
     success(f"Phase 2 complete ({mode_label}, {len(research_cache)} cached lookups)")
-    _wlog.save_final_plan(best_plan, merger_model=merger_result.get("model", "mistral/medium"))
+    _wlog.save_final_plan(best_plan, merger_model=merger_result.get("model", "openrouter/owl-alpha"))
     _wlog.phase_end("plan", mode_label, chars=len(best_plan),
                     research_cache_entries=len(research_cache))
     return best_plan, research_cache
@@ -12458,9 +12465,42 @@ async def phase_implement(
 
         return plan, sandbox
 
-    # ── Fallback: no steps parsed — single-step implementation ────────
-    status("No structured steps found — single-pass implementation")
+    # ── Fallback: no steps parsed ────────────────────────────────────
+    # ckpt-188: when the plan has NO parseable `### STEP` blocks (the merger
+    # emitted an empty `=== PLAN ===` → raw-prose salvage with no step structure),
+    # do NOT dump every file on ONE "implement all changes" blob pass — the coder
+    # then does only the EASIEST edit and quits (a26: 8-file scope, edited only the
+    # trivial uri.py, never urls.py where the tests live → all 4 fail). Instead
+    # synthesize ONE FOCUSED STEP PER FILE so the per-step loop forces the coder to
+    # produce (or explicitly decline) an edit for EACH file — incl. the one the tests
+    # need. Falls back to a single blob only if there are no files at all.
+    _fb_files = [f for f in all_files if f]
+    if len(_fb_files) > 1:
+        status(f"No structured steps found — synthesizing {min(len(_fb_files),8)} "
+               f"per-file step(s) (no-blob fallback)")
+        for _i, _f in enumerate(_fb_files[:8], 1):
+            await _implement_one_step(
+                step_info={
+                    "num": _i,
+                    "name": f"Implement the plan's changes in {_f}",
+                    "depends_on": [],
+                    "files": [_f],
+                    "details": (f"The plan below has no numbered steps. Make the change "
+                                f"THIS task requires in `{_f}` (consistent with the rest of "
+                                f"the plan). If, after reading it, `{_f}` needs NO change, "
+                                f"say so in one line and move on.\n\n" + plan[:11000]),
+                    "done": False,
+                    "produced_files": {},
+                },
+                task=task, shared_interfaces=shared_interfaces,
+                file_contents=file_contents, sandbox=sandbox,
+                project_root=project_root, plan=plan,
+                detailed_map=detailed_map, purpose_map=purpose_map,
+                research_cache=research_cache,
+            )
+        return plan, sandbox
 
+    status("No structured steps found — single-pass implementation")
     fallback_step = {
         "num": 1,
         "name": "implement all changes",
@@ -12470,7 +12510,6 @@ async def phase_implement(
         "done": False,
         "produced_files": {},
     }
-
     await _implement_one_step(
         step_info=fallback_step,
         task=task,
