@@ -150,8 +150,16 @@ PLAN_DONE_TAG = re.compile(
 # A model that lacks a reasoning channel (or whose channel is being lost across
 # rounds) can use [think]...[/think] and get the same handling: visible in the
 # stream, stripped from final plan body, never dispatched as a tool.
+#
+# The bracketed close is matched leniently — `[/think>` (`>` instead of `]`) and
+# stray inner whitespace are common typos from weak models (owl-alpha emitted
+# `[/think>` on a26). A malformed close must still count as a close, else the
+# `[think]` reasoning leaks into the plan body the coder reads. This leniency is
+# kept IN SYNC with _salvage_plan_from_think's regex below: if strip zeroes a
+# plan-inside-`[think]`, salvage must pull it back, so both accept the same close.
+_THINK_CLOSE = r'\[/\s*think\s*[\]>]'
 _THINK_BLOCK = re.compile(
-    r'(?:<think>.*?</think>|\[think\].*?\[/think\])',
+    r'(?:<think>.*?</think>|\[think\].*?' + _THINK_CLOSE + r')',
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -194,7 +202,7 @@ def _salvage_plan_from_think(text: str) -> str:
     (=== PLAN ===, ## GOAL, ### STEP, …); else return the full reasoning text.
     Returns '' if there's no reasoning content to salvage."""
     blocks = re.findall(
-        r'(?:<think>(.*?)</think>|\[think\](.*?)\[/think\])',
+        r'(?:<think>(.*?)</think>|\[think\](.*?)' + _THINK_CLOSE + r')',
         text, re.DOTALL | re.IGNORECASE,
     )
     reasoning = "\n".join((a or b) for a, b in blocks).strip()
@@ -452,8 +460,10 @@ YOUR WORK SO FAR (continuous — you signaled [CONTINUE] for more space)
 _FENCED_CODE_BLOCK = re.compile(r'```.*?```', re.DOTALL)
 _INLINE_BACKTICK = re.compile(r'`[^`\n]+`')
 # Matches both reasoning forms — see _strip_think comment above for rationale.
+# (Lenient bracketed close via _THINK_CLOSE; this assignment shadows the earlier
+# one, so it must carry the same leniency.)
 _THINK_BLOCK = re.compile(
-    r'(?:<think>.*?</think>|\[think\].*?\[/think\])',
+    r'(?:<think>.*?</think>|\[think\].*?' + _THINK_CLOSE + r')',
     re.DOTALL | re.IGNORECASE,
 )
 # Deliberate tool-use blocks: [tool use]...[/tool use]

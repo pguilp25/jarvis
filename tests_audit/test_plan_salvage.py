@@ -46,6 +46,32 @@ def test_strip_then_salvage_complementary():
     assert "STEP 1" in salvaged and "inspector.py" in salvaged
 
 
+def test_strip_handles_malformed_close_bracket():
+    # owl-alpha typo'd the close as `[/think>` on a26; the [think] reasoning must
+    # still be stripped, not leak into the plan body the coder reads.
+    txt = "[think]planner meta noise, tools unavailable[/think>\n## GOAL: fix it\n### STEP 1: edit urls.py"
+    out = _strip_think(txt).strip()
+    assert "planner meta noise" not in out
+    assert out.startswith("## GOAL")
+    assert "STEP 1" in out
+
+
+def test_strip_handles_close_with_inner_whitespace():
+    txt = "[think] reasoning [/ think ]\nvisible plan"
+    out = _strip_think(txt).strip()
+    assert "reasoning" not in out
+    assert out == "visible plan"
+
+
+def test_salvage_recovers_from_malformed_close():
+    # consistency invariant: if strip would zero a plan-INSIDE [think] with a
+    # malformed close, salvage must still pull it back (same close forms).
+    txt = "[think]reasoning...\n## GOAL: fix the bug\n### STEP 1: do X[/think>"
+    assert "STEP 1" not in _strip_think(txt)           # strip zeroed it
+    out = _salvage_plan_from_think(txt)                # salvage recovers it
+    assert out.startswith("## GOAL") and "STEP 1" in out
+
+
 def test_salvage_caps_overlong_think_dump():
     # a 70K-char think dump must NOT come back as a giant "plan" (pylint-4551)
     from core.tool_call import _salvage_plan_from_think, _SALVAGE_MAX_CHARS
