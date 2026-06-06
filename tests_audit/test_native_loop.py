@@ -342,6 +342,32 @@ def test_no_edit_finish_is_nudged_once_then_accepted():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_bullet_cot_flag_gates_prompt_in_native_loop():
+    # ckpt-185: JARVIS_BULLET_COT=1 appends the tight-bullets style block to the
+    # native coder's system prompt; flag off → byte-for-byte absent.
+    ctx, rel, root = _mk_ctx()
+    try:
+        _, model = _run([_msg(tool_calls=[_tc("f", "finish")]),
+                         _msg(tool_calls=[_tc("f2", "finish")])], ctx)
+        sys_off = model.seen_messages[0][0]["content"]
+        assert "REASONING STYLE — tight bullets" not in sys_off
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    ctx, rel, root = _mk_ctx()
+    os.environ["JARVIS_BULLET_COT"] = "1"
+    try:
+        _, model = _run([_msg(tool_calls=[_tc("f", "finish")]),
+                         _msg(tool_calls=[_tc("f2", "finish")])], ctx)
+        sys_on = model.seen_messages[0][0]["content"]
+        assert "REASONING STYLE — tight bullets" in sys_on
+        assert "correctness always beats brevity" in sys_on
+        # the always-on INDENT block must still be there (bullets append, never replace)
+        assert "## INDENTATION" in sys_on
+    finally:
+        os.environ.pop("JARVIS_BULLET_COT", None)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_loop_reason_empty_turn():
     ctx, rel, root = _mk_ctx()
     try:

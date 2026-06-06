@@ -2536,6 +2536,34 @@ _INDENT_FORMAT_BLOCK = (
     "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
     "class/function — that ejects it (the dedent bug). A blank line is `0|`.")
 
+# Bullet-CoT (ckpt-185, flag JARVIS_BULLET_COT — read at CALL time so tests can toggle).
+# A SOFT reasoning-style nudge: same moves, terser wording. The goal is COST (gpt-oss is
+# paid per reasoning token) + marginal speed — NOT fewer rounds. Deliberately NOT a rigid
+# template: EDIT-COT's enforced slots tripped weak models into reject loops (ckpt-133),
+# so this is framed as a style preference that correctness always overrides. The bullet
+# example compresses HOW-TO-THINK move 1's own header-overwrite trace, so the two
+# sections describe the SAME reasoning at two verbosities — no contradiction.
+_BULLET_COT_BLOCK = (
+    "\n\n## REASONING STYLE — tight bullets (form only; changes NOTHING about what you check)\n"
+    "Run the same moves (TRACE → GAP → PLAN → BUILD → verify), but WRITE your reasoning as "
+    "terse bullets — one bullet per fact or decision, most under ~12 words:\n"
+    "  • L214: header = 'Bearer …'\n"
+    "  • L230 runs unconditionally → OVERWRITES it — the bug\n"
+    "  • fix: guard L230 with `if 'Authorization' not in headers:`\n"
+    "  • new line lives inside the def at ⇥8 → my `new` uses 8|\n"
+    "Each TRACE bullet still carries its concrete fact (line number, value, branch taken) — "
+    "compress the WORDING, never the checking. Cut only narration filler: no \"Now I will…\", "
+    "no re-pasting whole blocks you are NOT checking, no restating the task back to yourself. "
+    "QUOTING a real line or a spec literal that you are CHECKING is NOT filler — keep it, "
+    "exactly: the line-by-line trace and the char-for-char output-vs-expected diff (the move "
+    "where you compare your result to the spec's example) stay verbatim however long they run. "
+    "The ~12-word guide is for narration, not for these checks. If a subtle step needs full "
+    "sentences to get right, use them — correctness always beats brevity; this is a style "
+    "preference, never a reason to skip or shorten a check.\n"
+    "(These bullets are your private REASONING/thinking. Your visible output is unchanged — "
+    "keep following the output rules above exactly.)"
+)
+
 # ── SALVAGE: do the native tool-calling OURSELVES (ckpt-148) ─────────────────
 # gpt-oss on a cheap provider (DeepInfra) intermittently returns finish_reason=stop
 # with NO structured `tool_calls` — but the call it MEANT to make is sitting right
@@ -2678,6 +2706,9 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "  • check  — one concrete input→expected-output case your edit satisfies.\n"
             "Reason in whatever way fits the change — don't force a template. What matters is a "
             "correct edit grounded in the real code, not filled-in fields.")
+    if os.environ.get("JARVIS_BULLET_COT", "0") == "1":
+        # ckpt-185 experiment: tight-bullet reasoning style (cost lever; soft, never a gate).
+        system = system + _BULLET_COT_BLOCK
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
@@ -3034,13 +3065,14 @@ _JSON_OPS_PROMPT = (
     '  {\"tool\":\"find_refs\",\"args\":{\"symbol\":\"name\"}}   {\"tool\":\"find_callers\",\"args\":{\"tag\":\"#t\"}}\n'
     '  {\"tool\":\"file_purpose\",\"args\":{\"path\":\"p\"}}   {\"tool\":\"semantic_search\",\"args\":{\"query\":\"q\"}}\n'
     '  {\"tool\":\"depends_on\",\"args\":{\"symbol\":\"name\"}}\n'
-    '  {\"tool\":\"edit_file\",\"args\":{\"path\":\"p\",\"old\":\"286 ⇥4|    def foo\",\"new\":\"4|    def foo2\"}}\n'
+    '  {\"tool\":\"edit_file\",\"args\":{\"path\":\"p\",\"old\":\"286 ⇥4|    def foo\",\"new\":\"4|def foo2\"}}\n'
     '  {\"tool\":\"create_file\",\"args\":{\"path\":\"p\",\"content\":\"...\"}}\n'
     '  {\"tool\":\"keep\",\"args\":{\"path\":\"p\",\"ranges\":[[40,60]]}}   {\"tool\":\"run_code\",\"args\":{\"command\":\"...\"}}\n'
     '  {\"tool\":\"done\",\"args\":{\"summary\":\"one line: what you changed\"}}  ← emit ONLY when the edit is complete AND verified\n'
     "RULES: (1) one JSON object per line, FLAT — never nest ops in an array. (2) edit_file is FLAT: "
     "`old` and `new` are STRINGS, not arrays. For several lines, join them with \\n inside the "
-    "string — e.g. \"new\":\"4|    def foo():\\n8|        return 1\". `old`/`new` use the "
+    "string — e.g. \"new\":\"4|def foo():\\n8|return 1\" (NO leading spaces after the pipe — the "
+    "harness re-emits the indent from the number). `old`/`new` use the "
     "`LINENO ⇥INDENT|code` / `INDENT|code` format from the INDENTATION section. Do NOT use an "
     "`edits` array and do NOT nest `[...]` — that is the one structure you keep mis-closing. "
     "(3) Do NOT read_file and edit_file the SAME file in one round — you must SEE it (this round) "
@@ -3085,6 +3117,10 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     # `INDENT|code` write-format), THEN the JSON-ops protocol override LAST so it
     # wins on HOW to emit (flat JSON lines, not function calls).
     system = (system or "") + _INDENT_FORMAT_BLOCK + _JSON_OPS_PROMPT
+    if os.environ.get("JARVIS_BULLET_COT", "0") == "1":
+        # ckpt-185 experiment: tight-bullet reasoning style (cost lever; soft, never a
+        # gate). Appended after the protocol override — it's style-only, no protocol words.
+        system = system + _BULLET_COT_BLOCK
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())

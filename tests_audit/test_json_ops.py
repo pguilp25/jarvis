@@ -423,6 +423,33 @@ def test_loop_failing_lookups_do_not_trip_stuck_bail():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_bullet_cot_flag_gates_prompt_in_json_loop():
+    # ckpt-185: JARVIS_BULLET_COT=1 appends the tight-bullets style block to the
+    # JSON-ops system prompt; flag off → byte-for-byte absent.
+    ctx, rel, root = _mk_ctx()
+    try:
+        res, model = _run_json(['{"tool":"done","args":{"summary":"x"}}',
+                                '{"tool":"done","args":{"summary":"x"}}'], ctx)
+        sys_off = model.seen[0][0]["content"]
+        assert "REASONING STYLE — tight bullets" not in sys_off
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    ctx, rel, root = _mk_ctx()
+    os.environ["JARVIS_BULLET_COT"] = "1"
+    try:
+        res, model = _run_json(['{"tool":"done","args":{"summary":"x"}}',
+                                '{"tool":"done","args":{"summary":"x"}}'], ctx)
+        sys_on = model.seen[0][0]["content"]
+        assert "REASONING STYLE — tight bullets" in sys_on
+        # soft, not a gate: the block must subordinate brevity to correctness
+        assert "correctness always beats brevity" in sys_on
+        # and the protocol override must still be present and BEFORE the style block
+        assert sys_on.index("OUTPUT FORMAT — JSON OPS") < sys_on.index("REASONING STYLE")
+    finally:
+        os.environ.pop("JARVIS_BULLET_COT", None)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_loop_finish_tool_alias_triggers_done():
     # model emits a `finish` op (native-style) instead of `done` → still ends
     # (second finish clears the no-edit nudge, same as a second done)
