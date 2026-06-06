@@ -2042,6 +2042,50 @@ def _scan_json_ops(text):
     return ops, done, summary
 
 
+def _coalesce_edit_ops(ops):
+    """Merge multiple FLAT `edit_file` ops on the SAME path within one round into a single
+    edit_file op carrying an `edits` list, so all hunks apply together — the dangling-ref /
+    parse gate then sees the WHOLE refactor at once (removing a def + fixing its callers in
+    one consolidated diff, never a half-done one that reverts).
+
+    WHY: gpt-oss hand-writes JSON in this mode and reliably MIS-BALANCES the nested
+    `edits:[{old:[...],new:[...]}]` closing brackets (`]}}}` / `]}}]}}` instead of `]}]}}`)
+    → json.loads fails → 0 ops (ckpt-183 fresh12: 4a5d2a7d, f327). So the MODEL emits FLAT
+    single-hunk ops ({path, old, new} — only `}}` to close, no arrays) and the HARNESS does the
+    nesting here. (Project principle: harness computes the global structure, model acts local.)
+    Order-preserving: a merged op sits at the position of the FIRST edit to its path; non-edit
+    ops and edits with no usable path pass through untouched. _do_edit already accepts string
+    or list `old`/`new` per hunk, so no applier change is needed."""
+    out, edit_idx = [], {}
+    for op in ops:
+        if not isinstance(op, dict) or op.get("tool") != "edit_file":
+            out.append(op)
+            continue
+        a = op.get("args") if isinstance(op.get("args"), dict) else {}
+        path = a.get("path")
+        # this op's hunks: an explicit (well-formed) edits list wins; else the flat old/new
+        _edits = a.get("edits")
+        if isinstance(_edits, list) and _edits:
+            hunks = [h for h in _edits if isinstance(h, dict)]
+        else:
+            h = {}
+            if a.get("old") is not None:
+                h["old"] = a.get("old")
+            if a.get("new") is not None:
+                h["new"] = a.get("new")
+            if a.get("start_line") is not None:
+                h["start_line"] = a.get("start_line")
+            hunks = [h] if h else []
+        if path and path in edit_idx:
+            out[edit_idx[path]]["args"]["edits"].extend(hunks)
+        else:
+            merged = {"tool": "edit_file", "args": {"path": path, "edits": list(hunks)}}
+            if path:
+                edit_idx[path] = len(out)
+            out.append(merged)
+    return out
+
+
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
     sym, _e = _str_or_err(args, "symbol", "find_refs")
@@ -2990,14 +3034,19 @@ _JSON_OPS_PROMPT = (
     '  {\"tool\":\"find_refs\",\"args\":{\"symbol\":\"name\"}}   {\"tool\":\"find_callers\",\"args\":{\"tag\":\"#t\"}}\n'
     '  {\"tool\":\"file_purpose\",\"args\":{\"path\":\"p\"}}   {\"tool\":\"semantic_search\",\"args\":{\"query\":\"q\"}}\n'
     '  {\"tool\":\"depends_on\",\"args\":{\"symbol\":\"name\"}}\n'
-    '  {\"tool\":\"edit_file\",\"args\":{\"path\":\"p\",\"edits\":[{\"old\":[\"286 ⇥4|    def foo\"],\"new\":[\"4|def foo2\"]}]}}\n'
+    '  {\"tool\":\"edit_file\",\"args\":{\"path\":\"p\",\"old\":\"286 ⇥4|    def foo\",\"new\":\"4|    def foo2\"}}\n'
     '  {\"tool\":\"create_file\",\"args\":{\"path\":\"p\",\"content\":\"...\"}}\n'
     '  {\"tool\":\"keep\",\"args\":{\"path\":\"p\",\"ranges\":[[40,60]]}}   {\"tool\":\"run_code\",\"args\":{\"command\":\"...\"}}\n'
     '  {\"tool\":\"done\",\"args\":{\"summary\":\"one line: what you changed\"}}  ← emit ONLY when the edit is complete AND verified\n'
-    "RULES: (1) one JSON object per line, FLAT — never nest ops in an array. (2) `old`/`new` use "
-    "the `LINENO ⇥INDENT|code` / `INDENT|code` format from the INDENTATION section. (3) Do NOT "
-    "read_file and edit_file the SAME file in one round — you must SEE it (this round) before you "
-    "edit it (next round). (4) Put ALL hunks for one file in ONE edit_file op. (5) Ideal shape: "
+    "RULES: (1) one JSON object per line, FLAT — never nest ops in an array. (2) edit_file is FLAT: "
+    "`old` and `new` are STRINGS, not arrays. For several lines, join them with \\n inside the "
+    "string — e.g. \"new\":\"4|    def foo():\\n8|        return 1\". `old`/`new` use the "
+    "`LINENO ⇥INDENT|code` / `INDENT|code` format from the INDENTATION section. Do NOT use an "
+    "`edits` array and do NOT nest `[...]` — that is the one structure you keep mis-closing. "
+    "(3) Do NOT read_file and edit_file the SAME file in one round — you must SEE it (this round) "
+    "before you edit it (next round). (4) ONE edit_file op = ONE change. To change a file in "
+    "SEVERAL places (e.g. remove a def AND fix its callers), emit SEVERAL edit_file ops for that "
+    "file in the SAME round — the harness applies them together as one diff. (5) Ideal shape: "
     "round 1 = all your read/search ops together; round 2 = your edit_file op(s); round 3 = a "
     "run_code check; then a `done` op. (6) Emit ONLY the JSON lines — no commentary.\n"
     "TWO THINGS THIS REPLACES from the toolkit above: there is NO `batch` tool here — emitting "
@@ -3064,6 +3113,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             reason = "api-error"
             break
         ops, want_done, summary = _parse_json_ops(content)
+        ops = _coalesce_edit_ops(ops)   # flat same-file edits → one edits batch (refactor coherence)
         messages.append({"role": "assistant", "content": (content or "(no output)")[:24000]})
         if not ops and not want_done:
             _empty += 1

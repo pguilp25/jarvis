@@ -163,6 +163,47 @@ def test_parse_never_raises_fuzz():
         nt._parse_json_ops(s)        # must not raise
 
 
+# ── _coalesce_edit_ops (flat edit ops → merged edits batch) ──────────────────
+
+def test_coalesce_flat_single_edit_becomes_edits_list():
+    ops = [{"tool": "edit_file", "args": {"path": "f.py", "old": "1 ⇥0|a", "new": "0|b"}}]
+    out = nt._coalesce_edit_ops(ops)
+    assert len(out) == 1
+    assert out[0]["args"]["path"] == "f.py"
+    assert out[0]["args"]["edits"] == [{"old": "1 ⇥0|a", "new": "0|b"}]
+
+
+def test_coalesce_merges_same_path_keeps_order():
+    ops = [
+        {"tool": "read_file", "args": {"path": "a.py"}},
+        {"tool": "edit_file", "args": {"path": "f.py", "old": "1 ⇥0|a", "new": "0|b"}},
+        {"tool": "edit_file", "args": {"path": "g.py", "old": "1 ⇥0|x", "new": "0|y"}},
+        {"tool": "edit_file", "args": {"path": "f.py", "old": "5 ⇥0|c", "new": "0|d"}},
+    ]
+    out = nt._coalesce_edit_ops(ops)
+    assert [o["tool"] for o in out] == ["read_file", "edit_file", "edit_file"]
+    # f.py's two hunks merged into the FIRST f.py op (order preserved: f before g)
+    assert out[1]["args"]["path"] == "f.py"
+    assert len(out[1]["args"]["edits"]) == 2
+    assert out[2]["args"]["path"] == "g.py"
+    assert len(out[2]["args"]["edits"]) == 1
+
+
+def test_coalesce_preserves_explicit_edits_list():
+    ops = [{"tool": "edit_file", "args": {"path": "f.py",
+            "edits": [{"old": ["1 ⇥0|a"], "new": ["0|b"]}, {"old": ["5 ⇥0|c"], "new": ["0|d"]}]}}]
+    out = nt._coalesce_edit_ops(ops)
+    assert len(out[0]["args"]["edits"]) == 2
+
+
+def test_coalesce_passes_through_non_edits_and_pathless():
+    ops = [{"tool": "search_text", "args": {"pattern": "x"}},
+           {"tool": "edit_file", "args": {"new": "0|b"}}]   # no path
+    out = nt._coalesce_edit_ops(ops)
+    assert out[0]["tool"] == "search_text"
+    assert out[1]["tool"] == "edit_file" and out[1]["args"].get("path") is None
+
+
 # ── loop tests (scripted streaming model) ────────────────────────────────────
 
 SRC = textwrap.dedent('''\
@@ -239,6 +280,54 @@ def test_loop_read_edit_verify_done():
         assert rel in res["files_changed"]
         assert ctx["file_contents"][rel].split("\n")[1] == '    return "hi " + name'
         assert model.calls == 4             # the verify gate forced the extra round
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_loop_flat_edit_applies():
+    # the FLAT edit form (old/new as strings, no edits array) must apply end-to-end
+    ctx, rel, root = _mk_ctx()
+    try:
+        flat_edit = ('{"tool":"edit_file","args":{"path":"%s",'
+                     '"old":"2 ⇥4|    return \\"hello \\" + name",'
+                     '"new":"4|    return \\"hi \\" + name"}}' % rel)
+        script = [
+            '{"tool":"read_file","args":{"path":"%s"}}' % rel,
+            flat_edit,
+            '{"tool":"done","args":{"summary":"flat edit"}}',
+            '{"tool":"done","args":{"summary":"verified"}}',
+        ]
+        res, _ = _run_json(script, ctx)
+        assert res["done"] is True
+        assert rel in res["files_changed"]
+        assert ctx["file_contents"][rel].split("\n")[1] == '    return "hi " + name'
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_loop_two_flat_edits_same_file_one_round_both_apply():
+    # a 2-site change emitted as TWO flat edit ops in ONE round → coalesced → both land
+    from tools.sandbox import Sandbox
+    src = 'def f():\n    a = 1\n    b = 2\n    return a + b\n'
+    root = tempfile.mkdtemp(prefix="jsonops2_")
+    rel = "m.py"
+    with open(os.path.join(root, rel), "w") as fh:
+        fh.write(src)
+    sb = Sandbox(root); sb.setup(); sb.load_file(rel)
+    ctx = {"file_contents": {rel: src}, "sandbox": sb, "project_root": root,
+           "viewed_versions": {rel: src}, "purpose_map": "", "detailed_map": "",
+           "files_changed": set()}
+    try:
+        e1 = '{"tool":"edit_file","args":{"path":"%s","old":"2 ⇥4|    a = 1","new":"4|    a = 10"}}' % rel
+        e2 = '{"tool":"edit_file","args":{"path":"%s","old":"3 ⇥4|    b = 2","new":"4|    b = 20"}}' % rel
+        script = ['{"tool":"read_file","args":{"path":"%s"}}' % rel,
+                  e1 + "\n" + e2,
+                  '{"tool":"done","args":{"summary":"two sites"}}',
+                  '{"tool":"done","args":{"summary":"ok"}}']
+        res, _ = _run_json(script, ctx)
+        body = ctx["file_contents"][rel]
+        assert "a = 10" in body and "b = 20" in body, body
+        assert res["done"] is True
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
