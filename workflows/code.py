@@ -12245,6 +12245,15 @@ async def _implement_one_step(
             status(f"  [native:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("native coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
             return _p
+        async def _json_pass(_model):
+            # JSON-ops coder (flag JARVIS_JSON_OPS): gpt-oss in TEXT mode, streaming flat JSON-line
+            # ops. Same ctx + prompt as native; only the protocol differs (ckpt-183).
+            from core.native_tools import call_with_json_ops
+            _r = await call_with_json_ops(_model, _nat_system, _nat_user, _ctx)
+            _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
+            status(f"  [json:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
+            _wlog.phase_event("json coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
+            return _p
         # EXACT coder chain: gpt-oss(OR,native) PRIMARY -> qwen -> mistral
         #   -> gpt-oss(NIM,native) -> glm-5.1. First link that produces edits wins.
         #   (Reverted from the qwen-primary experiment: both free qwen routes failed as
@@ -12255,9 +12264,16 @@ async def _implement_one_step(
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
                         ("mistral/medium","native"), ("nvidia/gpt-oss-nim","native"),
                         ("nvidia/glm-5.1","text")]
+        # ckpt-183 experiment (JARVIS_JSON_OPS): route gpt-oss-120b PRIMARY through the JSON-ops
+        # TEXT coder instead of native tool-calling (flat JSON-line ops it can actually emit).
+        # Fallbacks unchanged. Flag-gated: default behavior is identical.
+        if os.environ.get("JARVIS_JSON_OPS", "0") == "1":
+            _CODER_CHAIN = [("nvidia/gpt-oss-120b","json")] + _CODER_CHAIN[1:]
         for _m, _mode in _CODER_CHAIN:
             try:
-                _prod = await (_native_pass(_m) if _mode == "native" else _text_pass(_m, True))
+                _prod = await (_json_pass(_m) if _mode == "json"
+                               else _native_pass(_m) if _mode == "native"
+                               else _text_pass(_m, True))
             except Exception as _ce:
                 warn(f"  coder link {_m} failed: {str(_ce)[:80]}")
                 _prod = {}

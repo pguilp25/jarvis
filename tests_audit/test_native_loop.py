@@ -345,7 +345,11 @@ def test_no_edit_finish_is_nudged_once_then_accepted():
 def test_loop_reason_empty_turn():
     ctx, rel, root = _mk_ctx()
     try:
-        res, _ = _run([_msg(content="")], ctx)   # empty assistant turn
+        # Persistent empty assistant turn: round 1 + 2 retries all empty.
+        # (One scripted msg isn't enough — the model's exhaustion sentinel
+        # "(no more script)" would leak into `final` and flip the terminal
+        # reason to no-tool-call. Supply enough empties to cover the retries.)
+        res, _ = _run([_msg(content=""), _msg(content=""), _msg(content="")], ctx)
         assert res["reason"] == "empty-turn"
         assert res["done"] is False
     finally:

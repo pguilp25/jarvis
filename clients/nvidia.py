@@ -458,11 +458,15 @@ async def call_nvidia_stream(
     max_tokens: int = 4096,
     log_label: str = "",
     stop_check: object = None,
+    messages_override: list = None,
 ) -> str:
     """
     Call an NVIDIA model with SSE streaming.
     Streams each response chunk to thought_logger as it arrives.
     If stop_check(accumulated_text) returns True, stops early.
+    `messages_override`: a full chat history to send instead of [system, prompt]
+    (used by the JSON-ops coder loop, which needs multi-round conversation). When
+    given, `prompt`/`system` are ignored for the request (prompt may still be "").
     Returns the complete response text.
     """
     from core import thought_logger
@@ -473,10 +477,13 @@ async def call_nvidia_stream(
 
     url, key, api_model = _route(model_id)
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    if messages_override:
+        messages = messages_override
+    else:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
     # ── Pre-flight context-budget check ──────────────────────────────
     # Rough estimate: ~4 chars per token for English/code. If our prompt

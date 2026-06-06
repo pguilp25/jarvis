@@ -1959,6 +1959,89 @@ async def _do_batch(args: dict, ctx: dict) -> str:
     return joined
 
 
+def _parse_json_ops(text):
+    """JSON-ops mode (ckpt-183): parse the coder's text content — a sequence of FLAT JSON ops,
+    one per line — into (ops, done, summary). Tolerant by design (weak model): strips <think>…
+    </think> reasoning, ```json fences, and prose between objects; reads concatenated objects;
+    flattens a stray nested {"ops":[…]} if the model reverts; honours done via {"tool":"done",…}
+    or a top-level {"done":true,...}. Each op = {"tool": <name>, "args": {...}}. Never raises.
+
+    Two-pass: first the VISIBLE content (with <think>…</think> reasoning stripped — the clean
+    path). gpt-oss intermittently leaks its WHOLE response into the reasoning channel (the
+    harmony empty-turn), so if the visible pass finds nothing, SALVAGE by re-scanning the full
+    text incl. reasoning — better a leaked op than a dead round. (Mirrors the native-loop salvage.)"""
+    if not isinstance(text, str) or not text:
+        return [], False, ""
+    visible = re.sub(r'<think>.*?</think>', '', text, flags=re.S)   # drop hidden CoT
+    ops, done, summary = _scan_json_ops(visible)
+    if not ops and not done:                       # nothing in visible → salvage from reasoning
+        ops, done, summary = _scan_json_ops(text)
+    return ops, done, summary
+
+
+def _scan_json_ops(text):
+    """Single-pass balanced-brace scan of `text` → (ops, done, summary). Never raises."""
+    ops, done, summary = [], False, ""
+    if not isinstance(text, str) or not text:
+        return ops, done, summary
+    def _consume(obj):
+        nonlocal done, summary
+        if not isinstance(obj, dict):
+            return
+        # a stray nested batch/ops list → flatten it
+        inner = obj.get("ops") or obj.get("calls")
+        if isinstance(inner, list):
+            for it in inner:
+                _consume(it)
+        if obj.get("done") is True:
+            done = True
+            summary = obj.get("summary") or (obj.get("args") or {}).get("summary") or summary
+        tool = obj.get("tool") or obj.get("name")
+        if not tool:
+            return
+        if tool == "done":
+            done = True
+            summary = (obj.get("args") or {}).get("summary") or obj.get("summary") or summary
+            return
+        args = obj.get("args")
+        if not isinstance(args, dict):
+            args = {k: v for k, v in obj.items() if k not in ("tool", "name", "args")}
+        if len(ops) < 24:                       # bound a runaway op list
+            ops.append({"tool": tool, "args": args})
+    # SINGLE linear pass (O(n), never quadratic): track brace depth + string
+    # state; each time depth returns to 0 from >0, that span is a candidate
+    # top-level {...} — try to parse it. A nested-brace storm (`{{{{…`) that
+    # never balances is just skipped at EOF, not re-scanned per `{` (the old
+    # two-level scan was O(n²): `'{'*30000` → 32 s, run TWICE via salvage).
+    depth, start, instr, esc = 0, -1, False, False
+    for i, c in enumerate(text):
+        if esc:
+            esc = False
+            continue
+        if c == '\\':
+            esc = True
+            continue
+        if c == '"':
+            instr = not instr
+            continue
+        if instr:
+            continue
+        if c == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        _consume(json.loads(text[start:i + 1]))
+                    except Exception:
+                        pass            # prose/garbage span — skip, keep scanning
+                    start = -1
+    return ops, done, summary
+
+
 async def _do_refs(args: dict, ctx: dict) -> str:
     from core.tool_call import _run_refs_searches
     sym, _e = _str_or_err(args, "symbol", "find_refs")
@@ -2383,6 +2466,32 @@ _EMPTY_TURN_NUDGE = (
     "your next move now as a tool call."
 )
 
+# Authoritative INDENT| write-format instruction. The native view is ALWAYS
+# rendered prefix_ws (`LINENO ⇥INDENT|<real spaces>code`), so every coder that
+# edits — native tool-calling AND JSON-ops (text mode) — must carry this block,
+# appended LAST so it wins. Shared here so the two loops can't drift apart.
+_INDENT_FORMAT_BLOCK = (
+    "\n\n## INDENTATION — you DECLARE it as a number; the harness applies the spaces\n"
+    "Every code line is shown as `LINENO ⇥INDENT|<real spaces>code` — e.g. "
+    "`286 ⇥4|    def setvalue` means line 286, indent 4, then 4 real spaces, then the "
+    "code. The bare number on the LEFT is the line; the number after the `⇥` is the "
+    "INDENT — you SEE the indentation AND read its exact number (`4`).\n"
+    "FOR `old`: copy the view line(s) VERBATIM — keep the whole `LINENO ⇥INDENT|` "
+    "prefix (e.g. `286 ⇥4|    def setvalue`). The harness anchors on BOTH the line "
+    "number (so a repeated line lands on the RIGHT one) AND the content (so a stale "
+    "number self-corrects), and re-applies the indent from the number. You do NOT strip "
+    "anything — just copy what you see.\n"
+    "FOR `new` (new code, no line number yet): write each line as `INDENT|code` — the "
+    "indent NUMBER (the one after the `⇥` in the view), a pipe, then the code WITHOUT "
+    "leading spaces. The harness re-emits INDENT spaces for you, so you NEVER type or "
+    "count leading spaces and can never drop them.\n"
+    "  • CHANGED line → its `new` reuses the SAME `INDENT` the view shows for the line "
+    "it replaces (`286 ⇥4|...` → your new line is `4|...`).\n"
+    "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
+    "method indent (look at another `def` in that class, e.g. `4|`); a body line is "
+    "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
+    "class/function — that ejects it (the dedent bug). A blank line is `0|`.")
+
 # ── SALVAGE: do the native tool-calling OURSELVES (ckpt-148) ─────────────────
 # gpt-oss on a cheap provider (DeepInfra) intermittently returns finish_reason=stop
 # with NO structured `tool_calls` — but the call it MEANT to make is sitting right
@@ -2494,27 +2603,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
               # stayed prefix_ws → re-armed the col-0 dedent bug. The flag no longer
               # disables it. (audit fix E, 2026-06-02.)
         # Authoritative INDENT| write-format instruction, appended LAST so it wins.
-        system = system + (
-            "\n\n## INDENTATION — you DECLARE it as a number; the harness applies the spaces\n"
-            "Every code line is shown as `LINENO ⇥INDENT|<real spaces>code` — e.g. "
-            "`286 ⇥4|    def setvalue` means line 286, indent 4, then 4 real spaces, then the "
-            "code. The bare number on the LEFT is the line; the number after the `⇥` is the "
-            "INDENT — you SEE the indentation AND read its exact number (`4`).\n"
-            "FOR `old`: copy the view line(s) VERBATIM — keep the whole `LINENO ⇥INDENT|` "
-            "prefix (e.g. `286 ⇥4|    def setvalue`). The harness anchors on BOTH the line "
-            "number (so a repeated line lands on the RIGHT one) AND the content (so a stale "
-            "number self-corrects), and re-applies the indent from the number. You do NOT strip "
-            "anything — just copy what you see.\n"
-            "FOR `new` (new code, no line number yet): write each line as `INDENT|code` — the "
-            "indent NUMBER (the one after the `⇥` in the view), a pipe, then the code WITHOUT "
-            "leading spaces. The harness re-emits INDENT spaces for you, so you NEVER type or "
-            "count leading spaces and can never drop them.\n"
-            "  • CHANGED line → its `new` reuses the SAME `INDENT` the view shows for the line "
-            "it replaces (`286 ⇥4|...` → your new line is `4|...`).\n"
-            "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
-            "method indent (look at another `def` in that class, e.g. `4|`); a body line is "
-            "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
-            "class/function — that ejects it (the dedent bug). A blank line is `0|`.")
+        system = system + _INDENT_FORMAT_BLOCK
     if _TRACE_MODE:
         # Force the trace→test→run→minimal-edit loop for subtle behaviour, so the
         # coder UNDERSTANDS the flow instead of guessing a plausible-wrong impl, and
@@ -2875,5 +2964,175 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         warn(f"  [native:{short}] stopped ({reason}) with ZERO edits — step produced nothing.")
     elif done and not files:
         warn(f"  [native:{short}] called finish but made ZERO edits — step produced nothing.")
+    return {"answer": final, "done": done, "files_changed": files,
+            "rounds": rnd, "reason": reason}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JSON-OPS coder (ckpt-183, flag JARVIS_JSON_OPS) — gpt-oss in TEXT mode (no native
+# tool-calling), STREAMING, emitting FLAT JSON-line ops it terminates with a `done`
+# op. Native tool-calling makes gpt-oss emit ONE call/round (128/128) and it can't
+# build the nested batch array (empty `calls`). Flat single ops are its STRONGEST
+# skill — so we let it emit MANY of them as plain text (text mode = no tool_call to
+# end the turn), parse them, run them all, results next round. Reuses every _do_*.
+# ══════════════════════════════════════════════════════════════════════════════
+_JSON_OPS_PROMPT = (
+    "\n\n## ⚠ OUTPUT FORMAT — JSON OPS (this OVERRIDES the tool-calling convention above)\n"
+    "You do NOT make function/tool calls. You RESPOND WITH OPERATIONS as a sequence of FLAT "
+    "JSON objects, ONE PER LINE, nothing else — no prose, no markdown fences, no array wrapper. "
+    "Each line is exactly:\n"
+    '  {\"tool\": \"<name>\", \"args\": { ... }}\n'
+    "Emit every op you want THIS round, one per line, then stop. The harness runs them IN ORDER "
+    "and sends every result back in the next message — you do NOT see a result mid-response, so "
+    "gather first, act next round. THE OPS:\n"
+    '  {\"tool\":\"read_file\",\"args\":{\"path\":\"p\"[,\"start_line\":N,\"end_line\":M]}}\n'
+    '  {\"tool\":\"list_dir\",\"args\":{\"path\":\"dir\"}}   {\"tool\":\"search_text\",\"args\":{\"pattern\":\"re\"}}\n'
+    '  {\"tool\":\"find_refs\",\"args\":{\"symbol\":\"name\"}}   {\"tool\":\"find_callers\",\"args\":{\"tag\":\"#t\"}}\n'
+    '  {\"tool\":\"file_purpose\",\"args\":{\"path\":\"p\"}}   {\"tool\":\"semantic_search\",\"args\":{\"query\":\"q\"}}\n'
+    '  {\"tool\":\"depends_on\",\"args\":{\"symbol\":\"name\"}}\n'
+    '  {\"tool\":\"edit_file\",\"args\":{\"path\":\"p\",\"edits\":[{\"old\":[\"286 ⇥4|    def foo\"],\"new\":[\"4|def foo2\"]}]}}\n'
+    '  {\"tool\":\"create_file\",\"args\":{\"path\":\"p\",\"content\":\"...\"}}\n'
+    '  {\"tool\":\"keep\",\"args\":{\"path\":\"p\",\"ranges\":[[40,60]]}}   {\"tool\":\"run_code\",\"args\":{\"command\":\"...\"}}\n'
+    '  {\"tool\":\"done\",\"args\":{\"summary\":\"one line: what you changed\"}}  ← emit ONLY when the edit is complete AND verified\n'
+    "RULES: (1) one JSON object per line, FLAT — never nest ops in an array. (2) `old`/`new` use "
+    "the `LINENO ⇥INDENT|code` / `INDENT|code` format from the INDENTATION section. (3) Do NOT "
+    "read_file and edit_file the SAME file in one round — you must SEE it (this round) before you "
+    "edit it (next round). (4) Put ALL hunks for one file in ONE edit_file op. (5) Ideal shape: "
+    "round 1 = all your read/search ops together; round 2 = your edit_file op(s); round 3 = a "
+    "run_code check; then a `done` op. (6) Emit ONLY the JSON lines — no commentary.\n"
+    "TWO THINGS THIS REPLACES from the toolkit above: there is NO `batch` tool here — emitting "
+    "several ops (one per line) in a round IS the batch, so never wrap them. And wherever the "
+    "instructions above say \"call finish\" / `finish(summary)`, you instead emit the `done` op."
+)
+_JSON_OPS_NUDGE = (
+    "⚠ I couldn't find any valid JSON op in your reply. Respond with ONLY flat JSON ops, one per "
+    "line — e.g. `{\"tool\":\"read_file\",\"args\":{\"path\":\"x.py\"}}` — and nothing else. When "
+    "the edit is done and verified, emit `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}`."
+)
+_JSON_OPS_VERIFY = (
+    "Before you finish: re-trace your edit on the spec's hardest case (or run_code a quick check). "
+    "If it's correct, emit `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}` again; otherwise emit "
+    "the fixing edit_file op."
+)
+_JSON_OPS_NO_EDIT = (
+    "⚠ You emitted `done` but NOTHING has changed — no edit landed (you made none, or your "
+    "edit_file op was rejected with a ✗). This step is NOT done; finishing now ships an empty "
+    "patch. Make the change first: if you haven't seen the target file, read_file it; then emit "
+    "an edit_file op (all hunks for a file in ONE op) and confirm you get a ✓ applied diff in the "
+    "results. Only emit `done` AFTER an edit has actually landed. If — after looking — you are "
+    "certain the step needs no code change, emit `done` again and say why in the summary."
+)
+
+
+async def call_with_json_ops(model_id: str, system: str, user_content: str,
+                             ctx: dict, max_rounds: int = 40,
+                             max_history_chars: int = 400_000) -> dict:
+    """JSON-ops coder loop. Streams gpt-oss in TEXT mode (no tools), parses the FLAT JSON-line ops
+    it emits, runs each via _dispatch (every _do_* reused), feeds results back, loops. `done` op
+    (with a verify gate) ends it. Same return contract as call_with_native_tools."""
+    from clients.nvidia import call_nvidia_stream
+    short = model_id.split('/')[-1]
+    # Same authoritative INDENT block the native loop appends (edits use the SAME
+    # `INDENT|code` write-format), THEN the JSON-ops protocol override LAST so it
+    # wins on HOW to emit (flat JSON lines, not function calls).
+    system = (system or "") + _INDENT_FORMAT_BLOCK + _JSON_OPS_PROMPT
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": user_content}]
+    ctx.setdefault("files_changed", set())
+    done = False
+    final = ""
+    reason = "budget-exhausted"
+    rnd = 0
+    _empty = 0
+    _verify_nudged = False
+    _no_edit_nudged = False
+    _total_rejects = 0       # EDIT-op rejects only (the real stuck signal)
+    for rnd in range(1, max_rounds + 1):
+        ctx["round"] = rnd
+        messages = _trim_history(messages, max_history_chars, model_id)
+        try:
+            # NO stop_check: a bare "tool":"done" substring scan would truncate the
+            # stream mid-op whenever an edit/create's CONTENT contains that text (and
+            # would chop the done op's own summary). The model ends its turn after its
+            # ops naturally; max_tokens bounds any post-done rambling. (review P0-2.)
+            content = await call_nvidia_stream(
+                model_id, prompt="", system="", messages_override=messages,
+                stop_check=None, max_tokens=16384,
+                log_label=f"json-coder round {rnd}")
+        except Exception as e:
+            warn(f"  [json:{short}] round {rnd}: api error — {str(e)[:120]}")
+            reason = "api-error"
+            break
+        ops, want_done, summary = _parse_json_ops(content)
+        messages.append({"role": "assistant", "content": (content or "(no output)")[:24000]})
+        if not ops and not want_done:
+            _empty += 1
+            if _empty <= 2:
+                messages.append({"role": "user", "content": _JSON_OPS_NUDGE})
+                status(f"  [json:{short}] round {rnd}: no JSON ops parsed — nudging ({_empty}/2)")
+                continue
+            reason = "no-ops"
+            status(f"  [json:{short}] round {rnd}: still no ops — stopping")
+            break
+        status(f"  [json:{short}] round {rnd}: {len(ops)} op(s) [{','.join(o['tool'] for o in ops)}]"
+               + (" +done" if want_done else ""))
+        results = []
+        for k, op in enumerate(ops, 1):
+            tname, targs = op["tool"], op["args"]
+            try:
+                r = await _dispatch(tname, targs, ctx)
+            except Exception as e:
+                r = f"✗ {tname} failed internally: {str(e)[:140]}"
+            if isinstance(r, tuple) and r and r[0] == "__FINISH__":   # a stray finish op
+                want_done = True
+                summary = r[1] or summary
+                continue
+            # Only EDIT-op rejects signal a stuck loop. A lookup returning "✗ no
+            # results" is normal exploration (search_text/find_refs/semantic_search
+            # return ✗ on no hits) — counting those would trip the stuck-bail on one
+            # big speculative LOOK round, before any edit is even attempted. (P1-2.)
+            if (isinstance(r, str) and r.startswith("✗")
+                    and tname in ("edit_file", "replace_lines", "create_file")):
+                _total_rejects += 1
+            _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or ""
+            results.append(f"── op[{k}] {tname}({str(_lbl)[:70]}) ──\n{r}")
+        if len(ops) >= 24:        # parser caps a runaway op list — say so, don't drop silently (P1-5)
+            results.append("⚠ NOTE: only the first 24 ops this round were run; "
+                           "emit fewer ops per round (a focused LOOK, then EDIT).")
+        # Only feed a RESULTS turn back when ops actually ran. A pure-`done` round
+        # (or one whose only op was a finish, which we `continue` past) produces no
+        # results — appending an empty "RESULTS of your ops" turn just before we
+        # break is noise the model never sees act on, so skip it.
+        if results:
+            messages.append({"role": "user", "content":
+                             "RESULTS of your ops (in order):\n\n" + "\n\n".join(results)
+                             + "\n\nEmit your next ops, or `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}` "
+                               "when the edit is complete AND verified."})
+        if _total_rejects >= 12:
+            warn(f"  [json:{short}] {_total_rejects} rejected ops — stuck; stopping for fallover")
+            reason = "stuck-repeating"
+            break
+        if want_done:
+            # NO-EDIT done: the coder asked to finish but nothing has landed (no edit
+            # made, or its edit got rejected this same round → files_changed empty).
+            # An empty patch is not "done"; nudge ONCE to actually make the change,
+            # then accept a second done (fail-soft → chain falls over). (P0-3/P1-1.)
+            if not ctx.get("files_changed") and not _no_edit_nudged:
+                _no_edit_nudged = True
+                messages.append({"role": "user", "content": _JSON_OPS_NO_EDIT})
+                status(f"  [json:{short}] round {rnd}: done with ZERO edits — nudging to edit first")
+                continue
+            if ctx.get("files_changed") and not _verify_nudged:
+                _verify_nudged = True
+                messages.append({"role": "user", "content": _JSON_OPS_VERIFY})
+                status(f"  [json:{short}] round {rnd}: done requested — one verify pass first")
+                continue
+            done = True
+            final = summary or "done"
+            reason = "finished"
+            break
+    files = sorted(ctx.get("files_changed", set()))
+    if not done and not files:
+        warn(f"  [json:{short}] stopped ({reason}) with ZERO edits — step produced nothing.")
     return {"answer": final, "done": done, "files_changed": files,
             "rounds": rnd, "reason": reason}
