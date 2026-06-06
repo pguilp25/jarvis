@@ -860,6 +860,14 @@ have done that during investigation — don't ship the plan without
 it. Use [REFS: name] first.
 
 
+## REFLEXES — fire each the instant it applies (the discovery discipline a strong engineer applies without thinking)
+  - There IS a failing test and you're about to name source files -> TEST-IS-THE-MAP: read the failing test first; the SOURCE module it imports to exercise the behaviour tells you WHERE to edit — NOT the test file, NOT pytest/fixtures/conftest/stdlib. Take WHERE from the test's imports, take WHAT (the required value/behaviour) from the issue + the test's assertions. The issue names plausible-sounding files; the test imports the REAL one (`test_parse.py` exercises parse.py → edit parse.py, not the marc readers the issue mentions). If there is NO test (a described-behaviour / feature task), the issue's description is the contract instead.
+  - Tempted to put a test file in a STEP -> EDIT THE SOURCE, NEVER THE TEST: the failing test is the FIXED contract — make its SOURCE module pass; never write a STEP that modifies, deletes, or weakens a test file.
+  - About to write a `### STEP` naming a file you have NOT opened this run -> READ-IT-OR-DROP-IT: a file you know only from the issue text is a GUESS — `[CODE:]`/`[SEARCH:]` it, then write the STEP from what you actually SAW (anchor lines, real behaviour). The drafts that miss the target file are the ones that planned from prose without opening it.
+  - Two files could plausibly host the change (uri.py vs urls.py, parse.py vs the readers) -> RESOLVE-BY-IMPORT-NOT-NAME: open BOTH and let the file the test IMPORTS / the call RESOLVES TO decide — never pick by name resemblance or the issue's wording.
+  - The change ADDS a new symbol (def/class/helper) and you are choosing WHICH file -> NEW-SYMBOL-LIVES-WHERE-THE-TEST-IMPORTS-IT: place it at the module the test imports it from. Do NOT relocate it to dodge a circular import you only SUSPECT — `[CODE:]` the cycle first; if it is REAL, restructure to break it, do not just park the symbol in the wrong file (that fails the test that imports it from its real home).
+  - About to write a STEP whose verb is "fix / handle / update" -> PIN-THE-ASSERTED-BEHAVIOR: quote the test's assertion VERBATIM into the STEP and name what the output BECOMES — the exact value, branch, or shape, char-for-char (`'Editor'` ≠ `'editor'`). The right file with a vague "make it work" still fails the assertion.
+
 ## When to commit
 
 SCOPE-COMPLETENESS CHECK (in [think], before you open `=== PLAN ===`): list every thing the requirements/interface NAME — each code SYMBOL (function/method/class/attribute), each CONFIG OPTION/KEY/SETTING (often declared in a config/data file, NOT a .py — e.g. a key in configdata.yml, a route in urls.py — the easiest file to forget), and each FILE named directly. For EACH, name the file it lives in (`[REFS:]` if unsure) and confirm a `### STEP` touches that file. A named symbol/option whose file has no STEP is the #1 plan miss — add the step now, before you commit.
@@ -1334,6 +1342,12 @@ any input plan when integrating. The coder reads the file.
 blind spot, or one planner influenced the others through the
 research cache. When 3+ plans agree on a fact you'd want to
 verify, treat it as ONE claim.
+
+REFLEXES — fire each before you WRITE the `=== PLAN ===`:
+  - There is a failing test -> THE TEST'S SOURCE MODULE GETS A STEP: confirm a `### STEP` edits the SOURCE module the failing test imports to exercise the behaviour (NOT the test file, NOT fixtures/conftest/stdlib). That module having no step is the #1 fatal omission — add it HERE, the coder won't (`test_parse.py` exercises parse.py → parse.py needs a step even if no draft gave it one). NEVER emit a STEP that edits a test file — make the source pass, don't touch the test. (The forward symbol→file enumeration is the separate SCOPE-COMPLETENESS CHECK; this is the test→source direction it misses.)
+  - One draft targets a file the others skip, OR quotes REAL `[CODE:]` lines while the others name files only from the issue prose -> GROUNDED-MINORITY-WINS: trust the draft with code evidence even when it stands alone; demote prose-only picks. 3 drafts agreeing is ONE claim if none of the 3 opened the file (the lone draft that actually read the target file beats the majority that pattern-matched the issue).
+  - A draft step says "implement all the changes" or spans 3+ files in one blob -> ONE-STEP-PER-FILE: emit a SEPARATE `### STEP` per file, each with its own anchor and concrete change. A coder handed one mega-step does the easiest edit and quits; granular steps force every file to be touched.
+  - Drafts agree on the file but give DIFFERENT edit content -> CLASH-RESOLVES-TO-THE-ASSERTION: settle toward what the test asserts char-for-char (the quoted literal / value / type / exception), not the average of the drafts or the longest prose.
 
 Trust the code, not the majority.
 
