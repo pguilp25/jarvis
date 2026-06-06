@@ -74,8 +74,7 @@ from tools.sandbox import Sandbox
 UNDERSTAND_MODELS = [
     "zai/glm-4.7-flash",          # GLM — reliable, 203k ctx
     "nvidia/glm-5.1",             # GLM (NIM) — reliable, large ctx
-    # ckpt-178b: deepseek-v4-flash + minimax-m2.5 removed (dead on all routes) — these run
-    # in a gather where each must return, so a dead member only adds fallback latency.
+    # NOTE: phase_understand is DEAD (defined, never called) — left as-is.
 ]
 
 # Coder: glm-5.1 (NIM) — reliable, large-context. A free non-OpenRouter
@@ -8670,11 +8669,18 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # context, no Groq/Cerebras. LEAD = glm-4.7-flash. Each member's deep
     # fallback lives in config.NVIDIA_FALLBACKS; the circuit breaker in
     # core/retry.py remembers a downed model so the chain isn't re-walked.
+    # ckpt-187 (user 2026-06-06): NON-FRONTIER planner pool — prove the result comes
+    # from the WORKFLOW, not from leaning on a frontier model (the old pool collapsed
+    # onto glm-5.1: it was slot 2 AND the fallback sink for medium+qwen, so "≥2-draft
+    # consensus" was often glm-5.1 agreeing with itself). New pool = open / non-frontier
+    # models, all OR :free (forced), verified live + diverse families (NVIDIA / Owl /
+    # Google). NO glm-5.1, NO kimi-k2.6. Fallbacks (config.NVIDIA_FALLBACKS) stay WITHIN
+    # this pool so a failover can't silently reintroduce a frontier model.
     PLAN_MODELS = [
-        "zai/glm-4.7-flash",          # LEAD — GLM (z.ai, 203k ctx)
-        "nvidia/glm-5.1",             # GLM-5.1 (→ NIM, ~53s)
-        "mistral/medium",          # Mistral reasoning
-        "nvidia/qwen3-coder",         # Qwen (NIM) — diversity; the cancellable 4th racer
+        "nvidia/nemotron-3-ultra-550b-a55b",   # NEW Nemotron 3 Ultra — primary (OR :free)
+        "openrouter/owl-alpha",                # Owl Alpha — stable ~2s (OR free alpha)
+        "google/gemma-4-31b-it",               # Google Gemma 4 — open, stable, 2 providers
+        "nvidia/nemotron-3-super-120b-a12b",   # Nemotron 3 Super — flakier; the cancellable 4th
     ]
     # ckpt-178b: BOTH minimax-m2.5 AND deepseek-v4-flash dropped from the planner pool —
     # they are DEAD on every route (minimax: NIM 404 + OR:free 404; deepseek-v4-flash: OR:free
@@ -12288,9 +12294,12 @@ async def _implement_one_step(
         #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
         #   gpt-oss-nim stays NEAR THE END deliberately: it doesn't fail fast — it hangs
         #   ~5 min then 504s, so it's only an acceptable LAST-RESORT, never early.
+        # ckpt-187: dropped the frontier glm-5.1 text link; added owl-alpha + gemma-4
+        # (OR :free, non-frontier) as text coders before the slow gpt-oss-nim last-resort.
         _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
-                        ("mistral/medium","native"), ("nvidia/gpt-oss-nim","native"),
-                        ("nvidia/glm-5.1","text")]
+                        ("mistral/medium","native"),
+                        ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
+                        ("nvidia/gpt-oss-nim","native")]
         # ckpt-183 experiment (JARVIS_JSON_OPS): route gpt-oss-120b PRIMARY through the JSON-ops
         # TEXT coder instead of native tool-calling (flat JSON-line ops it can actually emit).
         # Fallbacks unchanged. Flag-gated: default behavior is identical.

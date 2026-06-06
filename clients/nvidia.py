@@ -110,6 +110,13 @@ OPENROUTER_MODELS = {
     # it works reliably; do NOT route glm-* to OR.
     # No deepseek-v4-pro — no :free OR variant and paid is off-limits.
     # No kimi-k2.6     — replaced by minimax-m2.5 in the planner pool.
+    # ── ckpt-187 NON-FRONTIER planner pool (user 2026-06-06: prove the workflow,
+    #    not a frontier model like glm-5.1 / kimi-k2.6). All :free; owl-alpha is a
+    #    free alpha/stealth slug (no :free suffix). Verified live 2026-06-06. ──
+    "nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b:free",   # NEW Nemotron 3 Ultra
+    "nemotron-3-super-120b-a12b": "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron 3 Super (flakier → fallback)
+    "owl-alpha":                  "openrouter/owl-alpha",                     # Owl Alpha (free alpha, ~2s, stable)
+    "gemma-4-31b-it":             "google/gemma-4-31b-it:free",               # Google Gemma 4 (open, 2 providers)
 }
 
 # Models that ALWAYS route via OpenRouter regardless of NVIDIA_API_KEY
@@ -123,6 +130,10 @@ OPENROUTER_FORCED = {
                       # (fails fast → cascade). TODO: replace in PLAN_MODELS, it's dead weight.
     "gpt-oss-120b",   # coder: route OR FIRST (now PAID DeepInfra@bf16 pin), not NIM
     "qwen3-coder",    # text-coder fallback on OR :free (instant-429 fast failover)
+    # ckpt-187 non-frontier planner pool — force to OR :free (their NIM/native
+    # routes don't apply; OR is the only home for these slugs).
+    "nemotron-3-ultra-550b-a55b", "nemotron-3-super-120b-a12b",
+    "owl-alpha", "gemma-4-31b-it",
 }
 
 # ── OpenRouter key pool ──────────────────────────────────────────────

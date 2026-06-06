@@ -67,6 +67,14 @@ MODELS = {
 
     # OpenRouter (free tier)
     "openrouter/qwen3.6-plus": {"window": 1_000_000, "tpm": None, "provider": "openrouter"},
+
+    # ckpt-187 NON-FRONTIER planner pool (user 2026-06-06) — all routed to OR :free
+    # via OPENROUTER_FORCED (clients/nvidia.py); registered here so the tool loop's
+    # MODELS[model_id] window lookup resolves. Conservative windows.
+    "nvidia/nemotron-3-ultra-550b-a55b": {"window": 256_000, "tpm": None, "provider": "openrouter"},
+    "nvidia/nemotron-3-super-120b-a12b": {"window": 256_000, "tpm": None, "provider": "openrouter"},
+    "openrouter/owl-alpha":              {"window": 128_000, "tpm": None, "provider": "openrouter"},
+    "google/gemma-4-31b-it":             {"window": 128_000, "tpm": None, "provider": "openrouter"},
 }
 
 # ─── Groq Model ID Mapping (config name → API model string) ─────────────────
@@ -143,6 +151,26 @@ NVIDIA_FALLBACKS = {
     # Mistral, Pollinations) → NIM LAST (NIM hangs ~5 min on overload). NO Groq /
     # Cerebras (too little context). OR :free = nvidia/deepseek-v4-flash &
     # nvidia/minimax-m2.5 (FORCED to OpenRouter); all other nvidia/* = NIM.
+
+    # ── ckpt-187 NON-FRONTIER planner pool (user 2026-06-06) — fallbacks stay WITHIN
+    #    the open pool + mistral/medium; NEVER glm-5.1 / kimi (else a failover would
+    #    silently reintroduce the frontier model the experiment removes). ──
+    "nvidia/nemotron-3-ultra-550b-a55b": (
+        "google/gemma-4-31b-it", "openrouter/owl-alpha",
+        "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
+    ),
+    "openrouter/owl-alpha": (
+        "google/gemma-4-31b-it", "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+    ),
+    "google/gemma-4-31b-it": (
+        "openrouter/owl-alpha", "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+    ),
+    "nvidia/nemotron-3-super-120b-a12b": (
+        "google/gemma-4-31b-it", "openrouter/owl-alpha",
+        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+    ),
 
     # ── PLANNER lead (zai/glm-4.7-flash) — OR :free first → reliable → NIM last ──
     "zai/glm-4.7-flash": (
