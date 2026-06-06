@@ -3901,9 +3901,18 @@ plan with the evidence baked in.
        `[SEARCH: <common pattern>]` in the affected module. The fix
        must cover every instance, not just the example shown.
 
-These triggers prevent the four catastrophic-regression modes
-observed in production: wrong-string-fix, public-re-export-deletion,
-over-broad-except, single-instance-fix-of-plural-bug.
+  T5 — Plan ADDS a new symbol (def/class/helper) and you're picking
+       WHICH file it lives in — especially if a circular-import worry
+       is steering you away from the natural home. Do NOT relocate on a
+       hunch: `[CODE:]` both files and check the ACTUAL import direction
+       first. A symbol parked in the wrong file to dodge an import cycle
+       that doesn't actually exist fails the test that imports it from
+       its real home.
+
+These triggers prevent the catastrophic-regression modes observed in
+production: wrong-string-fix, public-re-export-deletion, over-broad-except,
+single-instance-fix-of-plural-bug, and new-symbol-misplaced-on-an-unverified-
+import-fear.
 
 ══════════════════════════════════════════════════════════════════════
 HOW MUCH TO IMPROVE — calibrate by TASK SHAPE
@@ -8856,7 +8865,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # degraded glm-5.1's plan emission → empty plans; so this is ONE short line,
     # not a block: just the files ≥2 drafts independently agreed on, so the merger
     # can't silently drop a file all the drafts named. Appended last for recency.)
-    from core.plan_scope import union_file_scopes, majority_files
+    from core.plan_scope import union_file_scopes, majority_files, coverage_steps
     _per_draft = [_extract_files_from_plan(p.get("answer", ""), files or [])
                   for p in plans]
     _scope_union, _scope_votes = union_file_scopes(_per_draft)
@@ -9343,6 +9352,24 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             warn(f"  Plan scope check: flagged {len(_gaps)} file(s) multiple "
                  f"sources agree on but the plan omitted (coder will confirm)")
             _wlog.phase_warn("plan scope gaps flagged", n=len(_gaps))
+        # COVERAGE ENFORCEMENT (planner-audit fix): the checks above key on scope
+        # MEMBERSHIP — a ≥2-draft consensus file the merger NAMES in prose counts as
+        # "in scope" (so _add_req skips it), yet it can carry NO `### STEP`, and the
+        # per-step coder iterates STEPS, so it's silently never edited
+        # (ansible-395e5e20: strategy/__init__.py + linear.py named but unstepped →
+        # missed sites → fail; the run that DID step them passed — it was variance the
+        # merger occasionally drops). Synthesize a real STEP for each consensus file
+        # with no step so the coder actually covers it (gated ≥2-draft + real file +
+        # non-test + capped; each step has a read-and-decline escape hatch).
+        _stepped = {f for s in _extract_impl_steps(best_plan) for f in (s.get("files") or [])}
+        _cov_text, _cov_added = coverage_steps(
+            best_plan, majority_files(_scope_votes, len(plans)),
+            _stepped, _proj_files, _scope_votes)
+        if _cov_text:
+            best_plan += _cov_text
+            warn(f"  coverage enforcement: +{len(_cov_added)} STEP(s) for ≥2-consensus "
+                 f"file(s) the merge left unstepped: {', '.join(_cov_added)}")
+            _wlog.phase_warn("coverage steps added", files=",".join(_cov_added))
     except Exception as _sce:
         warn(f"  plan-scope backstop skipped: {str(_sce)[:120]}")
 

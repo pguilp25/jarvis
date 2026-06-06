@@ -4,6 +4,7 @@ from core.plan_scope import (
     imported_modules, modules_to_files,
     referenced_files_outside_scope, completeness_lint, format_plan_gaps,
     rank_relevant_tests, imported_symbols, missing_symbols,
+    coverage_steps,
 )
 
 
@@ -183,4 +184,56 @@ def test_lint_clean_when_covered():
 def test_format_plan_gaps():
     assert format_plan_gaps([]) == ""
     note = format_plan_gaps(["a.py: missing"])
-    assert "PLAN GAPS" in note and "a.py: missing" in note
+    # wording updated in ckpt-166 (imperative "REQUIRED SCOPE THE PLAN OMITTED")
+    assert "REQUIRED SCOPE" in note and "a.py: missing" in note
+
+
+# ── coverage_steps: consensus file MENTIONED but never STEPPED (395e5e20) ──────
+# The merger can NAME a ≥2-draft file in prose (so it's "in scope" and the
+# _required backstop skips it) yet emit NO `### STEP` for it — the per-step coder
+# then never edits it. coverage_steps synthesizes a real STEP that the step parser
+# picks up so the file actually gets covered.
+from workflows.code import _extract_impl_steps   # the real step parser
+
+
+def test_coverage_steps_adds_step_for_unstepped_consensus_file():
+    plan = "## STEPS\n### STEP 1: do play_iterator\nFILES: play_iterator.py\n"
+    proj = ["play_iterator.py", "strategy/__init__.py", "strategy/linear.py"]
+    consensus = ["play_iterator.py", "strategy/__init__.py", "strategy/linear.py"]
+    text, added = coverage_steps(plan, consensus, {"play_iterator.py"}, proj,
+                                 {"strategy/__init__.py": 3, "strategy/linear.py": 2})
+    assert set(added) == {"strategy/__init__.py", "strategy/linear.py"}
+    # the synthesized steps must PARSE via the real parser and yield those files
+    parsed = _extract_impl_steps(plan + text)
+    parsed_files = {f for s in parsed for f in s.get("files") or []}
+    assert "strategy/__init__.py" in parsed_files and "strategy/linear.py" in parsed_files
+    # numbering continues from the existing max (STEP 1 → 2, 3)
+    assert "### STEP 2:" in text and "### STEP 3:" in text
+
+
+def test_coverage_steps_noop_when_all_consensus_stepped():
+    plan = "### STEP 1: a\nFILES: a.py\n### STEP 2: b\nFILES: b.py\n"
+    text, added = coverage_steps(plan, ["a.py", "b.py"], {"a.py", "b.py"},
+                                 ["a.py", "b.py"], {})
+    assert text == "" and added == []
+
+
+def test_coverage_steps_excludes_tests_and_nonproject():
+    plan = "### STEP 1: a\nFILES: a.py\n"
+    # test file + a file not in the project pool must NOT be forced
+    text, added = coverage_steps(plan, ["tests/test_x.py", "ghost.py", "real.py"],
+                                 {"a.py"}, ["a.py", "real.py"],
+                                 {"tests/test_x.py": 3, "ghost.py": 2, "real.py": 2})
+    assert added == ["real.py"]
+
+
+def test_coverage_steps_caps_additions():
+    plan = "### STEP 1: a\nFILES: a.py\n"
+    proj = [f"f{i}.py" for i in range(10)]
+    text, added = coverage_steps(plan, proj, set(), proj, {f: 2 for f in proj}, max_add=4)
+    assert len(added) == 4
+
+
+def test_coverage_steps_handles_empty_inputs():
+    assert coverage_steps("", [], set(), [], {}) == ("", [])
+    assert coverage_steps(None, None, None, None, None) == ("", [])

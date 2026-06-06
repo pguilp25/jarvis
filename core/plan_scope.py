@@ -225,3 +225,46 @@ def format_plan_gaps(gaps: list) -> str:
             "were an explicit numbered step — UNLESS reading it proves it genuinely needs no change "
             "(then say so briefly and move on; do not edit a file that doesn't need it).\n"
             + "\n".join(f"- {g}" for g in gaps))
+
+
+# ── coverage enforcement: consensus file MENTIONED but never STEPPED ───────────
+# Distinct from completeness_lint / the _required backstop: those key on scope
+# MEMBERSHIP (a file the merged plan never mentions). This keys on step COVERAGE.
+# A merger can NAME a file in prose (so it counts as "in scope") yet emit NO
+# `### STEP` for it — and the per-step coder, which iterates STEPS, then never
+# edits it. That silently drops a behavior-bearing file the drafts agreed on
+# (ansible-395e5e20: strategy/__init__.py + linear.py were named but unstepped →
+# missed sites → fail; the run that DID step them passed). So: for each ≥2-draft
+# consensus file with no step, synthesize a real STEP the parser will pick up.
+_STEP_NUM_RE = re.compile(r'###\s*STEP\s*(\d+)', re.I)
+
+
+def coverage_steps(best_plan: str, consensus_files, stepped_files,
+                   proj_files, votes: dict, n_drafts: int = 0, max_add: int = 4):
+    """Return (append_text, added_files): real `### STEP` blocks for ≥2-draft
+    consensus files that have NO step in `best_plan`. `stepped_files` = the files
+    the plan's parsed steps already cover. Gated hard (≥2 consensus + real project
+    file + not a test) and capped, so it can't over-scope; each step carries an
+    explicit read-and-decline escape hatch. Empty when coverage is already complete."""
+    proj = set(proj_files or [])
+    stepped = set(stepped_files or [])
+    uncovered = [f for f in (consensus_files or [])
+                 if f and f not in stepped and f in proj and "test" not in f.lower()]
+    if not uncovered:
+        return "", []
+    nums = [int(m.group(1)) for m in _STEP_NUM_RE.finditer(best_plan or "")]
+    maxstep = max(nums) if nums else 0
+    blocks, added = [], []
+    for f in uncovered[:max_add]:
+        maxstep += 1
+        v = votes.get(f, 2) if isinstance(votes, dict) else 2
+        blocks.append(
+            f"### STEP {maxstep}: Apply the required change to {f}\n"
+            f"FILES: {f}\n"
+            f"{v} of the planner drafts independently flagged {f} as needing changes, but the "
+            f"merged plan emitted no step for it. Read {f} and make the change THIS task requires "
+            f"there — consistent with the other steps (the same new symbols / signatures / enums "
+            f"they introduce) and wire it in. If, after reading it, you are certain it needs NO "
+            f"change, say so in one line and make none (do not edit a file that doesn't need it).")
+        added.append(f)
+    return "\n\n" + "\n\n".join(blocks), added
