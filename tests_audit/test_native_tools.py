@@ -1118,17 +1118,17 @@ def test_batch_runs_multiple_lookups_one_round():
             {"tool": "search_text", "args": {"pattern": "class Counter"}},
             {"tool": "find_refs", "args": {"symbol": "greet"}},
         ]}, ctx)
-        assert "batch[1] read_file" in out and "batch[2] search_text" in out and "batch[3] find_refs" in out
+        assert "op[1] read_file" in out and "op[2] search_text" in out and "op[3] find_refs" in out
         assert "greet" in out                                    # the read_file result is in there
         assert rel in ctx.get("view_at", {})                     # the batched read marked it viewed
-        # an edit sub-call is refused (edits aren't batchable)
+        # by default (flag off) an edit sub-call is refused — batch is read-only
         bad = _disp("batch", {"calls": [{"tool": "edit_file", "args": {"path": rel}}]}, ctx)
-        assert "not batchable" in bad
+        assert "not allowed here" in bad
         # ckpt-181b: an ALL-failing batch (here: all non-batchable — the realistic repeat-mistake
         # of batching edits) returns ✗ so the loop's reject-counter/fallover engages.
         allfail = _disp("batch", {"calls": [{"tool": "edit_file", "args": {}},
                                             {"tool": "run_code", "args": {"command": "ls"}}]}, ctx)
-        assert allfail.startswith("✗") and "all 2 lookup" in allfail
+        assert allfail.startswith("✗") and "all 2 op" in allfail
         # a batch with ≥1 real result does NOT start with ✗ (not a reject)
         partial = _disp("batch", {"calls": [{"tool": "read_file", "args": {"path": rel}},
                                             {"tool": "edit_file", "args": {}}]}, ctx)
@@ -1138,6 +1138,26 @@ def test_batch_runs_multiple_lookups_one_round():
         assert isinstance(_disp("batch", {"calls": [5, {"tool": "list_dir"}]}, ctx), str)
     finally:
         _cleanup(root)
+
+
+def test_batch_only_mode_runs_edit_then_finish():
+    # ckpt-182: under JARVIS_BATCH_ONLY, batch carries ALL ops (incl. edit + finish). An
+    # edit+finish batch applies the edit and returns the __FINISH__ tuple (loop ends via the
+    # normal finish path). Default (flag off) keeps batch read-only (other tests cover that).
+    os.environ["JARVIS_BATCH_ONLY"] = "1"
+    try:
+        from core.native_tools import _do_batch
+        src = "def f():\n    return 1\n"
+        ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+               "project_root": ".", "files_changed": set()}
+        r = asyncio.run(_do_batch({"calls": [
+            {"tool": "edit_file", "args": {"path": "m.py", "old": ["4|return 1"], "new": ["4|return 2"]}},
+            {"tool": "finish", "args": {"summary": "changed it"}}]}, ctx))
+        assert isinstance(r, tuple) and r[0] == "__FINISH__" and r[1] == "changed it"
+        assert ctx["file_contents"]["m.py"] == "def f():\n    return 2\n"   # the batched edit applied
+        assert "m.py" in ctx["files_changed"]
+    finally:
+        os.environ.pop("JARVIS_BATCH_ONLY", None)
 
 
 def test_keep_errors_if_file_not_viewed():

@@ -358,6 +358,40 @@ _TRACE_TOOL = {"type": "function", "function": {
 if _TRACE_MODE:
     CODER_TOOLS.append(_TRACE_TOOL)
 
+# JARVIS_BATCH_ONLY experiment (ckpt-182): expose `batch` as the SOLE tool, so the model — which
+# emits exactly one tool_call per round — packs MULTIPLE ops into that one call (collapsing the
+# look phase to a ~4-round step). `batch` carries every op as {tool, args}. Flag-gated: the
+# default tool surface (CODER_TOOLS) is unchanged.
+_BATCH_ONLY_TOOLS = [{"type": "function", "function": {
+    "name": "batch",
+    "description": (
+        "Your ONLY tool. Each round, emit ONE batch carrying the operations you want run this "
+        "round, as `calls` = a list of {\"tool\": <name>, \"args\": {...}}. The harness runs them "
+        "IN ORDER and returns all results at once. Available ops and their args:\n"
+        "  read_file{path[,start_line,end_line]} · list_dir{[path]} · search_text{pattern} · "
+        "find_refs{symbol} · find_callers{tag} · file_purpose{path} · semantic_search{query} · "
+        "depends_on{symbol}\n"
+        "  edit_file{path, edits:[{old:[lines],new:[lines]}]} · create_file{path, content} · "
+        "keep{path, ranges:[[start,end]]} · run_code{command} · finish{summary}\n"
+        "HOW TO USE IT — the ideal step is ~4 rounds:\n"
+        "  1) LOOK: batch all the read_file/search lookups you need (gather many files in one "
+        "round). You get every result back together.\n"
+        "  2) After you SEE them, batch your edit_file op(s). DO NOT read_file and edit_file the "
+        "SAME file in one batch — the edit would run before you've seen the file. Put all hunks "
+        "for one file in ONE edit_file (its `edits` list); separate files = separate ops in the "
+        "batch.\n"
+        "  3) VERIFY: batch a run_code check.\n"
+        "  4) finish{summary} — put it as the LAST op (alone, or after a final mechanical edit).\n"
+        "Name what each lookup answers; don't ask the same thing twice. A file >1000 lines comes "
+        "back as a def-index → batch the ranges you need next round."),
+    "parameters": {"type": "object", "properties": {
+        "calls": {"type": "array", "description": "this round's ops, each {\"tool\": <name>, \"args\": {...}}",
+                  "items": {"type": "object", "properties": {
+                      "tool": {"type": "string"},
+                      "args": {"type": "object"}}}},
+    }, "required": ["calls"]},
+}}]
+
 
 # ── Tool dispatch ────────────────────────────────────────────────────────────
 def _view_stamp(ctx: dict) -> str:
@@ -1859,27 +1893,33 @@ def _do_keep(args: dict, ctx: dict) -> str:
 
 _BATCHABLE = {"read_file", "search_text", "find_refs", "file_purpose",
               "semantic_search", "depends_on", "list_dir"}
+# ckpt-182 (flag-gated experiment, JARVIS_BATCH_ONLY): when batch is the ONLY exposed tool, it
+# must carry the action tools too — edits/keep/run_code/finish — not just lookups.
+_BATCH_ALL = _BATCHABLE | {"edit_file", "create_file", "replace_lines", "keep", "run_code", "finish"}
+_BATCH_ONLY = os.environ.get("JARVIS_BATCH_ONLY", "0") == "1"
 
 
 async def _do_batch(args: dict, ctx: dict) -> str:
-    """Run several READ-ONLY lookups in ONE round (ckpt-181): native tool-calling otherwise does
-    one call per round (gpt-oss emitted 1/round in 128/128 rounds), so the opening 'look' at a
-    multi-file step wasted a round-trip per file. `calls` = [{tool, args}, …]; dispatch each via
-    _dispatch and concatenate. Read-only tools ONLY — edits/keep/run_code/finish are their own
-    rounds (edits have order dependencies). Never raises; caps at 8 lookups."""
+    """Run several tool ops in ONE round (ckpt-181): native tool-calling does one call per round
+    (gpt-oss emitted 1/round in 128/128), so a multi-op step wasted a round-trip per op. `calls`
+    = [{tool, args}, …]; dispatch each IN ORDER via _dispatch and concatenate. By default only
+    READ-ONLY lookups (edits have order dependencies). Under JARVIS_BATCH_ONLY (batch is the sole
+    tool) ALL ops are allowed incl. edit/keep/run_code/finish — a finish op ends the loop via the
+    normal __FINISH__ path (after the batch's other ops have run). Never raises."""
     calls = args.get("calls")
     if not isinstance(calls, list) or not calls:
-        return ("✗ batch: `calls` must be a non-empty list of {\"tool\": <name>, \"args\": {...}} "
-                "read-only lookups.")
+        return ("✗ batch: `calls` must be a non-empty list of {\"tool\": <name>, \"args\": {...}}.")
+    _allowed = _BATCH_ALL if os.environ.get("JARVIS_BATCH_ONLY", "0") == "1" else _BATCHABLE
     _capnote = ""
-    if len(calls) > 8:
-        _capnote = f"\n\n(ran the first 8 of {len(calls)} lookups — batch ≤8 at a time.)"
-        calls = calls[:8]
+    if len(calls) > 10:
+        _capnote = f"\n\n(ran the first 10 of {len(calls)} ops — batch ≤10 at a time.)"
+        calls = calls[:10]
     out = []
     _ok = 0
+    _finish_summary = None
     for i, c in enumerate(calls, 1):
         if not isinstance(c, dict):
-            out.append(f"── batch[{i}] ✗ each call must be {{\"tool\": <name>, \"args\": {{...}}}} "
+            out.append(f"── op[{i}] ✗ each op must be {{\"tool\": <name>, \"args\": {{...}}}} "
                        f"(got {type(c).__name__}).")
             continue
         tname = c.get("tool") or c.get("name") or ""
@@ -1887,27 +1927,35 @@ async def _do_batch(args: dict, ctx: dict) -> str:
         if not isinstance(targs, dict):
             # tolerate the flat form {tool, path, ...} — treat the non-tool keys as args
             targs = {k: v for k, v in c.items() if k not in ("tool", "name", "args")}
-        if tname not in _BATCHABLE:
-            out.append(f"── batch[{i}] {tname or '?'}: ✗ not batchable — batch runs read-only "
-                       f"lookups only ({', '.join(sorted(_BATCHABLE))}); call {tname or 'it'} on "
-                       f"its own round.")
+        if tname == "batch" or tname not in _allowed:
+            out.append(f"── op[{i}] {tname or '?'}: ✗ not allowed here — batch runs "
+                       f"{'these ops' if _BATCH_ONLY else 'read-only lookups'} "
+                       f"({', '.join(sorted(_allowed))}); can't nest batch.")
             continue
         try:
             r = await _dispatch(tname, targs, ctx)
         except Exception as e:
             r = f"✗ {tname} failed internally: {str(e)[:140]}"
+        if isinstance(r, tuple) and r and r[0] == "__FINISH__":
+            # a finish op — run the REST of the batch first, then signal finish to the loop.
+            _finish_summary = r[1] or "done"
+            _ok += 1
+            out.append(f"── op[{i}] finish: marked done.")
+            continue
         if isinstance(r, str) and not r.startswith("✗"):
             _ok += 1
         _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or targs.get("tag") or ""
-        out.append(f"── batch[{i}] {tname}({str(_lbl)[:70]}) ──\n{r}")
+        out.append(f"── op[{i}] {tname}({str(_lbl)[:70]}) ──\n{r}")
     joined = "\n\n".join(out) + _capnote
-    # If EVERY sub-call failed, return a ✗-prefixed result so the loop's reject-counter and
-    # identical-call fallover engage — otherwise a coder repeating an all-failing batch would
-    # never trip the stop and could burn the whole round budget (adversarial review, ckpt-181b).
+    # A finish op anywhere in the batch → end the loop via the standard __FINISH__ path (the
+    # batch's edits/etc. already ran and updated ctx; the loop's finish gate checks files_changed).
+    if _finish_summary is not None:
+        return ("__FINISH__", _finish_summary)
+    # If EVERY op failed, return a ✗-prefixed result so the loop's reject-counter / identical-call
+    # fallover engages (else a repeated all-failing batch could burn the budget — review ckpt-181b).
     if _ok == 0:
-        return (f"✗ batch: all {len(calls)} lookup(s) failed — none returned content. Fix the "
-                f"calls (batch runs read-only lookups: {', '.join(sorted(_BATCHABLE))}) and "
-                f"resend, or run them individually.\n{joined}")
+        return (f"✗ batch: all {len(calls)} op(s) failed — fix the calls "
+                f"({', '.join(sorted(_allowed))}) and resend.\n{joined}")
     return joined
 
 
@@ -2426,6 +2474,20 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
     reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
     short = model_id.split('/')[-1]
+    if _BATCH_ONLY:
+        # batch is the SOLE callable tool — the tools listed above are OPERATIONS, invoked by
+        # putting them in batch's `calls`. Make that unmistakable so the coder doesn't try to
+        # call them directly (they aren't exposed → it would stall).
+        system = system + (
+            "\n\n## ⚠ ONE TOOL: batch — this OVERRIDES the calling convention above\n"
+            "Your ONLY callable tool is `batch`. Every tool named above (read_file, edit_file, "
+            "keep, run_code, finish, …) is an OPERATION you invoke ONLY by listing it in batch's "
+            "`calls` = [{\"tool\": <name>, \"args\": {...}}, …] — never call them directly. Pack "
+            "the ops that go together into ONE batch each round: LOOK = batch all your read/search "
+            "ops together (one round); then — after you SEE the results — batch your edit_file "
+            "op(s); then batch a run_code check; then batch finish. NEVER read_file and edit_file "
+            "the same file in the same batch (the edit runs before you've seen the file). Aim for "
+            "~4 rounds total.")
     if True:  # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO ⇥INDENT|
               # <real spaces>code), so this INDENT| write instruction must ALWAYS be
               # appended. Gating it on JARVIS_NATIVE_WS used to drop it while the view
@@ -2538,7 +2600,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         ctx["round"] = rnd   # so tools can stamp diffs/views with WHEN they happened
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
-            msg = await _call_tools_with_retry(model_id, messages, CODER_TOOLS, max_tokens)
+            _tools = _BATCH_ONLY_TOOLS if _BATCH_ONLY else CODER_TOOLS
+            msg = await _call_tools_with_retry(model_id, messages, _tools, max_tokens)
         except Exception as e:
             warn(f"  [native:{short}] giving up after error: {str(e)[:120]}")
             reason = "api-error"

@@ -396,3 +396,28 @@ def test_loop_keep_evicts_old_view_from_history():
         assert "10 ⇥0|def f4" in blob or "11 ⇥" in blob   # kept range content is present
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_loop_batch_runs_lookups_then_edits():
+    # ckpt-181: a `batch` of reads runs in ONE round, its results feed the next round, then a
+    # normal edit lands. Verifies the loop handles a batch tool_call end-to-end (results fed
+    # back, no API-pairing break, reject-counter not tripped).
+    ctx, rel, root = _mk_ctx()
+    try:
+        script = [
+            _msg(tool_calls=[_tc("1", "batch", calls=[
+                {"tool": "read_file", "args": {"path": rel}},
+                {"tool": "find_refs", "args": {"symbol": "greet"}}])]),
+            _msg(tool_calls=[_tc("2", "replace_lines", path=rel, start_line=2, end_line=2,
+                                 new_content='4|return "hi " + name')]),
+            _msg(tool_calls=[_tc("3", "finish", summary="done")]),
+            _msg(tool_calls=[_tc("3b", "finish", summary="verified")]),
+        ]
+        res, model = _run(script, ctx)
+        # the round-2 (edit) call saw the batch results in its history
+        after_batch = model.seen_messages[1]
+        blob = "\n".join(str(m.get("content")) for m in after_batch if m.get("role") == "tool")
+        assert "op[1] read_file" in blob and "greet" in blob   # both lookups returned, one round
+        assert res["done"] is True and res["files_changed"] == [rel]  # then the edit landed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
