@@ -8846,7 +8846,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # BOTH improves the strongest baseline AND merges in the best of the others
     # (see the re-engineered MERGE_PROMPT_TEMPLATE). This roughly halves the
     # planning wall-clock that was timing instances out.
-    step("Merger: mistral/medium improving + merging Layer-1 plans into the final plan...")
+    step("Merger: owl-alpha improving + merging Layer-1 plans into the final plan...")
 
     preloaded_research = _format_research_cache(research_cache)
 
@@ -9013,7 +9013,9 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 "candidates disagree, choose the best approach and state your "
                 "choice. Output ONLY the plan — no preamble, no investigation.")
             _forced_raw = await _raw_call(
-                "mistral/medium", _force_prompt,
+                "openrouter/owl-alpha", _force_prompt,   # ckpt-188: was mistral/medium —
+                # the empty-`=== PLAN ===` model; don't retry the merge on the model whose
+                # variance we're escaping. owl-alpha's chain still ends at mistral/medium.
                 system="You are a senior engineer writing a precise, minimal "
                        "implementation plan. You already have all the context you "
                        "need — do not ask for more, decide and write the plan.",
@@ -12474,30 +12476,43 @@ async def phase_implement(
     # synthesize ONE FOCUSED STEP PER FILE so the per-step loop forces the coder to
     # produce (or explicitly decline) an edit for EACH file — incl. the one the tests
     # need. Falls back to a single blob only if there are no files at all.
-    _fb_files = [f for f in all_files if f]
+    # DETERMINISTIC order (not set()-randomized): files_to_modify first (the plan's
+    # own scope intent), then created files — so which files get a step is stable
+    # across runs and the cap never randomly drops the tested file. (review P1)
+    _fb_files = list(dict.fromkeys([f for f in (list(files_to_modify) + list(files_to_create)) if f]))
+    _FB_CAP = 10
     if len(_fb_files) > 1:
-        status(f"No structured steps found — synthesizing {min(len(_fb_files),8)} "
+        _dropped = _fb_files[_FB_CAP:]
+        if _dropped:
+            warn(f"  per-file fallback: capping at {_FB_CAP} — NOT stepping {len(_dropped)} "
+                 f"file(s): {', '.join(_dropped)}")
+        status(f"No structured steps found — synthesizing {min(len(_fb_files),_FB_CAP)} "
                f"per-file step(s) (no-blob fallback)")
-        for _i, _f in enumerate(_fb_files[:8], 1):
-            await _implement_one_step(
-                step_info={
-                    "num": _i,
-                    "name": f"Implement the plan's changes in {_f}",
-                    "depends_on": [],
-                    "files": [_f],
-                    "details": (f"The plan below has no numbered steps. Make the change "
-                                f"THIS task requires in `{_f}` (consistent with the rest of "
-                                f"the plan). If, after reading it, `{_f}` needs NO change, "
-                                f"say so in one line and move on.\n\n" + plan[:11000]),
-                    "done": False,
-                    "produced_files": {},
-                },
-                task=task, shared_interfaces=shared_interfaces,
-                file_contents=file_contents, sandbox=sandbox,
-                project_root=project_root, plan=plan,
-                detailed_map=detailed_map, purpose_map=purpose_map,
-                research_cache=research_cache,
-            )
+        for _i, _f in enumerate(_fb_files[:_FB_CAP], 1):
+            # Wrap each per-file step like the structured-step loop does — one file's
+            # failure must NOT abort the remaining files (esp. the tested one).
+            try:
+                await _implement_one_step(
+                    step_info={
+                        "num": _i,
+                        "name": f"Implement the plan's changes in {_f}",
+                        "depends_on": [],
+                        "files": [_f],
+                        "details": (f"The plan below has no numbered steps. Make the change "
+                                    f"THIS task requires in `{_f}` (consistent with the rest of "
+                                    f"the plan). If, after reading it, `{_f}` needs NO change, "
+                                    f"say so in one line and move on.\n\n" + plan[:11000]),
+                        "done": False,
+                        "produced_files": {},
+                    },
+                    task=task, shared_interfaces=shared_interfaces,
+                    file_contents=file_contents, sandbox=sandbox,
+                    project_root=project_root, plan=plan,
+                    detailed_map=detailed_map, purpose_map=purpose_map,
+                    research_cache=research_cache,
+                )
+            except Exception as _fe:
+                warn(f"  per-file fallback step {_i} ({_f}) failed: {str(_fe)[:120]}")
         return plan, sandbox
 
     status("No structured steps found — single-pass implementation")
