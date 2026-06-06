@@ -1124,6 +1124,15 @@ def test_batch_runs_multiple_lookups_one_round():
         # an edit sub-call is refused (edits aren't batchable)
         bad = _disp("batch", {"calls": [{"tool": "edit_file", "args": {"path": rel}}]}, ctx)
         assert "not batchable" in bad
+        # ckpt-181b: an ALL-failing batch (here: all non-batchable — the realistic repeat-mistake
+        # of batching edits) returns ✗ so the loop's reject-counter/fallover engages.
+        allfail = _disp("batch", {"calls": [{"tool": "edit_file", "args": {}},
+                                            {"tool": "run_code", "args": {"command": "ls"}}]}, ctx)
+        assert allfail.startswith("✗") and "all 2 lookup" in allfail
+        # a batch with ≥1 real result does NOT start with ✗ (not a reject)
+        partial = _disp("batch", {"calls": [{"tool": "read_file", "args": {"path": rel}},
+                                            {"tool": "edit_file", "args": {}}]}, ctx)
+        assert not partial.startswith("✗")
         # malformed / wrong-type calls don't crash
         assert isinstance(_disp("batch", {"calls": "nope"}, ctx), str)
         assert isinstance(_disp("batch", {"calls": [5, {"tool": "list_dir"}]}, ctx), str)

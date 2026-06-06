@@ -559,8 +559,11 @@ def _def_index(content: str, path: str) -> str:
                 _ind = "  " * (getattr(_n, "col_offset", 0) // 4)
                 rows.append((_n.lineno, f"  {_n.lineno}: {_ind}{_kind} {_n.name}"))
         rows.sort()
-        body = "\n".join(r[1] for r in rows[:500])
-        if body:
+        if rows:
+            body = "\n".join(r[1] for r in rows[:500])
+            if len(rows) > 500:    # don't silently hide defs past the cap (adversarial review)
+                body += (f"\n  … (+{len(rows) - 500} more defs not shown — search_text/find_refs "
+                         f"to locate a specific symbol's line)")
             return body
     except Exception:
         pass
@@ -568,7 +571,12 @@ def _def_index(content: str, path: str) -> str:
     import re as _re2
     out = [f"  {i+1}: {ln.strip()[:90]}" for i, ln in enumerate(content.split("\n"))
            if _re2.match(r'\s*(def |class |async def |function |[A-Za-z_]+\s*=\s*function)', ln)]
-    return "\n".join(out[:500]) or "  (no def/class lines detected — read a range to see content)"
+    if not out:
+        return "  (no def/class lines detected — read a range to see content)"
+    body = "\n".join(out[:500])
+    if len(out) > 500:
+        body += f"\n  … (+{len(out) - 500} more — search_text/find_refs to locate a symbol)"
+    return body
 
 
 def _too_large_view(ctx: dict, path: str, nlines: int, content: str) -> str:
@@ -1868,6 +1876,7 @@ async def _do_batch(args: dict, ctx: dict) -> str:
         _capnote = f"\n\n(ran the first 8 of {len(calls)} lookups — batch ≤8 at a time.)"
         calls = calls[:8]
     out = []
+    _ok = 0
     for i, c in enumerate(calls, 1):
         if not isinstance(c, dict):
             out.append(f"── batch[{i}] ✗ each call must be {{\"tool\": <name>, \"args\": {{...}}}} "
@@ -1887,9 +1896,19 @@ async def _do_batch(args: dict, ctx: dict) -> str:
             r = await _dispatch(tname, targs, ctx)
         except Exception as e:
             r = f"✗ {tname} failed internally: {str(e)[:140]}"
+        if isinstance(r, str) and not r.startswith("✗"):
+            _ok += 1
         _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or targs.get("tag") or ""
         out.append(f"── batch[{i}] {tname}({str(_lbl)[:70]}) ──\n{r}")
-    return "\n\n".join(out) + _capnote
+    joined = "\n\n".join(out) + _capnote
+    # If EVERY sub-call failed, return a ✗-prefixed result so the loop's reject-counter and
+    # identical-call fallover engage — otherwise a coder repeating an all-failing batch would
+    # never trip the stop and could burn the whole round budget (adversarial review, ckpt-181b).
+    if _ok == 0:
+        return (f"✗ batch: all {len(calls)} lookup(s) failed — none returned content. Fix the "
+                f"calls (batch runs read-only lookups: {', '.join(sorted(_BATCHABLE))}) and "
+                f"resend, or run them individually.\n{joined}")
+    return joined
 
 
 async def _do_refs(args: dict, ctx: dict) -> str:
