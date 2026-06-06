@@ -924,6 +924,12 @@ independently-failable unit; see Step-writing rules below).
 
 See SYSTEM RUNTIME / THINK INTERLEAVED above. Planner-specific cues:
 
+    - ALWAYS close every `[think]` with `[/think]`. An UNCLOSED `[think]`
+      is STRIPPED and SWALLOWS your entire plan → the runtime sees an empty
+      plan and discards your work. You reason natively and don't NEED
+      `[think]`; if you open one, never end your turn inside it — close it,
+      then write the visible `=== PLAN ===`. (This is the #1 way a correct
+      draft is lost before the merger ever sees it.)
     - Don't write more than ~400 tokens of [think] without
       committing something to the plan.
     - If you're in your 3rd [think] in a row, commit a placeholder
