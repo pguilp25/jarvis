@@ -77,6 +77,19 @@ LIGHTNING_API_URL = "https://lightning.ai/api/v1/chat/completions"
 DEEPINFRA_API_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+
+def _apply_gptoss_pin(payload: dict, url: str, api_model: str) -> None:
+    """Pin PAID gpt-oss-120b to DeepInfra@bf16 on the OpenRouter route ONLY (user-approved
+    2026-06-03; the :free pool 503s, bf16 is the reliable full-precision route).
+    allow_fallbacks=False → never silently land on a cheaper/lower-quant provider; if DeepInfra is
+    down the call errors and the coder chain falls to the next model. Guarded on the ENDPOINT, not
+    the slug (bughunt #18 — the NIM last-resort route resolves to the SAME slug but a different URL
+    and must NOT get this OR-only pin). Shared by call_nvidia_tools AND call_nvidia_stream so the
+    streaming JSON-ops coder is pinned too (bughunt #11)."""
+    if url == OPENROUTER_API_URL and api_model == "openai/gpt-oss-120b":
+        payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
+                               "allow_fallbacks": False}
+
 # Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
 # DeepInfra serves Pro FP4-quantized at only 66k context (vs 200k+ on NVIDIA
 # and 1M native), so we keep Pro on NVIDIA/Lightning. Flash on DeepInfra
@@ -385,13 +398,7 @@ async def call_nvidia_tools(
         "max_tokens": max(int(max_tokens), 4096),
         **_max_thinking_payload(model_id),
     }
-    # PAID gpt-oss-120b on OpenRouter: pin to DeepInfra @ bf16 (user-approved 2026-06-03).
-    # The :free upstream pool 503s; DeepInfra/bf16 is the reliable, full-precision route.
-    # allow_fallbacks=False → never silently land on a cheaper/lower-quant provider; if
-    # DeepInfra is unavailable the call errors and the coder chain falls to the next model.
-    if api_model == "openai/gpt-oss-120b":
-        payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
-                               "allow_fallbacks": False}
+    _apply_gptoss_pin(payload, url, api_model)
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     # gpt-oss serialization (night interleave): hold the cross-process lock only for
     # the duration of the actual gpt-oss HTTP call. No-op unless JARVIS_GPTOSS_LOCK is
@@ -531,6 +538,8 @@ async def call_nvidia_stream(
         "stream": True,
         **_max_thinking_payload(model_id),
     }
+    _apply_gptoss_pin(payload, url, api_model)   # bughunt #11: pin gpt-oss on the streaming
+    # (JSON-ops) coder path too — it was unpinned, so OpenRouter could route it to any provider/quant.
 
     headers = {
         "Authorization": f"Bearer {key}",

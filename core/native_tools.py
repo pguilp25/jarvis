@@ -1114,6 +1114,12 @@ def _post_edit_syntax_gate(path: str, new_content: str, before, *,
             _seen = {}
             for _node in _t.body:
                 if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    # Skip decorator-driven redefinitions (@typing.overload stub chains,
+                    # functools.singledispatch `@fn.register / def _`) and the throwaway name `_`
+                    # — these LEGITIMATELY repeat a top-level name and are NOT dead-code shadows
+                    # (bughunt #7). Only undecorated, real-name redefinitions count as a dupe.
+                    if getattr(_node, "decorator_list", None) or _node.name == "_":
+                        continue
                     _seen[_node.name] = _seen.get(_node.name, 0) + 1
             return {k: c for k, c in _seen.items() if c > 1}
         _new_dd = _toplevel_dupes(new_content)
@@ -1497,6 +1503,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
         sb0 = ctx.get("sandbox")
         if sb0 is not None:
             cur = sb0.load_file(path)
+            if cur is not None:
+                # persist the sandbox-loaded content (ckpt-201, bughunt #17): otherwise `before`
+                # / `_before_all` stay empty for this path → _build_and_apply resets file_contents
+                # without it → a valid edit on a never-read-but-existing file falsely rejects.
+                ctx.setdefault("file_contents", {})[path] = cur
     if cur is None:
         return (f"✗ edit_file: {path} is not in context — read it with read_file "
                 f"first, then copy the exact `old` lines (and their start_line) from "
@@ -3111,8 +3122,14 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # edit until the budget runs out. (Audit #46.) EXCLUDE run_code: a
             # non-zero exit is legitimate behavioural FEEDBACK to iterate on, not a
             # malformed call — counting it would cut off the fix loop we just added.
+            # Count ONLY EDIT-op rejects toward the stuck backstops (ckpt-201, bughunt #6). The
+            # old `name != "run_code"` gate counted EVERY ✗, but lookups legitimately return ✗
+            # during normal exploration (semantic_search "0 matches", search_text no-hits,
+            # unavailable embeddings) — those piled up to the 8-strike _total_rejects and aborted
+            # the step BEFORE any edit even landed. The real stuck signal is rejected EDITS; pure
+            # lookup-spin is already bounded by max_rounds. (Mirrors the JSON-ops loop.)
             if (isinstance(result_str, str) and result_str.startswith("✗")
-                    and name != "run_code"):
+                    and name in ("edit_file", "replace_lines", "create_file")):
                 _total_rejects += 1
                 # Observability (ckpt-134/137): surface WHY each edit was rejected. The
                 # reject text used to live only in the model's tool channel. ckpt-137 fix:
