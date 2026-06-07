@@ -722,6 +722,29 @@ def _msg_is_view_of(content, path: str) -> bool:
             or ("⟪KEPT only lines" in content and f"of {path} " in content))
 
 
+def _json_keep_evict(messages: list, path: str, kept_render: str, rngs: str) -> int:
+    """JSON-ops keep eviction (bughunt #13). In the JSON-ops loop, read results are batched into one
+    'RESULTS of your ops' user message per round, so keep can't drop a whole tool message like the
+    native loop does. Surgically replace JUST the read_file VIEW segment of `path` (── op[k]
+    read_file(…path…) ── … up to the next '── op[' or EOT) with the kept-ranges render, leaving every
+    other op's result in that message intact. Returns the count replaced."""
+    pat = re.compile(r'(── op\[\d+\] read_file\([^\n]*' + re.escape(path)
+                     + r'[^\n]*──\n)(.*?)(?=\n── op\[|\Z)', re.DOTALL)
+    repl = lambda m: (m.group(1) + f"⟪KEPT only lines {rngs} of {path}; the rest of this view was "
+                      f"dropped to save context (you called keep) — read_file a range to bring it "
+                      f"back.⟫\n" + kept_render)
+    n = 0
+    for _m in messages:
+        _c = _m.get("content")
+        if (_m.get("role") == "user" and isinstance(_c, str) and "── op[" in _c
+                and ("=== VIEW: " + path) in _c):
+            _new = pat.sub(repl, _c)
+            if _new != _c:
+                _m["content"] = _new
+                n += 1
+    return n
+
+
 def _supersede_prior_file_views(messages: list, path: str) -> int:
     """Collapse every EARLIER tool-message view of `path` (a plain view OR a prior KEPT block) to a
     one-line pointer, leaving the newest, most-complete view (messages[-1]) as the only live copy —
@@ -2286,8 +2309,12 @@ def _coalesce_edit_ops(ops):
         path = a.get("path")
         # this op's hunks: an explicit (well-formed) edits list wins; else the flat old/new
         _edits = a.get("edits")
+        _hk = a.get("hunks")   # #20 (ckpt-201): `hunks` is _do_edit's PRIMARY field; without
+        # honoring it here a hunks-keyed op coalesced to edits:[] and was silently dropped.
         if isinstance(_edits, list) and _edits:
             hunks = [h for h in _edits if isinstance(h, dict)]
+        elif isinstance(_hk, list) and _hk:
+            hunks = [h for h in _hk if isinstance(h, dict)]
         else:
             h = {}
             if a.get("old") is not None:
@@ -3344,14 +3371,11 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     (with a verify gate) ends it. Same return contract as call_with_native_tools."""
     from clients.nvidia import call_nvidia_stream
     short = model_id.split('/')[-1]
-    # Same authoritative INDENT block the native loop appends (edits use the SAME
-    # `INDENT|code` write-format), THEN the JSON-ops protocol override LAST so it
-    # wins on HOW to emit (flat JSON lines, not function calls).
-    system = (system or "") + _INDENT_FORMAT_BLOCK + _JSON_OPS_PROMPT
-    if os.environ.get("JARVIS_BULLET_COT", "0") == "1":
-        # ckpt-185 experiment: tight-bullet reasoning style (cost lever; soft, never a
-        # gate). Appended after the protocol override — it's style-only, no protocol words.
-        system = system + _BULLET_COT_BLOCK
+    # Route through finalize_coder_system (bughunt #19) so the env flags that shape the coder
+    # prompt — JARVIS_TRACE / JARVIS_EDIT_COT / JARVIS_BULLET_COT, plus the always-on
+    # _INDENT_FORMAT_BLOCK — apply to the JSON-ops PRIMARY coder too (they were a silent no-op
+    # here). THEN the JSON-ops protocol override LAST so it wins on HOW to emit (flat JSON lines).
+    system = finalize_coder_system(system or "") + _JSON_OPS_PROMPT
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
@@ -3425,6 +3449,17 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                              "RESULTS of your ops (in order):\n\n" + "\n\n".join(results)
                              + "\n\nEmit your next ops, or `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}` "
                                "when the edit is complete AND verified."})
+        # keep eviction (bughunt #13): a successful keep op this round must actually free context —
+        # surgically drop the kept file's VIEW from the batched RESULTS turns it lives in.
+        for _op in ops:
+            if _op.get("tool") != "keep":
+                continue
+            _kp = (_op.get("args") or {}).get("path")
+            _kr = ctx.get("_kept", {}).get(_kp)
+            _kc = ctx.get("file_contents", {}).get(_kp)
+            if _kp and _kr and _kc:
+                _json_keep_evict(messages, _kp, _render_ranges(_kc, _kr),
+                                 ", ".join(f"{s}-{e}" for s, e in _kr))
         if _total_rejects >= 12:
             warn(f"  [json:{short}] {_total_rejects} rejected ops — stuck; stopping for fallover")
             reason = "stuck-repeating"

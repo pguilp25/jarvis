@@ -443,8 +443,11 @@ def test_bullet_cot_flag_gates_prompt_in_json_loop():
         assert "REASONING STYLE — tight bullets" in sys_on
         # soft, not a gate: the block must subordinate brevity to correctness
         assert "correctness always beats brevity" in sys_on
-        # and the protocol override must still be present and BEFORE the style block
-        assert sys_on.index("OUTPUT FORMAT — JSON OPS") < sys_on.index("REASONING STYLE")
+        # ckpt-201 (#19): the json system now routes through finalize_coder_system (so TRACE/
+        # EDIT_COT/BULLET env flags apply here too), THEN the JSON-ops protocol override is
+        # appended LAST so it wins as the final, most-recent instruction — so the style block
+        # (REASONING STYLE) now precedes the protocol override (OUTPUT FORMAT — JSON OPS).
+        assert sys_on.index("REASONING STYLE") < sys_on.index("OUTPUT FORMAT — JSON OPS")
     finally:
         os.environ.pop("JARVIS_BULLET_COT", None)
         shutil.rmtree(root, ignore_errors=True)
@@ -461,3 +464,31 @@ def test_loop_finish_tool_alias_triggers_done():
         assert res["reason"] == "finished"
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_coalesce_honors_hunks_keyed_op():
+    # bughunt #20: _do_edit's PRIMARY field is `hunks`; _coalesce_edit_ops only knew `edits`/flat,
+    # so a hunks-keyed op coalesced to edits:[] → silently dropped. It must be preserved.
+    from core.native_tools import _coalesce_edit_ops
+    ops = [{"tool": "edit_file", "args": {"path": "a.py", "hunks": [{"old": ["x"], "new": ["y"]}]}}]
+    out = _coalesce_edit_ops(ops)
+    assert len(out) == 1
+    assert out[0]["args"]["edits"] == [{"old": ["x"], "new": ["y"]}]   # NOT dropped to []
+
+
+def test_json_keep_evict_replaces_only_target_view():
+    # bughunt #13: json-ops keep must actually free context — surgically drop the kept file's VIEW
+    # from the batched RESULTS turn, leaving other ops' results intact.
+    from core.native_tools import _json_keep_evict
+    msgs = [{"role": "user", "content":
+             "RESULTS of your ops (in order):\n\n"
+             "── op[1] read_file(a/big.py) ──\n=== VIEW: a/big.py — 50 lines (FULL file) ===\n"
+             "1 ⇥0|x\n2 ⇥0|y\n\n"
+             "── op[2] read_file(a/other.py) ──\n=== VIEW: a/other.py — 5 lines (FULL file) ===\n"
+             "1 ⇥0|z"}]
+    n = _json_keep_evict(msgs, "a/big.py", "  ── lines 1-1 ──\n1 ⇥0|x", "1-1")
+    c = msgs[0]["content"]
+    assert n == 1
+    assert "KEPT only lines 1-1 of a/big.py" in c
+    assert "2 ⇥0|y" not in c                                   # the dropped line is gone
+    assert "=== VIEW: a/other.py" in c and "1 ⇥0|z" in c       # other file's view untouched

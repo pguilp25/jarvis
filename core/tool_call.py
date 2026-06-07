@@ -760,6 +760,16 @@ def _mask_quoted_tags_core(text: str, enforce_tool_use_blocks: bool) -> str:
         # The (len(closes))th open (0-indexed) is the first one unclosed.
         _blank(_think_opens[len(_think_closes)], len(text))
 
+    # 0c. UNCLOSED [think]...EOT — the BRACKETED reasoning form (bughunt #12). The text-protocol
+    # coders/planners (glm-5.1, qwen, the planner drafts) emit `[think]…[/think]` directly; the
+    # guard above only covered `<think>`, so a signal mentioned inside a still-streaming `[think]`
+    # fired stop_check and aborted the stream mid-thought. Mask from the first unclosed `[think]`
+    # to EOT, using the lenient _THINK_CLOSE so `[/think>` counts (in sync with _strip_think).
+    _bopens = [m.start() for m in re.finditer(r'\[think\]', text, re.IGNORECASE)]
+    _bcloses = [m.start() for m in re.finditer(_THINK_CLOSE, text, re.IGNORECASE)]
+    if len(_bopens) > len(_bcloses):
+        _blank(_bopens[len(_bcloses)], len(text))
+
     # 1. Fenced code blocks (```...```)
     for m in _FENCED_CODE_BLOCK.finditer(text):
         _blank(m.start(), m.end())
