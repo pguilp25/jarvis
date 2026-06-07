@@ -649,39 +649,41 @@ def _merge_ranges(ranges):
 
 
 def _resync_served_ranges_after_edit(ctx: dict, path: str, before: str, after: str) -> None:
-    """ROOT FIX (ckpt-205): keep the growing view ALIVE across an edit instead of discarding it.
+    """ROOT FIX (ckpt-205/207): keep the growing view ALIVE across an edit instead of discarding it.
     ckpt-194 popped _served_ranges[path] on every edit (to avoid stale line numbers), but that
     threw away the coder's whole accumulated view — so after each edit it had to re-read every
-    region for the NEXT edit (a26: 79 reads / 10 edits). Instead, SHIFT the revealed ranges by the
-    edit's net line delta so they keep pointing at the same logical code: ranges entirely ABOVE the
-    change are unchanged; ranges BELOW shift by delta; a range SPANNING the change has its end moved
-    by delta. The view then re-renders (post-edit content) showing the same regions, edit included —
-    no re-read needed. For a file NOT in growing-view mode (injected/small), fall back to the old
-    pop (its _served_ranges aren't the live navigation surface)."""
+    region for the NEXT edit (a26: 79 reads / 10 edits). Instead, REMAP each revealed range's
+    line numbers through the ACTUAL before→after diff (ckpt-207: difflib opcodes, EXACT for
+    multi-region batch edits too — the ckpt-205 single-net-delta version was off by a line when
+    an edit touched several regions at once). The view then re-renders post-edit content showing
+    the same logical regions, edit included — no re-read, and the line numbers are never stale.
+    For a file NOT in growing-view mode (injected/small), fall back to the old pop."""
     rngs = ctx.get("_served_ranges", {}).get(path)
     if not rngs or path not in ctx.get("_accum", set()):
         ctx.get("_served_ranges", {}).pop(path, None)   # non-growing-view file → old behavior
         return
+    import difflib
     _bl, _al = before.split("\n"), after.split("\n")
-    delta = len(_al) - len(_bl)
-    # first line that differs = where the edit starts (robust; no hunk parsing)
-    L = 1
-    for i in range(min(len(_bl), len(_al))):
-        if _bl[i] != _al[i]:
-            L = i + 1
-            break
-    else:
-        L = min(len(_bl), len(_al)) + 1
-    total = len(_al) - (1 if (_al and _al[-1] == "") else 0)
+    total = max(1, len(_al) - (1 if (_al and _al[-1] == "") else 0))
+    ops = difflib.SequenceMatcher(None, _bl, _al, autojunk=False).get_opcodes()
+
+    def _map(line1, is_end):
+        # map a 1-based BEFORE line number to its 1-based AFTER position through the diff.
+        bi = line1 - 1
+        for tag, i1, i2, j1, j2 in ops:
+            if bi < i1:
+                return j1 + 1                       # falls before this block (defensive)
+            if i1 <= bi < i2:
+                if tag == "equal":
+                    return j1 + (bi - i1) + 1        # 1:1 in an unchanged block — EXACT
+                return j2 if is_end else j1 + 1      # changed/deleted block: end→block end, start→block start
+        return total
+
     out = []
     for (s, e) in rngs:
-        if e < L:
-            ns, ne = s, e                       # entirely above the change
-        elif s > L:
-            ns, ne = s + delta, e + delta       # entirely below
-        else:
-            ns, ne = s, e + delta               # spans the change → extend end
-        ns, ne = max(1, ns), min(max(1, total), ne)
+        ns, ne = _map(s, False), _map(e, True)
+        ns = max(1, min(ns, total))
+        ne = max(1, min(ne, total))
         if ns <= ne:
             out.append((ns, ne))
     ctx["_served_ranges"][path] = _merge_ranges(out)
