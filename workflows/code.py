@@ -10972,10 +10972,19 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
     to_create = to_create or []
     injected, overflow, used = {}, [], 0
     for fp, c in nat_targets.items():
+        _nlines = c.count("\n") + (0 if c.endswith("\n") else 1)
         _blk = _aln(c, display_mode="prefix_ws")
-        # a file bigger than the whole budget must NOT be force-injected (it would overflow the
-        # window) → read-on-demand, where >1000 lines come back as the growing def-index view.
-        if len(_blk) <= _INJECT_BUDGET_CHARS and used + len(_blk) <= _INJECT_BUDGET_CHARS:
+        # Inject in full ONLY files ≤ the view cap. A BIG file dumped in full (ckpt-180 did this up
+        # to 160k chars) is an unnavigable wall for the weak coder AND — because it's then marked
+        # `viewed` — its focusing reads get short-circuited ("you already have it"), so it never
+        # reaches the accumulating growing view. ckpt-196 added that view but it could only fire on
+        # NON-injected files, so the dominant case (the big TARGET file, e.g. a26's 2066-line
+        # urls.py) was still dumped whole → 91-read storm, growing view fired 0×. ckpt-198: route
+        # any file > _FULL_VIEW_HINT lines to read-on-demand → its first read opens the def-index
+        # and reads reveal ranges into ONE growing view (it is NOT seeded into view_at by the
+        # caller, so the accumulating handler fires). Small files still inject in full.
+        if (_nlines <= _FULL_VIEW_HINT
+                and len(_blk) <= _INJECT_BUDGET_CHARS and used + len(_blk) <= _INJECT_BUDGET_CHARS):
             injected[fp] = c
             used += len(_blk)
         else:
@@ -10987,11 +10996,12 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
     overflow_note = ""
     if overflow:
         overflow_note = (
-            "\n=== OTHER STEP FILE(S) — too big to preload together; read on demand ===\n"
+            "\n=== STEP FILE(S) TOO LARGE TO PRELOAD — open these with read_file ===\n"
             + "\n".join(f"  {fp} ({nat_targets[fp].count(chr(10)) + 1} lines)" for fp in overflow)
-            + "\n(read_file these when you work on them; a file >1000 lines opens as a def-index "
-              "that FILLS IN as you read ranges — one growing view, read the ranges you need and "
-              "`keep` the ones that matter to trim it.)\n")
+            + "\n(These INCLUDE files you must EDIT. read_file one: a file >1000 lines opens as a "
+              "def-index (names + line numbers); each range you read FILLS IN that ONE growing view "
+              "(gaps stay labelled), so read the ranges around your edit sites, edit from them, and "
+              "`keep` the ranges that matter to trim context.)\n")
     nat_system = (
         IMPLEMENT_NATIVE_PROMPT
         + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")

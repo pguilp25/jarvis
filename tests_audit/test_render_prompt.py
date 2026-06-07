@@ -31,7 +31,20 @@ def test_small_files_inject_huge_file_overflows():
     art = assemble("STEP", "(none)", {"a/small.py": "y = 1\n", "a/huge.py": big})
     assert "a/small.py" in art["injected"]
     assert "a/huge.py" in art["overflow"]                          # too big to preload
-    assert "read on demand" in art["user"]
+    assert "TOO LARGE TO PRELOAD" in art["user"]
+
+
+def test_big_target_file_routes_to_growing_view_not_full_inject():
+    # ckpt-198: the a26 root cause. A file OVER the view cap (even the step's TARGET, even if it
+    # fits the char budget) must NOT be dumped in full — it goes read-on-demand so its first read
+    # opens the def-index and reads reveal ranges into the ONE growing view. (ckpt-196's view could
+    # only fire on non-injected files; the big target was still dumped whole → it never fired.)
+    big = "".join(f"def f{i}(x):\n    return x + {i}\n\n" for i in range(700))   # ~2100 lines, <160k
+    art = assemble("STEP: edit big.py", "(none)", {"pkg/big.py": big})
+    assert art["injected"] == []                                   # NOT dumped in full
+    assert art["overflow"] == ["pkg/big.py"]                       # routed to the growing view
+    assert "TOO LARGE TO PRELOAD" in art["user"]
+    assert len(art["user"]) < 4000                                 # tiny turn, not a 9k-token wall
 
 
 def test_error_feedback_appears_in_user_turn():
