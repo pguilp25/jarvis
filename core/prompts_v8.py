@@ -179,6 +179,11 @@ is the most reliable way to break unrelated tests.
     [KEEP: path L1-R1, L2-R2]   pin sub-ranges; the rest of the file
                                 is dropped from your context
     [SEARCH: pattern]           text search across the project
+    [LS: dir]                   list a directory's contents — confirm a path
+                                exists before you read or cite it
+    [DETAIL: section]           a pre-built code map for a named feature /
+                                subsystem (when one is listed in AVAILABLE
+                                CODE SECTIONS) — cheaper than reading files
     [KNOWLEDGE: topic]          look up a stored fact/convention about this
                                 project (returns nothing if none recorded)
     [WEBSEARCH: query]          external doc lookup, last resort

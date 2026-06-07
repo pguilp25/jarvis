@@ -9794,8 +9794,11 @@ def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
         # COPY-ABLE view line `LINENO ⇥INDENT|<real spaces>code` — the exact form the
         # coder pastes as `old`, so it can build the use-site hunks WITHOUT re-reading
         # (the use-sites are often OUTSIDE its current window — bigger-audit finding D).
+        # #12 (ckpt-222): `ln` ALREADY carries its `ind` leading spaces, so the old
+        # `{' ' * ind}{ln}` DOUBLE-indented the content (label ⇥12 but 24 spaces) and broke
+        # copy-verbatim. The canonical renderer is `{i} ⇥{ind}|{ln}` — no extra spaces.
         ind = len(ln) - len(ln.lstrip(' '))
-        return f"{i} ⇥{ind}|{' ' * ind}{ln.rstrip()}".rstrip()
+        return f"{i} ⇥{ind}|{ln.rstrip()}".rstrip()
 
     # Locate use-sites in the CURRENT file (original — the edit was reverted, so its line
     # numbers are what the coder will edit). Fall back to the proposed `modified` for the
@@ -10492,11 +10495,10 @@ def _apply_extracted_code(
             all_ambiguous_skips.append(
                 f"- ✗ {_en} REJECTED — {fp}: the result does NOT parse — "
                 f"{type(parse_err).__name__} at line {lineno}: {emsg}. The file "
-                f"was left UNCHANGED — this edit is NOT in the file. (Disregard any "
-                f"`from sandbox (edited)` header on a later re-read: it reflects an "
-                f"EARLIER edit that DID land, never this rejected one. This message "
-                f"is authoritative — re-issue the fix, do not assume it applied.) "
-                f"{hint}\n{ctx}"
+                f"was left UNCHANGED — this edit is NOT in the file. (#22: if a later re-read shows a "
+                f"`from sandbox (edited)` header, that reflects a DIFFERENT edit that DID land, never "
+                f"THIS rejected one. This message is authoritative — re-issue the fix, do not assume "
+                f"it applied.) {hint}\n{ctx}"
             )
             continue
 
@@ -11110,7 +11112,8 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
         f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
         f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
         f"hold). Read the 'read on demand' files only when you reach them. When done and verified, "
-        f"call finish."
+        f"finish the step."   # #16 (ckpt-222): mode-agnostic — native calls finish(), JSON-OPS emits
+                              # the `done` op; the old "call finish" contradicted the JSON-OPS override.
     )
     return nat_system, nat_user, injected, overflow
 
