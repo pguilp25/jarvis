@@ -492,3 +492,21 @@ def test_json_keep_evict_replaces_only_target_view():
     assert "KEPT only lines 1-1 of a/big.py" in c
     assert "2 ⇥0|y" not in c                                   # the dropped line is gone
     assert "=== VIEW: a/other.py" in c and "1 ⇥0|z" in c       # other file's view untouched
+
+
+def test_json_ops_deadline_does_not_crash_and_stops_clean():
+    # ckpt-217 regression: the A2 wall-clock deadline check uses time.monotonic(); `time` was
+    # local to call_with_native_tools, NOT in call_with_json_ops scope → a passed deadline raised
+    # NameError and silently fell the gpt-oss coder over to native (defeating the JSON-OPS switch).
+    # The default-None tests never evaluated time.monotonic() (the `is not None` guard short-circuits),
+    # so this passes a PAST deadline: the loop must break on round 1 with reason='time-budget' and
+    # never call the API — proving `time` resolves AND the backstop works.
+    import asyncio, time as _t
+    from core.native_tools import call_with_json_ops
+    ctx = {"file_contents": {}, "sandbox": None, "viewed_versions": {},
+           "project_root": ".", "files_changed": set(), "step_num": 1}
+    r = asyncio.run(call_with_json_ops("nvidia/gpt-oss-120b", "sys", "do it", ctx,
+                                       deadline=_t.monotonic() - 1))
+    assert r["reason"] == "time-budget"
+    assert r["done"] is False and r["files_changed"] == []
+    assert r["rounds"] == 1

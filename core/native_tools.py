@@ -3616,6 +3616,9 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     (with a verify gate) ends it. Same return contract as call_with_native_tools. `deadline`
     (monotonic, ckpt-217) is the A2 wall-clock backstop — stop cleanly with whatever landed rather
     than getting hard-killed mid-stream by the instance timeout (parity with the native loop)."""
+    import time   # ckpt-217 fix: the A2 deadline check below needs `time`; the native loop imports
+                  # it locally too, so it was NOT in this function's scope → NameError crashed the
+                  # JSON-ops pass and silently fell over to native (the whole point was to avoid that).
     from clients.nvidia import call_nvidia_stream
     short = model_id.split('/')[-1]
     # Route through finalize_coder_system (bughunt #19) so the env flags that shape the coder
