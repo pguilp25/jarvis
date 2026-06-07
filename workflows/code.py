@@ -9806,8 +9806,13 @@ def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
     src_lines, src_label = original.split("\n"), "current"
     uses = [(i, ln) for i, ln in enumerate(src_lines, 1)
             if word.search(ln) and not defpat.match(ln)]
+    _from_modified = False
     if not uses:
+        # #24 (ckpt-222): fall back to the PROPOSED (now-reverted) edit — these line numbers are NOT
+        # the current file's; flag that so the coder knows the use lives in its own new code to fix.
         src_lines = modified.split("\n")
+        src_label = "your proposed (now reverted) edit"
+        _from_modified = True
         uses = [(i, ln) for i, ln in enumerate(src_lines, 1)
                 if word.search(ln) and not defpat.match(ln)]
     head = (f"`{name}`: you REMOVED its definition but it's still USED"
@@ -9822,7 +9827,13 @@ def _dangling_ref_guidance(name: str, original: str, modified: str) -> str:
         # gate loops). Cap generously for a pathological high-fanout name only.
         _cap = 15
         block = "\n".join("     " + _view(i, ln) for i, ln in uses[:_cap])
-        head += (". Copy each use-site line VERBATIM as `old` (no re-read needed):\n" + block)
+        # #24: when the use-sites came from the PROPOSED (reverted) edit, the line numbers are NOT in
+        # the live file — say so, so the coder removes/fixes the use in its NEXT edit instead of
+        # anchoring on a line that doesn't exist post-revert.
+        _src = (". These use-site(s) are in YOUR PROPOSED edit (now reverted) — remove or fix the "
+                "use of this name in your next edit:\n" if _from_modified
+                else ". Copy each use-site line VERBATIM as `old` (no re-read needed):\n")
+        head += _src + block
         if len(uses) > _cap:
             head += f"\n     (+{len(uses) - _cap} more use-site(s) — all in the file you already hold)"
     return head
@@ -11185,6 +11196,11 @@ async def _implement_one_step(
         f"STEP {step_num}: {step_name}\n"
         f"Files: {', '.join(step_files)}\n"
         f"{step_details}\n"
+        # #21 (ckpt-222): any absolute line number in the step text is the PLANNER's APPROXIMATE
+        # reference (it may be off by a few lines vs the file you hold, or shifted by an earlier
+        # step) — locate the symbol/anchor in YOUR view and edit there; never trust the bare number.
+        "(Any line number above is the planner's approximate pointer — find the actual symbol in "
+        "your view and edit there; the number may be a few lines off.)\n"
     )
 
     # ── NATIVE TOOL-CALLING coder branch (2026-05-27) ────────────────────────

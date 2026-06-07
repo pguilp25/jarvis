@@ -2025,9 +2025,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"baseline. That start-state + this diff = {path}'s CURRENT, live state; everything "
                 f"NOT in the diff is UNCHANGED. TRUST that — your view is NOT stale (your `old` was "
                 f"anchored on its line number AND content, so a shifted view self-corrects). For "
-                f"your next change here, COPY the relevant line from your view/this diff VERBATIM as "
-                f"`old` (keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. Do "
-                f"NOT paste a raw `LINENO:+/- ` diff row. You do NOT need to read_file again — your "
+                f"your next change here, COPY the relevant line from your VIEW VERBATIM as `old` "
+                f"(keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. The diff "
+                f"below is in `LINENO:+/- ` format — read it to SEE what changed, but do NOT copy an "
+                f"`old` from it (that's not the editable form). You do NOT need to read_file again — your "
                 f"start-state + this diff IS {path}'s current state (read a range only for a region "
                 f"you've truly never seen).\n"
                 + (_diff or "(no visible line change)"))
