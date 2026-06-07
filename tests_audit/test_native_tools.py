@@ -1977,17 +1977,23 @@ def test_read_file_carrying_edits_reroutes_to_edit(monkeypatch=None):
 def test_search_text_path_scopes_results():
     # #10: search_text honors an optional `path` scope (ripgrep -g) instead of silently searching
     # repo-wide. A scoped search to one file must NOT return hits from other files.
+    # #1 (ckpt-221 REGRESSION guard): use a DEEP nested path — a ripgrep -g glob containing '/' is
+    # anchored to the absolute search root, so a bare `lib/.../urls.py` glob never matches → false
+    # "no matches". The fix prefixes `**/`. The old test passed by luck on a ONE-level path; this
+    # 4-level path is the shape that actually broke in production (a26 lib/ansible/module_utils/).
     import tempfile, os as _os
     root = _os.path.abspath(tempfile.mkdtemp(prefix="searchscope_"))
-    _os.makedirs(_os.path.join(root, "pkg"), exist_ok=True)
-    with open(_os.path.join(root, "pkg", "target.py"), "w") as f:
+    _deep = _os.path.join(root, "lib", "ansible", "module_utils")
+    _os.makedirs(_deep, exist_ok=True)
+    with open(_os.path.join(_deep, "target.py"), "w") as f:
         f.write("def open_url():\n    pass\n")
-    with open(_os.path.join(root, "pkg", "other.py"), "w") as f:
+    with open(_os.path.join(root, "other.py"), "w") as f:
         f.write("# open_url called here\nopen_url()\n")
     ctx = {"project_root": root, "file_contents": {}, "sandbox": None, "files_changed": set()}
     try:
-        scoped = _disp("search_text", {"pattern": "open_url", "path": "pkg/target.py"}, ctx)
-        assert "target.py" in scoped
+        scoped = _disp("search_text", {"pattern": "open_url",
+                                       "path": "lib/ansible/module_utils/target.py"}, ctx)
+        assert "target.py" in scoped, scoped     # the DEEP-path scope MUST still find the symbol
         assert "other.py" not in scoped          # the scope excluded the other file
         wide = _disp("search_text", {"pattern": "open_url"}, ctx)
         assert "other.py" in wide                # repo-wide still sees both

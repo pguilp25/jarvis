@@ -762,9 +762,11 @@ def _accumulated_view(ctx: dict, path: str, content: str, focus=None) -> str:
     fe = min(total, focus[1]) if focus else None
     def _hole(a, b):
         names = [f"{ln}:{nm}" for (ln, nm) in defs if a <= ln <= b]
-        # #11 (ckpt-220): show up to 24 def names per unread gap (was 10) — the cap was hiding the
-        # exact symbol the coder was hunting (a26: open_url), so it couldn't tell which range to read.
-        tail = ("  — contains " + "; ".join(names[:24]) + (" …" if len(names) > 24 else "")) if names else ""
+        # #3 (ckpt-221): SCALE the per-gap def cap with the gap size (~1 name / 30 lines, min 24) — a
+        # fixed 24 still hid the hunted symbol in a large single gap (a26: a ~1400-line gap stopped at
+        # line 604, omitting class Request@1306 / def open@1359). ckpt-220 raised 10→24; this scales it.
+        _cap = max(24, (b - a) // 30)
+        tail = ("  — contains " + "; ".join(names[:_cap]) + (" …" if len(names) > _cap else "")) if names else ""
         return (f"  ⋯ lines {a}-{b} not read — read_file(start_line={a}, end_line={b}) "
                 f"to reveal ⋯{tail}")
     revealed_n = sum(e - s + 1 for s, e in revealed)
@@ -1753,6 +1755,14 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # reject — treat it as "insert `new` AFTER start_line" by anchoring on
             # that existing line (keep it, then add). (f327: 5× 'old is empty'.)
             sl_raw = h.get("start_line")
+            if sl_raw is None and _raw_old:
+                # #8 (ckpt-221): the model copied a BLANK view line ("1750 ⇥0|") as `old` to anchor
+                # an INSERT — the LINENO is in THAT line, not in start_line, so without this the
+                # blank old looks like a no-anchor empty-old and the whole batch (incl. valid sibling
+                # hunks) was rejected. Recover the line number from the copied prefix.
+                _m = re.match(r'\s*(\d+)\s*[⇥:]', str(_raw_old[0]))
+                if _m:
+                    sl_raw = int(_m.group(1))
             try:
                 sl_i = int(sl_raw)
             except (TypeError, ValueError):
@@ -2550,8 +2560,16 @@ async def _do_search(args: dict, ctx: dict) -> str:
     glob = ""
     if scope:
         _last = scope.rstrip("/").split("/")[-1]
-        glob = (scope.rstrip("/") + "/**") if (scope.endswith("/") or "." not in _last) else scope
-    return await _run_code_searches([pat], ctx.get("project_root", ""), path_glob=glob)
+        # #1 (ckpt-221, REGRESSION fix): a ripgrep -g glob CONTAINING '/' is anchored to the search
+        # root, but rg walks paths carrying the ABSOLUTE root prefix, so a bare `lib/.../urls.py` glob
+        # NEVER matches → false "no matches" → 8-16-round read-storms (verified live with rg 13). The
+        # `**/` prefix matches the path under any leading dirs. (My ckpt-213 scope shipped without it;
+        # the unit test passed only because its path was ONE level deep.)
+        glob = ("**/" + scope.rstrip("/") + "/**") if (scope.endswith("/") or "." not in _last) else ("**/" + scope)
+    # #4 (ckpt-221): search the EDITED sandbox (where edits land), not project_root — otherwise
+    # search_text returns the STALE pre-edit content and reports line numbers that are off by the
+    # coder's own insertions vs read_file's view (a26: search said line 1818, read_file said 1820).
+    return await _run_code_searches([pat], _repo_base(ctx) or ctx.get("project_root", ""), path_glob=glob)
 
 
 def _do_purpose(args: dict, ctx: dict) -> str:
@@ -2664,6 +2682,11 @@ def _do_run(args: dict, ctx: dict) -> str:
                   "WITHOUT the bare except (let it raise), or assert the expected value explicitly, to "
                   "confirm the real behaviour.") if _swallows else ""
     if code == 0:
+        # #5 (ckpt-221): record that the coder RAN a green check this step → the finish verify-gate
+        # can accept the first `done` instead of forcing another streaming round (wasted wall-clock
+        # on the timeout-prone ansible steps). Only on a CLEAN exit-0 with no swallow-warning.
+        if not _swallows:
+            ctx["_run_code_verified"] = True
         if not out:
             # A passing check is SILENT (assert raised nothing) — say so plainly,
             # or a small model reads "no output" as "nothing happened / failed".
@@ -2712,8 +2735,9 @@ def _do_run(args: dict, ctx: dict) -> str:
         return (f"⚠ run_code: exit {code} — the smoke sandbox is READ-ONLY, so Python couldn't write "
                 f"its compiled .pyc to __pycache__ (a read-only/permission OSError). This is an "
                 f"ENVIRONMENT limitation of the smoke box, NOT a bug in your edit — the real test "
-                f"environment is writable. Do NOT change your code to dodge it; if you need to run, "
-                f"add `import sys; sys.dont_write_bytecode = True` to your command.\n"
+                f"environment is writable. Do NOT change your code to dodge it; for a clean run use "
+                f"`python -B -c \"…\"` (the -B flag suppresses .pyc writes — note py_compile/compileall "
+                f"write bytecode by design and will still fail here, so smoke-check with `python -B -c`).\n"
                 f"--- output (tail) ---\n{shown or '(no output)'}")
     return (f"✗ ran in your edited sandbox — exit {code}{timed}. This is YOUR EDIT'S "
             f"real runtime behaviour, NOT a tool error.\n"
@@ -3191,6 +3215,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
+    ctx["_run_code_verified"] = False   # #5: per-step — a green run_code lets the verify-gate accept the first done
     done = False
     final = ""
     reason = "budget-exhausted"
@@ -3329,7 +3354,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             final = msg.get("content") or ""
             # Stopped WITH edits but never verified → force one self-check pass
             # before accepting the stop (catches the detail-level bugs).
-            if ctx.get("files_changed") and not _verify_nudged:
+            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
                 _verify_nudged = True
                 messages.append(_verify_nudge_msg())
                 status(f"  [native:{short}] round {rnd}: stopped with edits — "
@@ -3570,7 +3595,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # Force ONE self-check pass before accepting finish, if the coder
             # made edits and hasn't verified yet. It may fix a detail bug, or
             # re-finish unchanged. (The native analog of the text SCENARIO TRACE.)
-            if ctx.get("files_changed") and not _verify_nudged:
+            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
                 _verify_nudged = True
                 done = False
                 # reset reason too: `finished` was set when the finish fired, but we're
@@ -3680,6 +3705,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
+    ctx["_run_code_verified"] = False   # #5: per-step — a green run_code lets the verify-gate accept the first done
     done = False
     final = ""
     reason = "budget-exhausted"
@@ -3732,11 +3758,25 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             _seen_ops.add(_key)
             _dedup.append(_o)
         ops = _dedup
+        # #15 (ckpt-221): ops the model wrote INSIDE its <think> reasoning are STRIPPED from the
+        # run-set (so a discussed EXAMPLE op isn't executed). But if it put MORE valid ops in <think>
+        # than it ran, they vanished with no feedback → it then expects results that never come and
+        # hallucinates a fake harness reply. Detect the gap (raw visible vs raw full) and TELL it.
+        _think_warn = ""
+        try:
+            _vis_raw, _, _ = _scan_json_ops(re.sub(r'<think>.*?</think>', '', content or '', flags=re.S))
+            _full_raw, _, _ = _scan_json_ops(content or '')
+            if len(_full_raw) > len(_vis_raw):
+                _think_warn = (f"\n\n⚠ {len(_full_raw) - len(_vis_raw)} JSON op(s) you wrote INSIDE a "
+                               f"<think> block did NOT run — ops in your reasoning channel are ignored. "
+                               f"Emit EVERY op you want executed OUTSIDE <think>, one per line.")
+        except Exception:
+            _think_warn = ""
         messages.append({"role": "assistant", "content": (content or "(no output)")[:24000]})
         if not ops and not want_done:
             _empty += 1
             if _empty <= 2:
-                messages.append({"role": "user", "content": _JSON_OPS_NUDGE})
+                messages.append({"role": "user", "content": _JSON_OPS_NUDGE + _think_warn})   # #15
                 status(f"  [json:{short}] round {rnd}: no JSON ops parsed — nudging ({_empty}/2)")
                 continue
             reason = "no-ops"
@@ -3777,7 +3817,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             messages.append({"role": "user", "content":
                              "RESULTS of your ops (in order):\n\n" + "\n\n".join(results)
                              + "\n\nEmit your next ops, or `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}` "
-                               "when the edit is complete AND verified."})
+                               "when the edit is complete AND verified." + _think_warn})   # #15
             # #1 (ckpt-219): collapse PRIOR copies of each file we read this round — the newest
             # RESULTS turn (just appended) holds the most-complete view, so older copies are dead
             # weight. Without this the growing-view re-emitted in full every round and piled up
@@ -3816,7 +3856,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                 messages.append({"role": "user", "content": _JSON_OPS_NO_EDIT})
                 status(f"  [json:{short}] round {rnd}: done with ZERO edits — nudging to edit first")
                 continue
-            if ctx.get("files_changed") and not _verify_nudged:
+            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
                 _verify_nudged = True
                 messages.append({"role": "user", "content": _JSON_OPS_VERIFY})
                 status(f"  [json:{short}] round {rnd}: done requested — one verify pass first")
