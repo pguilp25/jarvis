@@ -503,6 +503,14 @@ _FULL_VIEW_CAP = 1000    # a file up to this many lines is shown IN FULL on read
                          # (a26: 69 reads / 9 edits / 1800s). Kept at 1000 so the growing view — not a
                          # full dump ×several files — is what fills context (the ckpt-179 overflow).
 _FULL_REREAD_CAP = _FULL_VIEW_CAP   # back-compat alias (a few call sites / tests still name it)
+# A NARROW re-read (≤ this many lines) of a ≤cap file is ALWAYS served fresh, never refused with
+# "you already have it". The whole-file view we served earlier can be TRIMMED out of the live
+# history on a long step (many rounds of reasoning + reject dumps), while view_at/viewed_versions
+# persist in ctx — so the refusal becomes a lie the coder cannot escape, spinning narrow re-reads
+# until the step times out (a26 step 7: 14 refused re-reads of uri.py 670-676 → 1800s timeout).
+# Serving a narrow slice is cheap (a few hundred tokens) and guarantees the coder sees the lines;
+# only a WIDE/whole-file re-read keeps the refusal (that's the f631 re-dump bloat we still guard).
+_REREAD_SERVE_LINES = 200
 
 
 def _repo_base(ctx: dict) -> str:
@@ -1083,14 +1091,27 @@ async def _do_read(args: dict, ctx: dict) -> str:
             if _rc_nl <= _FULL_VIEW_CAP:
                 _seen = ctx.get("viewed_versions", {}).get(path)
                 if path in ctx.get("view_at", {}) and _seen == _rc_cur:
-                    return (f"ℹ {path} — you already hold this WHOLE file ({_rc_nl} lines) in your "
-                            f"view; lines {s_i}-{e_i} are in it. No need to re-read — edit straight "
-                            f"from the view you have.")
-                _whole_note = (f"(You asked for lines {s_i}-{e_i}; this file is only {_rc_nl} lines "
-                               f"(≤{_FULL_VIEW_CAP}), so here is ALL of it — you now hold the whole "
-                               f"file, no need to read it again.)\n")
-                s, e = None, None          # serve WHOLE: tail FULL-frames + _note_views it
-                arg = path
+                    # Already served whole + unchanged. A WIDE re-read is still refused (don't
+                    # re-dump the file — f631 bloat). But a NARROW re-read MUST be honoured: the
+                    # whole-file view can be trimmed out of the live history on a long step while
+                    # view_at/viewed_versions persist in ctx, making "you already have it" a lie
+                    # the coder can't escape (a26 step 7 spiral → 1800s timeout). Serve the exact
+                    # lines fresh via the normal read path (cheap, format-correct prefix_ws view).
+                    if (e_i - s_i + 1) > _REREAD_SERVE_LINES:
+                        return (f"ℹ {path} — you already hold this WHOLE file ({_rc_nl} lines) in "
+                                f"your view; lines {s_i}-{e_i} are in it. No need to re-read the "
+                                f"whole file — edit from the view you have, or read a NARROW "
+                                f"(≤{_REREAD_SERVE_LINES}-line) sub-range you need to see again.")
+                    # NARROW re-read → fall through and serve it for real. Keep s/e as the
+                    # ints (NOT None) so the normal path renders a RANGE view and does NOT
+                    # re-mark a whole-file view. _whole_note stays "" (no whole-file upgrade).
+                    arg = f"{path} {s_i}-{e_i}"
+                else:
+                    _whole_note = (f"(You asked for lines {s_i}-{e_i}; this file is only {_rc_nl} lines "
+                                   f"(≤{_FULL_VIEW_CAP}), so here is ALL of it — you now hold the whole "
+                                   f"file, no need to read it again.)\n")
+                    s, e = None, None          # serve WHOLE: tail FULL-frames + _note_views it
+                    arg = path
             else:
                 _sr = ctx.setdefault("_served_ranges", {}).setdefault(path, [])
                 for (a, b) in _sr:

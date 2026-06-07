@@ -1080,8 +1080,13 @@ def test_range_read_small_file_serves_whole_and_marks_viewed():
         assert "FULL file" in r and "class Counter" in r     # served WHOLE, not just lines 1-2
         assert "asked for lines 1-2" in r                    # tells coder why it got the whole file
         assert rel in ctx["view_at"]                         # marked viewed → later reads short-circuit
+        # ckpt-210: a NARROW re-read (≤200 lines) is now SERVED, not refused. The whole-file
+        # view can be TRIMMED out of a long step's history while view_at persists in ctx, so the
+        # old refusal trapped the coder in a re-read spiral (a26 step 7 → 1800s timeout). Wide
+        # re-reads still short-circuit (no f631 re-dump bloat) — see the dedicated test below.
         again = _disp("read_file", {"path": rel, "start_line": 5, "end_line": 6}, ctx)
-        assert again.startswith("ℹ") and "WHOLE file" in again   # no re-fetch
+        assert not again.startswith("ℹ")                          # served, not refused
+        assert "RANGE" in again and "lines 5-6" in again          # the requested slice, freshly rendered
     finally:
         _cleanup(root)
 
@@ -1417,12 +1422,35 @@ def test_reread_serves_current_content_not_refusal():
         assert rel in ctx.get("view_at", {})                # view recorded
         second = _disp("read_file", {"path": rel}, ctx)
         assert second.startswith("ℹ") and "ALREADY have" in second   # short-circuit, no re-dump
-        # ckpt-178 range-nibbling fix: a range read of an already-fully-viewed ≤3000 file
-        # short-circuits too (you hold the whole file) — no wasteful slice re-fetch.
+        # ckpt-210: a NARROW range re-read of an already-viewed ≤cap file is now SERVED (the
+        # whole-file view can be trimmed out of a long step's history → refusing it traps the
+        # coder in a re-read spiral; a26 timeout). Only a WIDE re-read still short-circuits.
         rng = _disp("read_file", {"path": rel, "start_line": 1, "end_line": 3}, ctx)
-        assert rng.startswith("ℹ") and "WHOLE file" in rng
+        assert not rng.startswith("ℹ") and "RANGE" in rng and "lines 1-3" in rng
     finally:
         _cleanup(root)
+
+
+def test_wide_reread_of_viewed_small_file_still_short_circuits():
+    # ckpt-210: the narrow-re-read-serves fix must NOT reopen the f631 re-dump bloat. A WIDE
+    # (>200-line) re-read of an already-viewed ≤cap file still short-circuits with a refusal
+    # that points the coder at a narrow sub-range; only narrow (≤200-line) re-reads are served.
+    import tempfile, os as _os
+    root = _os.path.abspath(tempfile.mkdtemp(prefix="widereread_"))
+    src = "".join(f"x{i} = {i}\n" for i in range(400))   # 400 lines (≤cap)
+    with open(_os.path.join(root, "m.py"), "w") as _f:
+        _f.write(src)
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "step_num": 1}
+    try:
+        _disp("read_file", {"path": "m.py"}, ctx)              # whole-file serve marks it viewed
+        assert "m.py" in ctx.get("view_at", {})
+        wide = _disp("read_file", {"path": "m.py", "start_line": 10, "end_line": 350}, ctx)   # 341 lines
+        assert wide.startswith("ℹ") and "WHOLE file" in wide   # wide re-read still refused (no re-dump)
+        narrow = _disp("read_file", {"path": "m.py", "start_line": 10, "end_line": 60}, ctx)  # 51 lines
+        assert not narrow.startswith("ℹ") and "RANGE" in narrow   # narrow re-read served
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_reread_after_edit_shows_diff_and_current_content():
