@@ -8770,23 +8770,36 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         plan_tasks, return_when=asyncio.FIRST_COMPLETED
     )
 
-    # For >3 models: keep collecting until we have 3, then cancel the rest
+    # For >3 models: keep collecting until we have 3 USABLE plans, then cancel the rest.
+    # bughunt #8 (ckpt-201): the old loop counted any FINISHED task toward the 3-win threshold —
+    # so a circuit-broken model that fails near-instantly (call_with_retry sees _is_down → raises
+    # immediately) filled a winner slot and a HEALTHY slow planner got cancelled, sometimes
+    # leaving the merger only 1 real plan (or failing the phase). Now "first 3 of 4 win" means
+    # "first 3 that produced a usable plan".
     if len(PLAN_MODELS) > 3:
-        completed: list = list(done)
+        def _usable(_t):
+            try:
+                _r = _t.result()
+                return isinstance(_r, dict) and bool(_r.get("answer"))
+            except Exception:
+                return False
+        completed: list = list(done)                       # all finished (usable or not) — kept for
+        # result collection below, which re-filters; only USABLE ones gate the wait.
         pending_set = set(pending)
-        while len(completed) < 3 and pending_set:
+        while sum(_usable(t) for t in completed) < 3 and pending_set:
             more_done, pending_set = await asyncio.wait(
                 pending_set, return_when=asyncio.FIRST_COMPLETED
             )
             completed.extend(more_done)
-        # Cancel any remaining (the slowest)
+        # Cancel any remaining (genuine stragglers — we have 3 usable, or none are left)
         for t in pending_set:
             t.cancel()
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
-        status(f"Layer 1: {len(completed)} finished first, cancelled {len(pending_set)} stragglers")
+        _n_usable = sum(_usable(t) for t in completed)
+        status(f"Layer 1: {_n_usable} usable plan(s) in hand, cancelled {len(pending_set)} stragglers")
         done_tasks = completed
     else:
         done_tasks = list(done)
@@ -12301,14 +12314,37 @@ async def _implement_one_step(
 
     if is_native_tool_model(IMPLEMENT_MODEL):
         from tools.codebase import add_line_numbers as _aln
-        _nat_targets = {fp: file_contents[fp] for fp in step_files if fp in file_contents}
-        # Files named by the step that don't exist yet → must be CREATED, not
-        # edited. Telling the coder up front avoids it wasting rounds calling
-        # replace_lines on a non-existent file before discovering create_file
-        # (observed on the greenfield validation).
-        _to_create = [fp for fp in step_files
-                      if fp not in _nat_targets
-                      and (sandbox is None or sandbox.load_file(fp) is None)]
+        import os as _os
+        # #10 (ckpt-201): normalize step paths first — an ABSOLUTE path never matches the
+        # relative-keyed file_contents (→ silently dropped, never edited) and can crash
+        # sandbox.load_file. Strip whitespace + relativize abs paths to the repo root; dedup.
+        step_files = list(dict.fromkeys(
+            (_os.path.relpath(f, project_root) if _os.path.isabs(f) else f.strip())
+            for f in step_files if f))
+        # #9 (ckpt-201): phase_implement preloads ALL step files into file_contents — existing ones
+        # with real content, PLANNED-NEW ones as "" (empty sentinel). The old `fp in file_contents`
+        # was therefore ALWAYS true → _to_create ALWAYS [] → new files were injected as fake empty
+        # "existing" files and the create_file guidance never fired. Treat empty/whitespace content
+        # (in file_contents AND the sandbox) as ABSENT → it goes to _to_create (use create_file).
+        def _content_of(fp):
+            c = file_contents.get(fp)
+            if (c or "").strip():
+                return c
+            if sandbox is not None:
+                try:
+                    sc = sandbox.load_file(fp)
+                    if (sc or "").strip():
+                        return sc
+                except Exception:
+                    pass
+            return None
+        _nat_targets, _to_create = {}, []
+        for fp in step_files:
+            _c = _content_of(fp)
+            if _c is not None:
+                _nat_targets[fp] = _c
+            else:
+                _to_create.append(fp)
         # CAPPED injection (ckpt-180) + assembly extracted to build_implement_native_prompt
         # (ckpt-197, single source of truth shared with the render harness). ckpt-178 injected ALL
         # step files in full → a 10-file mega-step (a26c325b) = ~104k tokens > the 131072 window →
@@ -12330,6 +12366,20 @@ async def _implement_one_step(
                 "view_at": {fp: f"step {step_num} (loaded at the start)" for fp in _injected},
                 # Step-START baseline for the CUMULATIVE diff — ALL targets (doesn't gate reads).
                 "_first_seen": dict(_nat_targets)}
+
+        def _seed_view_state():
+            # ckpt-201 (bughunt #14): each coder ATTEMPT in the fallback chain shares this _ctx, so
+            # view_at/viewed_versions/_served_ranges an EARLIER coder accumulated leaked into the
+            # NEXT one → its read_file was short-circuited ("you already have this view") on views it
+            # never received. Re-seed the view-state to the step-start injected baseline before each
+            # attempt. file_contents/sandbox stay shared — when the chain falls through, the prior
+            # coder made NO successful edit (a truthy _prod returns early), so content == baseline.
+            _ctx["viewed_versions"] = dict(_injected)
+            _ctx["view_at"] = {fp: f"step {step_num} (loaded at the start)" for fp in _injected}
+            _ctx["_first_seen"] = dict(_nat_targets)
+            _ctx["files_changed"] = set()
+            for _k in ("_served_ranges", "_reread_count", "_kept"):
+                _ctx[_k] = {}
         async def _native_pass(_model):
             _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
@@ -12364,6 +12414,7 @@ async def _implement_one_step(
         if os.environ.get("JARVIS_JSON_OPS", "0") == "1":
             _CODER_CHAIN = [("nvidia/gpt-oss-120b","json")] + _CODER_CHAIN[1:]
         for _m, _mode in _CODER_CHAIN:
+            _seed_view_state()   # fresh view-state per attempt (bughunt #14)
             try:
                 _prod = await (_json_pass(_m) if _mode == "json"
                                else _native_pass(_m) if _mode == "native"
