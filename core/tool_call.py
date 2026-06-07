@@ -941,6 +941,42 @@ _LONGCAT_CALL_RE = re.compile(
     re.IGNORECASE)
 
 
+_JSON_TOOLCALL_RE = re.compile(
+    r'\{[^{}]*?"tool"\s*:\s*"([A-Za-z_]+)"[^{}]*?"args"\s*:\s*\{([^{}]*)\}[^{}]*?\}')
+
+
+def _salvage_json_tool_calls(text: str) -> str:
+    """#10 (ckpt-221): a planner/merger model sometimes leaks a NATIVE/JSON-ops tool call
+    (`{"tool":"read_file","args":{"path":"p","start_line":N,"end_line":M}}`) instead of the bracket
+    `[CODE: p N-M]` protocol — the bracket extractors miss it, so the read never fires (a26 merger).
+    Convert the common read/search/refs forms to bracket tags so the extractors pick them up. Only
+    runs when a `"tool"` JSON object is present (rare); leaves everything else untouched."""
+    if '"tool"' not in text:
+        return text
+    _MAP = {"read_file": "CODE", "code": "CODE", "view": "CODE",
+            "search_text": "SEARCH", "search": "SEARCH",
+            "find_refs": "REFS", "refs": "REFS",
+            "file_purpose": "PURPOSE", "purpose": "PURPOSE"}
+
+    def _repl(m):
+        tool = (m.group(1) or "").lower()
+        tag = _MAP.get(tool)
+        if not tag:
+            return m.group(0)            # unknown tool — leave as-is
+        args = m.group(2)
+        _path = re.search(r'"(?:path|file)"\s*:\s*"([^"]+)"', args)
+        _pat = re.search(r'"(?:pattern|query|symbol)"\s*:\s*"([^"]+)"', args)
+        _s = re.search(r'"(?:start_line|line_start)"\s*:\s*(\d+)', args)
+        _e = re.search(r'"(?:end_line|line_end)"\s*:\s*(\d+)', args)
+        if tag in ("CODE", "PURPOSE") and _path:
+            rng = f" {_s.group(1)}-{_e.group(1)}" if (_s and _e) else ""
+            return f"[{tag}: {_path.group(1)}{rng}]"
+        if tag in ("SEARCH", "REFS") and _pat:
+            return f"[{tag}: {_pat.group(1)}]"
+        return m.group(0)
+    return _JSON_TOOLCALL_RE.sub(_repl, text)
+
+
 def _salvage_longcat_calls(text: str) -> str:
     """LongCat-family models (e.g. owl-alpha, used as a Layer-1 planner AND the merger)
     emit tool calls in their NATIVE `<longcat_tool_call>TOOL: args</longcat_arg_value>` XML
@@ -3247,9 +3283,10 @@ async def call_with_tools(
         # to [TOOL: args] BEFORE any tag extraction so the model's intended reads actually fire.
         _pre_longcat = result
         result = _salvage_longcat_calls(result)
+        result = _salvage_json_tool_calls(result)   # #10: native/JSON-ops tool-call objects → bracket
         if result != _pre_longcat:
-            status(f"  [{model.split('/')[-1]}] round {round_num}: salvaged LongCat-format "
-                   f"tool call(s) → bracket protocol (model emitted native <longcat_tool_call> XML)")
+            status(f"  [{model.split('/')[-1]}] round {round_num}: salvaged a leaked native/LongCat "
+                   f"tool call → bracket protocol")
         if result != _result_pre_backtrack:
             status(
                 f"  [{model.split('/')[-1]}] round {round_num}: "
@@ -4179,12 +4216,25 @@ async def call_with_tools(
                  f"available in this step — asking it to proceed with what it has "
                  f"(nudge {_dead_tool_nudges}/2)")
             full_response += result
+            # #2 (ckpt-221): the OLD note ("Do NOT request files or tools again") misattributed a
+            # MALFORMED tag (a `[CODE: path` missing its `]`) or a read TIMEOUT as "tool unavailable"
+            # and told the model to STOP investigating — so a Layer-1 planner abandoned all lookups
+            # and HALLUCINATED the plan. Point at the likely real cause (bad brackets / wrap) and
+            # KEEP tool use alive instead of inducing give-up.
+            _opener = re.search(r'\[(CODE|VIEW|REFS|SEARCH|PURPOSE|SEMANTIC|DEPENDSON|DEPENDENCY|'
+                                r'DETAIL|KEEP|LS|KNOWLEDGE|WEBSEARCH|RUN)\b', result, re.IGNORECASE)
+            _malformed = bool(_opener) and (']' not in result[_opener.start():])
+            _why = ("your tool tag is MALFORMED — it's missing its closing `]` (or isn't wrapped). "
+                    if _malformed else
+                    "your tool request didn't fire — it may be malformed, or that tool isn't "
+                    "available in this step. ")
             current_prompt = (
                 current_prompt + "\n\nASSISTANT: " + full_response
-                + "\n\n[SYSTEM NOTE: The tool you requested is not available in "
-                "this step, so it returned nothing. Do NOT request files or tools "
-                "again — proceed with the information you already have and write "
-                "your complete answer now.]\n\nContinue:")
+                + f"\n\n[SYSTEM NOTE: {_why}A tool call must be EXACTLY "
+                "`[tool use][CODE: path L-R][/tool use]` then `[STOP][CONFIRM_STOP]` (a missing `]` "
+                "or a tag outside [tool use] fires nothing). If you still need to read code, "
+                "RE-ISSUE the call CORRECTLY. If you already have enough, write your "
+                "=== PLAN === / answer now. Do NOT give up on investigating.]\n\nContinue:")
             result = ""
             full_response = ""
             continue
