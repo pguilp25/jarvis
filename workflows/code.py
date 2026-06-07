@@ -10435,12 +10435,22 @@ def _apply_extracted_code(
             _orphan = re.search(
                 r"expected an indented block after '?(\w+)'? statement on line (\d+)",
                 emsg)
+            # #22 (ckpt-213): the model copied the VIEW prefix `LINENO ⇥INDENT|` (or the
+            # text-view `LINENO:INDENT|`) straight into `new` instead of writing `INDENT|code`.
+            # That injects a bogus line-number token at the wrong indent → IndentationError. The
+            # generic "+4 deeper" hint sends it the WRONG way; name the real cause first.
+            _vp = re.match(r'\s*\d+\s*[⇥:]\d+\|', body_lines[lineno - 1]) if lineno and lineno <= len(body_lines) else None
             if _orphan:
                 _kw, _kwline = _orphan.group(1), _orphan.group(2)
                 hint = (f"You DELETED the body of the `{_kw}:` block at line {_kwline} "
                         f"but kept the `{_kw}` header, leaving it empty. Either remove "
                         f"the `{_kw}` line (and its sibling clauses) too, or give it a "
                         f"body. A block can never be empty in Python.")
+            elif _vp:
+                hint = ("Your `new` line still carries the VIEW prefix "
+                        "(`LINENO ⇥INDENT|…`). `new` must be `INDENT|code` ONLY — drop the "
+                        "leading line number and the `⇥`. e.g. the view line `1651 ⇥0|def f():` "
+                        "becomes `0|def f():` in `new`. Re-issue with the line numbers removed.")
             else:
                 hint = ("Most often this is a nested-block indent slip — a body line "
                         "not deeper than its `if`/`for`/`def`/`else` keyword. Re-issue "

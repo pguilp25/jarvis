@@ -210,9 +210,12 @@ CODER_TOOLS = [
         "description": (
             "Literal/regex text search across the project (ripgrep). Use to locate a "
             "test by name, an error string, or a code pattern when you don't yet know "
-            "the file. This is text search, NOT concept search."),
+            "the file. This is text search, NOT concept search. Optional `path` scopes "
+            "the search to ONE file or directory (e.g. to find a call INSIDE the file "
+            "you're editing) — omit it to search the whole repo."),
         "parameters": {"type": "object", "properties": {
             "pattern": {"type": "string", "description": "text or regex to search for"},
+            "path": {"type": "string", "description": "optional repo-relative file or directory to scope the search to"},
         }, "required": ["pattern"]},
     }},
     {"type": "function", "function": {
@@ -733,13 +736,19 @@ def _def_lines(content: str):
     return rows
 
 
-def _accumulated_view(ctx: dict, path: str, content: str) -> str:
+def _accumulated_view(ctx: dict, path: str, content: str, focus=None) -> str:
     """ONE growing view of a >cap file (ckpt-196). The def/class index with the line-ranges the
     coder has READ (ctx['_served_ranges'][path]) filled in as real `LINENO ⇥INDENT|code`, and the
     un-read GAPS shown as labelled holes that list the defs inside them. Empty revealed set → the
     plain def-index (the first read). Each read EXPANDS this; the loop collapses older copies of
     this file's view to a pointer, so there's exactly ONE, ever-more-complete view per file — no
-    duplicate dumps, no 'you already read a-b' refusals. `keep` trims it to the kept ranges."""
+    duplicate dumps, no 'you already read a-b' refusals. `keep` trims it to the kept ranges.
+
+    #3 (ckpt-213): `focus`=(s,e) is the range the coder JUST asked for. The view (a) names it at
+    the top and marks its first line ◀ REQUESTED so the coder can FIND it instead of scrolling past
+    every previously-revealed line, and (b) COLLAPSES a large already-read LEADING region (the
+    license/import header re-printed in full on every deep read — the a26 urls.py bloat that buried
+    the target) to a one-line marker; the coder re-expands it with a narrow read_file if needed."""
     lines = content.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
@@ -749,14 +758,18 @@ def _accumulated_view(ctx: dict, path: str, content: str) -> str:
     if not revealed:
         return _too_large_view(ctx, path, total, content)        # nothing read yet → def-index
     defs = _def_lines(content)
+    fs = max(1, focus[0]) if focus else None
+    fe = min(total, focus[1]) if focus else None
     def _hole(a, b):
         names = [f"{ln}:{nm}" for (ln, nm) in defs if a <= ln <= b]
         tail = ("  — contains " + "; ".join(names[:10]) + (" …" if len(names) > 10 else "")) if names else ""
         return (f"  ⋯ lines {a}-{b} not read — read_file(start_line={a}, end_line={b}) "
                 f"to reveal ⋯{tail}")
     revealed_n = sum(e - s + 1 for s, e in revealed)
+    _focusline = (f"\n  ▶ you requested lines {fs}-{fe} — find them at the ◀ REQUESTED marker below"
+                  if focus else "")
     head = (f"=== VIEW: {path} — {total} lines — GROWING VIEW ({revealed_n} revealed; the rest "
-            f"are labelled gaps — read a range to fill any in) ===")
+            f"are labelled gaps — read a range to fill any in){_focusline} ===")
     tree = _incrusted_tree(ctx, path)
     sep = "  " + "─" * 46
     out = [f"{head}\n{tree}\n{sep}" if tree else f"{head}\n{sep}"]
@@ -764,10 +777,21 @@ def _accumulated_view(ctx: dict, path: str, content: str) -> str:
     for (s, e) in revealed:
         if cursor < s:
             out.append(_hole(cursor, s - 1))
+        # #3: collapse a large already-read LEADING region (starts at line 1) that ISN'T what the
+        # coder just asked for — stops the file header re-printing in full on every deep read.
+        _is_focus_rng = bool(focus and not (e < focus[0] or s > focus[1]))
+        if s == 1 and (e - s + 1) > 40 and not _is_focus_rng:
+            _nm = [nm for (ln, nm) in defs if s <= ln <= e]
+            out.append(f"  ⊟ lines {s}-{e} read earlier — collapsed to save space; "
+                       f"read_file(start_line={s}, end_line={e}) to re-expand"
+                       + (("  — " + "; ".join(_nm[:6])) if _nm else ""))
+            cursor = e + 1
+            continue
         for i in range(s, e + 1):
             ln = lines[i - 1]
             ind = len(ln) - len(ln.lstrip(' '))
-            out.append(f"{i} ⇥{ind}|{ln}")
+            _mk = "  ◀ REQUESTED" if (focus and i == fs) else ""
+            out.append(f"{i} ⇥{ind}|{ln}{_mk}")
         cursor = e + 1
     if cursor <= total:
         out.append(_hole(cursor, total))
@@ -936,7 +960,10 @@ async def _do_read(args: dict, ctx: dict) -> str:
                 # re-read keeps returning the growing view rather than a no-body short-circuit.
                 if isinstance(ctx.get("viewed_versions"), dict):
                     ctx["viewed_versions"][path] = _bcur
-                return _accumulated_view(ctx, path, _bcur)
+                # #3: pass the just-requested range so the view marks/leads with it (and the
+                # whole-file re-read path passes None → no focus marker, full map as before).
+                return _accumulated_view(ctx, path, _bcur,
+                                         focus=(s_i, e_i) if (s is not None and e is not None) else None)
     # RE-READ of an already-seen file (no range). The coder ALREADY holds this file's
     # current view — loaded at step start, read earlier this step, or handed back inside an
     # edit's diff — and (point 1) its full reasoning + those views are uncapped in history.
@@ -1171,6 +1198,41 @@ async def _do_read(args: dict, ctx: dict) -> str:
     return out
 
 
+def _docstring_insert_warning(before: str, after: str) -> str:
+    """#6 (ckpt-213): a coder can wedge a real statement INSIDE a triple-quoted docstring (a26:
+    `self.use_netrc = use_netrc` landed between two `>>>` doctest lines). It's valid Python (text
+    in a string), so the parse gate green-lights an INERT patch and the fail_to_pass test fails.
+    Return a ⚠ note (or '') when a line THIS edit added lands strictly inside a multi-line string
+    token AND looks like code (assignment / return / raise / import / yield / assert) — conservative
+    so a genuine docstring-PROSE edit is not flagged. Never raises (returns '' on any tokenize error)."""
+    if not after or ('"""' not in after and "'''" not in after):
+        return ""
+    import io as _io, tokenize as _tok, difflib as _dl
+    inside = set()
+    try:
+        for t in _tok.generate_tokens(_io.StringIO(after).readline):
+            if t.type == _tok.STRING and t.end[0] > t.start[0]:
+                for ln in range(t.start[0] + 1, t.end[0]):   # lines strictly inside the string
+                    inside.add(ln)
+    except Exception:
+        return ""
+    if not inside:
+        return ""
+    al = after.split("\n")
+    added = set()
+    for op, _i1, _i2, j1, j2 in _dl.SequenceMatcher(None, (before or "").split("\n"), al).get_opcodes():
+        if op in ("insert", "replace"):
+            added.update(range(j1 + 1, j2 + 1))   # 1-based lines in `after`
+    _code = re.compile(r'\s*(self\.\w+\s*=|[\w\[\]]+\s*=[^=]|return\b|raise\b|import\b|yield\b|assert\b)')
+    bad = [ln for ln in sorted(added & inside) if ln <= len(al) and _code.match(al[ln - 1])]
+    if not bad:
+        return ""
+    return (f"\n⚠ A line you added landed INSIDE a docstring/string literal (line {bad[0]}: "
+            f"`{al[bad[0] - 1].strip()[:60]}`) — it is INERT text and will NOT execute (the parse "
+            f"gate can't catch this; text in a string is valid Python). Move it OUT of the "
+            f"triple-quoted block to where the code actually runs, then re-verify.")
+
+
 def _post_edit_syntax_gate(path: str, new_content: str, before, *,
                            tool: str, resend: str) -> "str | None":
     """Shared parse / dead-code / dup gate for native edits. Returns a REJECTION
@@ -1334,7 +1396,8 @@ def _do_replace(args: dict, ctx: dict) -> str:
         _dbase = ctx.get("_first_seen", {}).get(path, before)   # step-start baseline (point 2)
         _diff = render_diff(_dbase or "", result[path], path)
         _when = _view_stamp(ctx)
-        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — change made at {_when}. "
+        _dswarn = _docstring_insert_warning(before or "", result[path])   # #6
+        return (f"✓ Applied: {path} lines {s_i}-{e_i} replaced — change made at {_when}.{_dswarn} "
                 f"The diff below is the CUMULATIVE change to {path} since the START of this step "
                 f"(the file you were given / first read). That start-state + this diff = {path}'s "
                 f"CURRENT, live state — TRUST it, your view is NOT stale. Do NOT read_file {path} "
@@ -1915,6 +1978,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
         _fixnote = (" ⚠ Your `INDENT|` number disagreed with the spaces you typed and "
                     "wouldn't parse, so I used your typed spaces instead — verify the new "
                     "line(s) are at the right scope in the diff." if _indent_autofixed else "")
+        _fixnote += _docstring_insert_warning(before or "", result[path])   # #6
         return (f"✓ Applied {len(hunks)} edit(s) to {path} — {_when}.{_fixnote} The diff below is "
                 f"the CUMULATIVE change to {path} since the START of this step (the file you were "
                 f"given / first read) — EVERY edit you've made to it this step, against ONE stable "
@@ -2442,7 +2506,16 @@ async def _do_search(args: dict, ctx: dict) -> str:
     pat, _e = _str_or_err(args, "pattern", "search_text")
     if _e:
         return _e
-    return await _run_code_searches([pat], ctx.get("project_root", ""))
+    # #10 (ckpt-213): honor an optional path/file/glob scope (the coder kept passing `path` and
+    # the harness silently dropped it → repo-wide noise drowned the in-file hit → range-guessing
+    # read-storm). Normalize a bare dir to a recursive glob; an exact file path passes through.
+    scope = (args.get("path") or args.get("file") or args.get("glob") or "")
+    scope = scope.strip().replace("\\", "/").lstrip("./") if isinstance(scope, str) else ""
+    glob = ""
+    if scope:
+        _last = scope.rstrip("/").split("/")[-1]
+        glob = (scope.rstrip("/") + "/**") if (scope.endswith("/") or "." not in _last) else scope
+    return await _run_code_searches([pat], ctx.get("project_root", ""), path_glob=glob)
 
 
 def _do_purpose(args: dict, ctx: dict) -> str:
@@ -2544,6 +2617,16 @@ def _do_run(args: dict, ctx: dict) -> str:
     _MAX = 3500
     shown = out if len(out) <= _MAX else "…(earlier output trimmed)…\n" + out[-_MAX:]
     last = next((l.strip() for l in reversed(out.splitlines()) if l.strip()), "")
+    # #12 (ckpt-213): an exit-0 run whose own command CATCHES exceptions without re-raising can
+    # SWALLOW the very error the edit is supposed to fix → a false "success" that nudges a premature
+    # finish on broken code (a26 step 2: `try: r.open(...) except Exception: pass` stamped ✓ while
+    # the AttributeError under test was still raised). When the command has an except-without-raise,
+    # don't claim clean success — warn the verdict may be masked.
+    _swallows = bool(re.search(r'\bexcept\b', cmd)) and not re.search(r'\braise\b', cmd)
+    _mask_note = ("\n⚠ Your command CATCHES exceptions but never re-raises — exit 0 may just mean the "
+                  "try/except SWALLOWED the error you're testing for, NOT that the edit works. Re-run "
+                  "WITHOUT the bare except (let it raise), or assert the expected value explicitly, to "
+                  "confirm the real behaviour.") if _swallows else ""
     if code == 0:
         if not out:
             # A passing check is SILENT (assert raised nothing) — say so plainly,
@@ -2551,9 +2634,9 @@ def _do_run(args: dict, ctx: dict) -> str:
             return ("✓ ran in your edited sandbox — exit 0, NO error raised: your "
                     "command SUCCEEDED (every assert/check passed). This is your "
                     "edit's real behaviour. To SEE a value rather than just pass/fail, "
-                    "add a print(...) to your command and run again.")
+                    "add a print(...) to your command and run again." + _mask_note)
         return (f"✓ ran in your edited sandbox — exit 0 (success). This output IS your "
-                f"edit's real behaviour:\n{shown}")
+                f"edit's real behaviour:\n{shown}{_mask_note}")
     # A ModuleNotFoundError/ImportError is, AFTER the venv site-packages bind
     # (ckpt-166), almost always a genuinely-absent 3rd-party dep (jinja2, PyQt5,
     # web.py, django …) — an ENVIRONMENT limit of this smoke-check box, NOT a bug
@@ -2611,6 +2694,14 @@ def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
 
 
 async def _dispatch(name: str, args: dict, ctx: dict):
+    # #17 (ckpt-213): a read_file call that carries an edit-only payload (`edits`/`hunks`/
+    # `old`/`new`) is unambiguously a mis-named edit_file — the model built the whole edit and
+    # just put the wrong tool name on it (a26 step 6: read_file{path, edits:[…]} → no-op re-read,
+    # the IDENTICAL args applied cleanly as edit_file the next round = one wasted round). Re-route
+    # on the uniquely-identifying key instead of dropping it. (read_file has no such arg.)
+    if name == "read_file" and isinstance(args, dict) and any(
+            k in args for k in ("edits", "hunks", "old", "new")):
+        name = "edit_file"
     if name == "read_file":
         return await _do_read(args, ctx)
     if name == "edit_file":

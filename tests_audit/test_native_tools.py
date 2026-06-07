@@ -1956,3 +1956,73 @@ def test_read_file_accepts_line_start_end_aliases():
     # the half-range error still fires for a genuine single bound (no alias present)
     from core.native_tools import _range_arg
     assert _range_arg({"start_line": 5}) == 5 and _range_arg({"path": "x"}) is None
+
+
+# ───────────────────── Batch A fixes (ckpt-213) ─────────────────────
+
+def test_read_file_carrying_edits_reroutes_to_edit(monkeypatch=None):
+    # #17: a read_file call that carries an edit-only `edits` payload is a mis-named edit_file —
+    # re-route on the uniquely-identifying key instead of dropping it and returning a no-op re-read.
+    ctx, rel, root = _mk_ctx()
+    try:
+        # read_file{path, edits:[…]} must APPLY the edit (✓), not return an ℹ re-read no-op.
+        r = _disp("read_file", {"path": rel, "edits": [
+            {"old": ['    return "hello " + name'], "new": ['    return "hi " + name']}]}, ctx)
+        assert r.startswith("✓"), r
+        assert 'hi ' in ctx["file_contents"][rel]
+    finally:
+        _cleanup(root)
+
+
+def test_search_text_path_scopes_results():
+    # #10: search_text honors an optional `path` scope (ripgrep -g) instead of silently searching
+    # repo-wide. A scoped search to one file must NOT return hits from other files.
+    import tempfile, os as _os
+    root = _os.path.abspath(tempfile.mkdtemp(prefix="searchscope_"))
+    _os.makedirs(_os.path.join(root, "pkg"), exist_ok=True)
+    with open(_os.path.join(root, "pkg", "target.py"), "w") as f:
+        f.write("def open_url():\n    pass\n")
+    with open(_os.path.join(root, "pkg", "other.py"), "w") as f:
+        f.write("# open_url called here\nopen_url()\n")
+    ctx = {"project_root": root, "file_contents": {}, "sandbox": None, "files_changed": set()}
+    try:
+        scoped = _disp("search_text", {"pattern": "open_url", "path": "pkg/target.py"}, ctx)
+        assert "target.py" in scoped
+        assert "other.py" not in scoped          # the scope excluded the other file
+        wide = _disp("search_text", {"pattern": "open_url"}, ctx)
+        assert "other.py" in wide                # repo-wide still sees both
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_docstring_insert_warning_flags_code_in_docstring():
+    # #6: a real statement wedged inside a triple-quoted docstring is inert; warn (the parse gate
+    # can't catch it). A genuine docstring-PROSE edit or code OUTSIDE the docstring is NOT flagged.
+    from core.native_tools import _docstring_insert_warning
+    before = ('class R:\n    def __init__(self):\n        """Doc.\n\n        >>> R()\n'
+              '        """\n        self.a = 1\n')
+    after_bug = ('class R:\n    def __init__(self):\n        """Doc.\n\n        >>> R()\n'
+                 '        self.b = 2\n        """\n        self.a = 1\n')   # self.b INSIDE docstring
+    after_ok = ('class R:\n    def __init__(self):\n        """Doc.\n\n        >>> R()\n'
+                '        """\n        self.a = 1\n        self.b = 2\n')     # self.b after docstring
+    assert "INSIDE a docstring" in _docstring_insert_warning(before, after_bug)
+    assert _docstring_insert_warning(before, after_ok) == ""
+    assert _docstring_insert_warning(before, before) == ""                  # no change → no warn
+
+
+def test_growing_view_marks_requested_range_and_collapses_header():
+    # #3: a ranged read of a >cap file leads with the requested range (named + ◀ REQUESTED marker)
+    # and COLLAPSES a large already-read leading header instead of re-printing it on every read.
+    from core.native_tools import _accumulated_view
+    big = "".join(f"line{i} = {i}\n" for i in range(1, 2001))   # 2000 lines (>cap)
+    # header 1-60 read earlier, focus is a deep range 1500-1520
+    ctx = {"file_contents": {"big.py": big}, "_served_ranges": {"big.py": [(1, 60), (1500, 1520)]}}
+    v = _accumulated_view(ctx, "big.py", big, focus=(1500, 1520))
+    assert "you requested lines 1500-1520" in v          # named at top
+    assert "◀ REQUESTED" in v                            # the focus line is marked
+    assert "line1500 = 1500  ◀ REQUESTED" in v
+    assert "lines 1-60 read earlier — collapsed" in v    # the leading header is collapsed, not re-printed
+    assert "line30 = 30" not in v                        # collapsed header body is NOT rendered
+    # but if the focus IS the header, it is rendered (not collapsed)
+    v2 = _accumulated_view(ctx, "big.py", big, focus=(1, 60))
+    assert "line30 = 30" in v2 and "◀ REQUESTED" in v2

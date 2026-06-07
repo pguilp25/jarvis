@@ -1056,19 +1056,21 @@ def has_tool_tags(text: str) -> bool:
 
 # ─── Tool Runners ────────────────────────────────────────────────────────────
 
-async def _run_code_searches(patterns: list[str], project_root: str) -> str:
-    """Run ripgrep code searches. Returns formatted results."""
+async def _run_code_searches(patterns: list[str], project_root: str, path_glob: str = "") -> str:
+    """Run ripgrep code searches. Returns formatted results. `path_glob` (ckpt-213) scopes the
+    search to a file/dir via ripgrep `-g` when the caller passed a path."""
     from tools.codebase import search_code, format_search_results
 
     output_parts = []
+    _scope = f" in {path_glob}" if path_glob else ""
     for pattern in patterns:
-        status(f"    Code search: {pattern}")
-        results = search_code(pattern, project_root)
+        status(f"    Code search: {pattern}{_scope}")
+        results = search_code(pattern, project_root, path_glob=path_glob)
         if results:
-            output_parts.append(f"\n=== Code search: '{pattern}' ===")
+            output_parts.append(f"\n=== Code search: '{pattern}'{_scope} ===")
             output_parts.append(format_search_results(results))
         else:
-            output_parts.append(f"\n=== Code search '{pattern}': no matches ===")
+            output_parts.append(f"\n=== Code search '{pattern}'{_scope}: no matches ===")
     return "\n".join(output_parts)
 
 

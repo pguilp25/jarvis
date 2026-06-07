@@ -462,7 +462,8 @@ def _is_test_path(fp: str) -> bool:
     return bool(_TEST_PATH_RE.search(fp or ""))
 
 
-def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS) -> list[dict]:
+def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS,
+                path_glob: str = "") -> list[dict]:
     """
     Search codebase using ripgrep (rg) or grep fallback.
     Returns list of {file, line_num, line, context}.
@@ -527,6 +528,16 @@ def search_code(pattern: str, root: str, max_results: int = MAX_SEARCH_RESULTS) 
     # for the astropy-13033 use case, but production code dominates by
     # default. ~80 of 100 slots remain for PASS 2 (whole-project scan).
     test_quota = min(20, max_results // 4) if max_results >= 4 else 0
+
+    # #10 (ckpt-213): a scoped search (caller passed a path/glob) is restricted to that path via
+    # ripgrep `-g`. The scope glob REPLACES the broad source-extension globs (ripgrep ORs include
+    # globs, so keeping `-g *.py` alongside `-g pkg/x.py` would defeat the scope). The two-pass
+    # test-priority split is pointless when the scope is already one file/dir, so skip PASS 1.
+    # (Without this, the coder's scoped search was silently answered repo-wide → test-file noise
+    # drowned the in-file hit → range-guessing read-storm.)
+    if path_glob:
+        source_args = ["-g", path_glob]
+        test_quota = 0
 
     # PASS 1 — test directories only
     if test_quota > 0:
