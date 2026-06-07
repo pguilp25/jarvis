@@ -8844,11 +8844,18 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # improver can refer to them by number ("Plan #2 is the best
     # baseline; pull STEP 4 from Plan #3"). Matches the unified labelled-
     # section vocabulary used elsewhere in the prompts.
+    # #13 (ckpt-220): cap EACH plan individually (was a single [:30000] on the concatenation, which
+    # cut the LAST plan mid-word — dropping its VERIFICATION/TESTS/CONFIDENCE tail the merger needs).
+    # A per-plan budget keeps every plan fairly represented and marks any truncation explicitly.
+    _per_plan = max(7000, 36000 // max(1, len(plans)))
+    def _cap_plan(ans):
+        ans = ans or ""
+        return ans if len(ans) <= _per_plan else (ans[:_per_plan] + "\n…(this plan was truncated for length)…")
     all_plans_text = "\n\n".join(
         f"──────────────────────────────────────────────────────────────────────\n"
         f"[INPUT PLAN #{i + 1}] — by {p['model'].split('/')[-1]}\n"
         f"──────────────────────────────────────────────────────────────────────\n"
-        f"{p['answer']}"
+        f"{_cap_plan(p['answer'])}"
         for i, p in enumerate(plans)
     )
 
@@ -8905,7 +8912,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         task=task,
         context=context[:12000],
         verify_block=verify_block,
-        all_plans_text=all_plans_text[:30000],
+        all_plans_text=all_plans_text[:48000],   # #13: per-plan capped above; overall backstop raised
         preloaded_research=preloaded_research,
     ) + _consensus_line
     # ckpt-188: merger → owl-alpha (was mistral/medium). mistral/medium frequently
@@ -11065,10 +11072,17 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
         f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
         f"edit_file): {', '.join(to_create)}\n" if to_create else ""
     )
+    # #6 (ckpt-220): the "edit directly, no read_file" trailer must scope to the LOADED files only —
+    # when a step file is too large to preload (overflow), it is NOT loaded and the trailer's blanket
+    # "no need to read_file" directly contradicts the "TOO LARGE TO PRELOAD — open with read_file" note.
+    _overflow_clause = (
+        "Any file listed under 'TOO LARGE TO PRELOAD' is NOT loaded — read_file it FIRST (it opens "
+        "as a def-index that fills in as you read ranges), then edit from what you read. " if overflow else "")
     nat_user = (
         f"{step_instructions}\n{iface_block}\n{create_note}"
         f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{file_block}\n{overflow_note}\n"
-        f"The files above are already loaded — edit them directly (no need to read_file first). "
+        f"The files in the FILE(S) block above are already loaded — edit THOSE directly (no need to "
+        f"read_file them first). {_overflow_clause}"
         f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
         f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
         f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "

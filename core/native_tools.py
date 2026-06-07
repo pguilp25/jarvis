@@ -762,7 +762,9 @@ def _accumulated_view(ctx: dict, path: str, content: str, focus=None) -> str:
     fe = min(total, focus[1]) if focus else None
     def _hole(a, b):
         names = [f"{ln}:{nm}" for (ln, nm) in defs if a <= ln <= b]
-        tail = ("  — contains " + "; ".join(names[:10]) + (" …" if len(names) > 10 else "")) if names else ""
+        # #11 (ckpt-220): show up to 24 def names per unread gap (was 10) — the cap was hiding the
+        # exact symbol the coder was hunting (a26: open_url), so it couldn't tell which range to read.
+        tail = ("  — contains " + "; ".join(names[:24]) + (" …" if len(names) > 24 else "")) if names else ""
         return (f"  ⋯ lines {a}-{b} not read — read_file(start_line={a}, end_line={b}) "
                 f"to reveal ⋯{tail}")
     revealed_n = sum(e - s + 1 for s, e in revealed)
@@ -2534,6 +2536,12 @@ async def _do_search(args: dict, ctx: dict) -> str:
     pat, _e = _str_or_err(args, "pattern", "search_text")
     if _e:
         return _e
+    # #9 (ckpt-220): strip ONE matched pair of surrounding quotes (parity with the planner's
+    # [SEARCH:] fix) — a model that passes `"def run"` (escaped quotes in the JSON value) would
+    # otherwise search the LITERAL quoted string via ripgrep -F → silent 'no matches' → read-storm.
+    _p = pat.strip()
+    if len(_p) >= 2 and _p[0] == _p[-1] and _p[0] in ('"', "'", '`'):
+        pat = _p[1:-1].strip() or pat
     # #10 (ckpt-213): honor an optional path/file/glob scope (the coder kept passing `path` and
     # the harness silently dropped it → repo-wide noise drowned the in-file hit → range-guessing
     # read-storm). Normalize a bare dir to a recursive glob; an exact file path passes through.
@@ -2691,6 +2699,21 @@ def _do_run(args: dict, ctx: dict) -> str:
                 f"wrap imports in try/except, or change your design to dodge `{_mod}`. Those are all "
                 f"wrong — they corrupt the patch. Reason about `{_mod}` statically and move on.\n"
                 f"ONLY if `{_mod}` is a module YOU just created/renamed is this a real bug to fix.\n"
+                f"--- output (tail) ---\n{shown or '(no output)'}")
+    # #12 (ckpt-220): the smoke sandbox mounts the tree READ-ONLY, so Python writing a .pyc to
+    # __pycache__ fails with a read-only/permission OSError that has NOTHING to do with the edit —
+    # mislabeling it "YOUR EDIT'S real behaviour" sends the coder chasing a phantom bug. Name it as
+    # environmental (the real test env is writable) when that's the failure and there's no genuine
+    # Python exception from the edited code above it.
+    _olow = out.lower()
+    if (("read-only file system" in _olow or "errno 30" in _olow
+         or ("permission denied" in _olow and "__pycache__" in _olow))
+            and "traceback (most recent call last)" not in _olow):
+        return (f"⚠ run_code: exit {code} — the smoke sandbox is READ-ONLY, so Python couldn't write "
+                f"its compiled .pyc to __pycache__ (a read-only/permission OSError). This is an "
+                f"ENVIRONMENT limitation of the smoke box, NOT a bug in your edit — the real test "
+                f"environment is writable. Do NOT change your code to dodge it; if you need to run, "
+                f"add `import sys; sys.dont_write_bytecode = True` to your command.\n"
                 f"--- output (tail) ---\n{shown or '(no output)'}")
     return (f"✗ ran in your edited sandbox — exit {code}{timed}. This is YOUR EDIT'S "
             f"real runtime behaviour, NOT a tool error.\n"

@@ -51,6 +51,12 @@ _EMPTY_TOOL_USE = re.compile(
 # result ──────` and ~650 lines of invented `code_agent` source.
 # Abort the stream the moment this scaffold appears.
 _SCAFFOLD_MARKER = "────── ROUND"
+# #3 (ckpt-220): match the scaffold header with a TOLERANT dash count (3+) and optional spacing —
+# a fabrication with a different number of box-dashes (or `===`/`---` rules) slipped past the exact
+# 6-dash literal, so the abort fired several rounds LATE (a26 550B planner: fabricated markers at
+# rounds 2-8, caught only at 7-8). Catch the `<rule> ROUND N — your (tool result|thinking)` shape.
+_SCAFFOLD_RE = re.compile(r'(?:[─=-]\s*){3,}\s*ROUND\s+\d+\s*[—–-]\s*your\s+(?:tool result|thinking)',
+                          re.IGNORECASE)
 
 
 class DegenerationDetector:
@@ -104,11 +110,11 @@ class DegenerationDetector:
         # ── 0b. Scaffold-hallucination ──────────────────────────────────
         # Model is writing JARVIS's per-round header into its own response,
         # which means the content right after is fabricated. Abort.
-        if _SCAFFOLD_MARKER in accumulated:
+        if (_SCAFFOLD_MARKER in accumulated) or _SCAFFOLD_RE.search(accumulated):
             self._tripped = True
             self._reason = (
-                "scaffold-hallucination: model wrote `"
-                f"{_SCAFFOLD_MARKER}` inside its response (this header is "
+                "scaffold-hallucination: model wrote a `────── ROUND N — your "
+                "(tool result|thinking) ──────` header inside its response (this header is "
                 "runtime-only; content after it is fabricated)"
             )
             return self._reason

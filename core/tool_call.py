@@ -3191,6 +3191,13 @@ async def call_with_tools(
 
     _empty_streak = 0
     _dead_tool_nudges = 0   # bounded rescues for unrecognized/disabled tool calls
+    # #2 (ckpt-220): is this a PLAN/MERGER role? (detected from the log_label the planner/merger
+    # callers pass — "planning (Layer 1)" / "merging plans (final)"). Such a turn must NOT be
+    # accepted as COMPLETE when it produced NO plan and no tool tags — that's a dead turn (owl-alpha
+    # merger leaked bare 'tool use / VIEW' text → no bracket fired → empty plan → raw-draft fallback,
+    # skipping the whole refinement stage). Nudge for the protocol instead.
+    _is_plan_role = any(k in (log_label or "").lower() for k in ("plan", "merg"))
+    _noplan_nudges = 0
     for round_num in range(1, max_rounds + 1):
         # Ephemeral: last round's tool-error block was already rendered into the
         # prompt this round's model is responding to; clear it so it shows ONCE
@@ -4215,6 +4222,24 @@ async def call_with_tools(
         )
         if (not has_tags and not _gate_keep_alive
                 and not _stop_with_pending and not _pending_no_signal):
+            # #2 (ckpt-220): a PLAN/MERGER turn that produced NO plan (no === PLAN === block and no
+            # current_plan built) and fired no tools is DEAD — don't accept it as final. Nudge for
+            # the bracket protocol + the === PLAN === block and grant another round (bounded ×2).
+            # Guarded so a plan that exists, or any non-plan role (coder/reviewer), still breaks.
+            if (_is_plan_role and _noplan_nudges < 2
+                    and "=== PLAN ===" not in full_response
+                    and not (current_plan and current_plan.strip())):
+                _noplan_nudges += 1
+                _dbg(f"PLAN-ROLE no-plan dead turn → nudge {_noplan_nudges}/2 (not final)")
+                status(f"  [toolloop:{log_label}] R{round_num}: produced no plan + no tool tags — "
+                       f"nudging for the bracket protocol / === PLAN === ({_noplan_nudges}/2)")
+                current_prompt = current_prompt + (
+                    "\n\n⚠ Your last turn produced NO plan and fired NO tools. If you meant to look "
+                    "at code, your tool call did not fire — wrap it EXACTLY as `[tool use][CODE: "
+                    "path L-R][/tool use]` (or [REFS:]/[SEARCH:]) and end with [STOP][CONFIRM_STOP]. "
+                    "If you are ready to plan, write the `=== PLAN === … === END PLAN ===` block now. "
+                    "An empty turn is discarded — do one or the other.")
+                continue
             _dbg("EXIT: no tags + nothing pending → break (treat as final)")
             break  # No tool requests and nothing to apply — done
         # When _gate_keep_alive is set, a [DONE] carried fresh edits: keep the
