@@ -13,7 +13,7 @@ import asyncio
 import os
 import re
 from core.retry import call_with_retry
-from core.cli import step, status, warn
+from core.cli import step, status, warn, round_trace
 
 
 # In-flight locks: prevent duplicate lookups across parallel AI calls.
@@ -3221,6 +3221,16 @@ async def call_with_tools(
             )
             continue
         _empty_streak = 0
+
+        # ROUND TRACE (ckpt-210): per-round capture for offline round-by-round bug-hunting.
+        # No-op unless JARVIS_ROUND_TRACE is set. `prompt` = exactly what THIS round's model
+        # saw (the accumulated tool results from prior rounds are folded into current_prompt),
+        # `response` = its full reasoning+output text this round. So prompt[N+1] holds round N's
+        # tool results — the pair across rounds reconstructs the whole planner conversation.
+        round_trace({"phase": "planner", "label": log_label, "round": round_num,
+                     "model": model.split("/")[-1],
+                     "prompt": (current_prompt or "")[:60000],
+                     "response": (result or "")[:12000]})
 
         # ── Cross-round signal detection ──────────────────────────────
         # When streaming gets cut mid-signal (e.g. max_tokens hits at

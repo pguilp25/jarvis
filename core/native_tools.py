@@ -51,7 +51,7 @@ import json
 import os
 import re
 
-from core.cli import status, warn
+from core.cli import status, warn, round_trace
 from core import thought_logger
 
 # Models built for native function-calling — use the structured loop, not text.
@@ -3089,6 +3089,17 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             break
         ctx["round"] = rnd   # so tools can stamp diffs/views with WHEN they happened
         messages = _trim_history(messages, max_history_chars, model_id)
+        # ROUND TRACE (ckpt-210): per-round capture of thinking + tool I/O for offline
+        # round-by-round bug-hunting. No-op unless JARVIS_ROUND_TRACE is set. On round 1
+        # dump the full assembled prompt the coder actually saw (system + user), so the
+        # trace audit can spot a stale/contradictory instruction at its source.
+        _trace_io = []
+        if rnd == 1:
+            round_trace({"phase": "coder", "step": ctx.get("step_num"), "round": 0,
+                         "model": short, "event": "prompt",
+                         "messages": [{"role": m.get("role"),
+                                       "content": (m.get("content") or "")[:60000]}
+                                      for m in messages]})
         try:
             _tools = _BATCH_ONLY_TOOLS if _BATCH_ONLY else CODER_TOOLS
             msg = await _call_tools_with_retry(model_id, messages, _tools, max_tokens)
@@ -3287,6 +3298,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 _reads_no_edit += 1
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
+            _trace_io.append({"tool": name, "args": args,
+                              "result": (result_str if isinstance(result_str, str) else str(result_str))[:3000]})
             # SUPERSEDED marker: once an edit LANDS, mark any earlier read_file view
             # of that file in the history — but do NOT tell the coder to re-read (the
             # old blanket "⟪STALE — read it again⟫" banner is exactly what drove the
@@ -3337,6 +3350,10 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 _rp = (args.get("path") or "") if isinstance(args, dict) else ""
                 if _rp:
                     _supersede_prior_file_views(messages, _rp)
+        # ROUND TRACE (ckpt-210): emit this round's reasoning + every tool call/result.
+        round_trace({"phase": "coder", "step": ctx.get("step_num"), "round": rnd,
+                     "model": short, "reasoning": (_reason or "")[:5000],
+                     "io": _trace_io})
         # TRACE grounding (JARVIS_TRACE): if the coder filled a trace this round,
         # check its `@ file:line | code` citations against the REAL files. An
         # imagined flow gets a concrete re-trace nudge — the SAME enforcement the

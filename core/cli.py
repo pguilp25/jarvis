@@ -52,6 +52,22 @@ def error(msg: str):
     status(f"✗ {msg}", "red")
 
 
+def round_trace(record: dict):
+    """Append ONE JSON record per coder/planner round to the file named by env JARVIS_ROUND_TRACE,
+    for round-by-round debugging (thinking + the prompt the model saw + the tool results). No-op
+    when the env isn't set (zero overhead in normal runs) and NEVER raises. (ckpt-210.)"""
+    import os
+    _p = os.environ.get("JARVIS_ROUND_TRACE")
+    if not _p:
+        return
+    try:
+        import json
+        with open(_p, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(record, default=str)[:200_000] + "\n")
+    except Exception:
+        pass
+
+
 def thinking(model: str):
     """Show which model is thinking."""
     short = model.split("/")[-1] if "/" in model else model
