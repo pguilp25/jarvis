@@ -3610,10 +3610,12 @@ _JSON_OPS_NO_EDIT = (
 
 async def call_with_json_ops(model_id: str, system: str, user_content: str,
                              ctx: dict, max_rounds: int = 40,
-                             max_history_chars: int = 400_000) -> dict:
+                             max_history_chars: int = 400_000, deadline=None) -> dict:
     """JSON-ops coder loop. Streams gpt-oss in TEXT mode (no tools), parses the FLAT JSON-line ops
     it emits, runs each via _dispatch (every _do_* reused), feeds results back, loops. `done` op
-    (with a verify gate) ends it. Same return contract as call_with_native_tools."""
+    (with a verify gate) ends it. Same return contract as call_with_native_tools. `deadline`
+    (monotonic, ckpt-217) is the A2 wall-clock backstop — stop cleanly with whatever landed rather
+    than getting hard-killed mid-stream by the instance timeout (parity with the native loop)."""
     from clients.nvidia import call_nvidia_stream
     short = model_id.split('/')[-1]
     # Route through finalize_coder_system (bughunt #19) so the env flags that shape the coder
@@ -3633,8 +3635,24 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     _no_edit_nudged = False
     _total_rejects = 0       # EDIT-op rejects only (the real stuck signal)
     for rnd in range(1, max_rounds + 1):
+        # A2 wall-clock backstop (ckpt-217): stop cleanly with whatever landed rather than getting
+        # hard-killed mid-stream by the instance timeout (parity with the native loop).
+        if deadline is not None and time.monotonic() > deadline:
+            reason = "time-budget"
+            warn(f"  [json:{short}] hit the wall-clock budget at round {rnd} "
+                 f"({len(ctx.get('files_changed', set()))} file(s) edited) — stopping cleanly.")
+            break
         ctx["round"] = rnd
         messages = _trim_history(messages, max_history_chars, model_id)
+        # ROUND TRACE (ckpt-217): per-round capture for the JSON-ops loop (parity with the native
+        # + planner loops). No-op unless JARVIS_ROUND_TRACE is set. Round 0 dumps the full prompt.
+        _trace_io = []
+        if rnd == 1:
+            round_trace({"phase": "json-coder", "step": ctx.get("step_num"), "round": 0,
+                         "model": short, "event": "prompt",
+                         "messages": [{"role": m.get("role"),
+                                       "content": (m.get("content") or "")[:60000]}
+                                      for m in messages]})
         try:
             # NO stop_check: a bare "tool":"done" substring scan would truncate the
             # stream mid-op whenever an edit/create's CONTENT contains that text (and
@@ -3682,6 +3700,8 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                 _total_rejects += 1
             _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or ""
             results.append(f"── op[{k}] {tname}({str(_lbl)[:70]}) ──\n{r}")
+            _trace_io.append({"tool": tname, "args": targs,
+                              "result": (r if isinstance(r, str) else str(r))[:12000]})
         if len(ops) >= 24:        # parser caps a runaway op list — say so, don't drop silently (P1-5)
             results.append("⚠ NOTE: only the first 24 ops this round were run; "
                            "emit fewer ops per round (a focused LOOK, then EDIT).")
@@ -3705,6 +3725,12 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             if _kp and _kr and _kc:
                 _json_keep_evict(messages, _kp, _render_ranges(_kc, _kr),
                                  ", ".join(f"{s}-{e}" for s, e in _kr))
+        # ROUND TRACE (ckpt-217): the model's full text this round (its prose reasoning + the JSON
+        # ops it emitted) + every op's args/result. `content` is the raw stream — for JSON-ops the
+        # reasoning is interleaved with the ops, so capture it whole (capped).
+        round_trace({"phase": "json-coder", "step": ctx.get("step_num"), "round": rnd,
+                     "model": short, "reasoning": (content or "")[:5000],
+                     "want_done": bool(want_done), "io": _trace_io})
         if _total_rejects >= 12:
             warn(f"  [json:{short}] {_total_rejects} rejected ops — stuck; stopping for fallover")
             reason = "stuck-repeating"

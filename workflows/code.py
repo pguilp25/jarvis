@@ -12439,7 +12439,8 @@ async def _implement_one_step(
             # JSON-ops coder (flag JARVIS_JSON_OPS): gpt-oss in TEXT mode, streaming flat JSON-line
             # ops. Same ctx + prompt as native; only the protocol differs (ckpt-183).
             from core.native_tools import call_with_json_ops
-            _r = await call_with_json_ops(_model, _nat_system, _nat_user, _ctx)
+            _r = await call_with_json_ops(_model, _nat_system, _nat_user, _ctx,
+                                          deadline=_implement_deadline())
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
             status(f"  [json:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("json coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
@@ -12453,15 +12454,23 @@ async def _implement_one_step(
         #   ~5 min then 504s, so it's only an acceptable LAST-RESORT, never early.
         # ckpt-187: dropped the frontier glm-5.1 text link; added owl-alpha + gemma-4
         # (OR :free, non-frontier) as text coders before the slow gpt-oss-nim last-resort.
-        _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
-                        ("mistral/medium","native"),
+        # ckpt-217: gpt-oss-120b PRIMARY now runs in JSON-OPS TEXT mode (flat JSON-line ops), with
+        # NATIVE gpt-oss as the FIRST fallback. RATIONALE: native structured tool-calling triggers
+        # the harmony analysis→commentary `finish_reason=stop` empty-turn (a26 burned ~15 rounds of
+        # empty-turns → wall-clock timeout). TEXT mode has no commentary channel to stall at, so the
+        # empty-turn class structurally disappears; native stays as the immediate fallback because
+        # gpt-oss is still the strongest edit-producer. All shared tool fixes (read-refusal, growing
+        # view, search scope, etc.) apply to BOTH modes (same _dispatch/_do_*). Escape hatch:
+        # JARVIS_NATIVE_CODER=1 reverts to the old native-primary chain for A/B comparison.
+        _CODER_CHAIN = [("nvidia/gpt-oss-120b","json"), ("nvidia/gpt-oss-120b","native"),
+                        ("nvidia/qwen3-coder","text"), ("mistral/medium","native"),
                         ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
                         ("nvidia/gpt-oss-nim","native")]
-        # ckpt-183 experiment (JARVIS_JSON_OPS): route gpt-oss-120b PRIMARY through the JSON-ops
-        # TEXT coder instead of native tool-calling (flat JSON-line ops it can actually emit).
-        # Fallbacks unchanged. Flag-gated: default behavior is identical.
-        if os.environ.get("JARVIS_JSON_OPS", "0") == "1":
-            _CODER_CHAIN = [("nvidia/gpt-oss-120b","json")] + _CODER_CHAIN[1:]
+        if os.environ.get("JARVIS_NATIVE_CODER", "0") == "1":
+            _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
+                            ("mistral/medium","native"),
+                            ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
+                            ("nvidia/gpt-oss-nim","native")]
         for _m, _mode in _CODER_CHAIN:
             _seed_view_state()   # fresh view-state per attempt (bughunt #14)
             try:
