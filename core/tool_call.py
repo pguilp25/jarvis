@@ -932,6 +932,36 @@ def _arg_looks_ident(arg: str) -> bool:
 MAX_TAGS_PER_ROUND = 15
 
 
+_LONGCAT_CALL_RE = re.compile(
+    r'<longcat_tool_call>\s*([A-Za-z_]+)\s*:\s*([^<]*?)\s*</longcat[A-Za-z_]*>',
+    re.IGNORECASE)
+
+
+def _salvage_longcat_calls(text: str) -> str:
+    """LongCat-family models (e.g. owl-alpha, used as a Layer-1 planner AND the merger)
+    emit tool calls in their NATIVE `<longcat_tool_call>TOOL: args</longcat_arg_value>` XML
+    instead of JARVIS's `[TOOL: args]` bracket protocol — so the harness's tag extractors
+    match NOTHING and the model's intended reads are silently lost (a26: the owl-alpha MERGER
+    issued 5 `CODE:` reads of urls.py, ALL dropped → the final plan was synthesized blind).
+    Convert each LongCat call to the bracket form the extractors understand, and normalize a
+    leading-`L` line range (`CODE: path L100-120` → `[CODE: path 100-120]`) — that's the LongCat
+    convention and `_PATH_ARG_RE` only accepts a BARE-digit range. Then drop any leftover bare
+    `<…longcat…>` tags. No-op (instant) when no LongCat tag is present — the common case. (ckpt-212.)"""
+    if "<longcat" not in text.lower():
+        return text
+
+    def _repl(m):
+        tool = m.group(1).upper()
+        args = m.group(2).strip()
+        # strip an "L" prefix on a line range: "path L100-120" / "path L100" → bare digits
+        args = re.sub(r'(^|\s)L(\d+(?:\s*-\s*\d+)?)\b', r'\1\2', args)
+        return f"[{tool}: {args}]"
+
+    out = _LONGCAT_CALL_RE.sub(_repl, text)
+    out = re.sub(r'</?longcat[A-Za-z_]*>', '', out)   # drop any leftover bare tags
+    return out
+
+
 def extract_search_tags(text: str) -> list[str]:
     masked = _mask_quoted_tags(text)
     results = []
@@ -3194,6 +3224,14 @@ async def call_with_tools(
         # debugging), but artifacts only carry the clean version.
         _result_pre_backtrack = result
         result = _apply_continue_from(result)
+        # ckpt-212: a LongCat-family model (owl-alpha — Layer-1 planner AND merger) emits tool
+        # calls as native <longcat_tool_call> XML the bracket extractors can't see. Rewrite them
+        # to [TOOL: args] BEFORE any tag extraction so the model's intended reads actually fire.
+        _pre_longcat = result
+        result = _salvage_longcat_calls(result)
+        if result != _pre_longcat:
+            status(f"  [{model.split('/')[-1]}] round {round_num}: salvaged LongCat-format "
+                   f"tool call(s) → bracket protocol (model emitted native <longcat_tool_call> XML)")
         if result != _result_pre_backtrack:
             status(
                 f"  [{model.split('/')[-1]}] round {round_num}: "

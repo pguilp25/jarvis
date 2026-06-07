@@ -263,3 +263,40 @@ def test_has_tool__one_of_each_kind():
     assert has_tool_tags("[tool use][KEEP: a.py 1-10][/tool use]")
     assert has_tool_tags("[tool use][LSP: foo][/tool use]")
     assert has_tool_tags("[tool use][PURPOSE: auth][/tool use]")
+
+
+# ───────────────────── LongCat salvage (ckpt-212) ─────────────────────
+
+from core.tool_call import _salvage_longcat_calls, _parse_code_arg
+
+
+def test_longcat_salvage_recovers_a26_merger_reads():
+    """The EXACT a26 owl-alpha MERGER output: 5 CODE reads emitted as native
+    <longcat_tool_call> XML. Before ckpt-212 the bracket extractors saw NONE of
+    them and the plan was synthesized blind. After: all convert to [CODE: …] and
+    parse to (path, ranges) — including the L-prefix range normalization."""
+    raw = ("Let me read the key files."
+           "<longcat_tool_call>CODE: lib/ansible/module_utils/urls.py L1306-1320</longcat_arg_value>\n"
+           "</longcat_tool_call>\n"
+           "<longcat_tool_call>CODE: lib/ansible/module_utils/urls.py L1358-1370</longcat_arg_value>\n"
+           "</longcat_tool_call>")
+    out = _salvage_longcat_calls(raw)
+    tags = extract_code_tags(out)
+    assert len(tags) == 2
+    assert _parse_code_arg(tags[0]) == ("lib/ansible/module_utils/urls.py", [(1306, 1320)])
+    assert _parse_code_arg(tags[1]) == ("lib/ansible/module_utils/urls.py", [(1358, 1370)])
+    assert "longcat" not in out.lower()          # no leftover bare tags
+
+
+def test_longcat_salvage_noop_on_normal_brackets():
+    # A normal bracket-protocol response is returned byte-for-byte (fast path).
+    txt = "Here is the plan.\n[CODE: foo.py 10-20]\n[SEARCH: open_url]"
+    assert _salvage_longcat_calls(txt) is txt or _salvage_longcat_calls(txt) == txt
+
+
+def test_longcat_salvage_other_tools_and_no_range():
+    out = _salvage_longcat_calls(
+        "<longcat_tool_call>SEARCH: open_url</longcat_arg_value></longcat_tool_call>"
+        "<longcat_tool_call>REFS: fetch_url</longcat_arg_value></longcat_tool_call>")
+    assert "[SEARCH: open_url]" in out and "[REFS: fetch_url]" in out
+    assert "longcat" not in out.lower()
