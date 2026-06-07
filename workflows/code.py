@@ -81,8 +81,8 @@ UNDERSTAND_MODELS = [
 # deepseek-v4-flash does NOT exist (Pollinations charges for it = 402, NIM
 # forbids it = 403), so glm-5.1 is the realistic free coder primary.
 IMPLEMENT_MODEL = "nvidia/gpt-oss-120b"   # coder via NATIVE tool calling (2026-05-27)
-# Mirror of core.native_tools._FULL_VIEW_CAP (ckpt-179): files larger than this are NOT shown
-# in full (def-index + ranges instead). Used only to FLAG big files in the step's file list.
+# Mirror of core.native_tools._FULL_VIEW_CAP: files larger than this aren't shown in full — they
+# use the accumulating view (def-index + read ranges filled in). Used only to FLAG big step files.
 _FULL_VIEW_HINT = 1000
 # gpt-oss is the most redundant free model (Groq/OR/DeepInfra/NIM → distributes
 # compute at scale) and fast/reliable, but it's built for NATIVE function calling,
@@ -12262,8 +12262,9 @@ async def _implement_one_step(
             _overflow_note = (
                 "\n=== OTHER STEP FILE(S) — too big to preload together; read on demand ===\n"
                 + "\n".join(f"  {fp} ({_nat_targets[fp].count(chr(10)) + 1} lines)" for fp in _overflow)
-                + "\n(read_file these when you work on them; a file >1000 lines returns a def-index "
-                  "→ read the ranges you need, and `keep` ranges you're done with to save context.)\n")
+                + "\n(read_file these when you work on them; a file >1000 lines opens as a def-index "
+                  "that FILLS IN as you read ranges — one growing view, read the ranges you need and "
+                  "`keep` the ones that matter to trim it.)\n")
         _nat_system = (
             IMPLEMENT_NATIVE_PROMPT
             + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")

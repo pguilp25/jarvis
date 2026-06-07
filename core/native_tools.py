@@ -474,14 +474,18 @@ def _str_or_err(args: dict, key: str, tool: str):
                   f"(got {type(v).__name__}). Re-issue with a string {key}.")
 
 
-_FULL_VIEW_CAP = 1000    # a file up to this many lines is shown IN FULL (first read OR re-read);
-                         # larger → a compact DEF/CLASS INDEX (names + line numbers, NO bodies) +
-                         # "use read_file with a line range" — never a full dump or a verbose
-                         # skeleton. Lowered 3000→1000 (ckpt-179): even a single >1k file in
-                         # context, ×several files, overflowed gpt-oss-120b's 131072 window and
-                         # forced the slow gpt-oss-nim fallback → timeout (a26c325b/f631/111347e9).
-                         # The coder navigates a big file by the def-index then reads ranges, and
-                         # `keep` discards ranges it no longer needs so context stays bounded.
+_FULL_VIEW_CAP = 1000    # a file up to this many lines is shown IN FULL on read; larger → the
+                         # ACCUMULATING VIEW (ckpt-196): ONE growing per-file view = the def/class
+                         # index with the ranges the coder has READ filled in as real code, and the
+                         # un-read GAPS shown as labelled holes ("⋯ lines X-Y not read ⋯" + the def
+                         # names inside them). Each read EXPANDS that one view and REPLACES the prior
+                         # one in history (the loop collapses older copies to a pointer), so there's
+                         # exactly ONE, ever-more-complete view per file — no duplicate dumps, no
+                         # "you already read a-b" refusals, and `keep` trims it to the ranges that
+                         # matter. This replaced the old slice-and-short-circuit model, which made a
+                         # >cap file feel like 10 disconnected searches and looped gpt-oss to timeout
+                         # (a26: 69 reads / 9 edits / 1800s). Kept at 1000 so the growing view — not a
+                         # full dump ×several files — is what fills context (the ckpt-179 overflow).
 _FULL_REREAD_CAP = _FULL_VIEW_CAP   # back-compat alias (a few call sites / tests still name it)
 
 
@@ -623,6 +627,109 @@ def _too_large_view(ctx: dict, path: str, nlines: int, content: str) -> str:
             + f"\n→ read_file(path='{path}', start_line=N, end_line=M) around the line you need.")
 
 
+def _merge_ranges(ranges):
+    """Merge (start,end) 1-based inclusive ranges into a minimal sorted, non-overlapping set —
+    touching/adjacent ranges combine (so the accumulating view shows one block, not two). Skips
+    malformed pairs. Never raises."""
+    norm = []
+    for r in ranges or []:
+        try:
+            a, b = int(r[0]), int(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        norm.append((min(a, b), max(a, b)))
+    norm.sort()
+    out = []
+    for s, e in norm:
+        if out and s <= out[-1][1] + 1:        # overlapping OR directly adjacent → merge
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _def_lines(content: str):
+    """[(lineno, 'kind name'), …] for every def/class, sorted by line — powers the hole
+    summaries in the accumulating view (which defs sit in an un-read gap). Never raises."""
+    rows = []
+    try:
+        import ast as _ast
+        for _n in _ast.walk(_ast.parse(content)):
+            if isinstance(_n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                _kind = "class" if isinstance(_n, _ast.ClassDef) else "def"
+                rows.append((_n.lineno, f"{_kind} {_n.name}"))
+    except Exception:
+        import re as _re2
+        for _i, _ln in enumerate(content.split("\n"), 1):
+            _m = _re2.match(r'\s*(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)', _ln)
+            if _m:
+                rows.append((_i, f"{_m.group(1)} {_m.group(2)}"))
+    rows.sort()
+    return rows
+
+
+def _accumulated_view(ctx: dict, path: str, content: str) -> str:
+    """ONE growing view of a >cap file (ckpt-196). The def/class index with the line-ranges the
+    coder has READ (ctx['_served_ranges'][path]) filled in as real `LINENO ⇥INDENT|code`, and the
+    un-read GAPS shown as labelled holes that list the defs inside them. Empty revealed set → the
+    plain def-index (the first read). Each read EXPANDS this; the loop collapses older copies of
+    this file's view to a pointer, so there's exactly ONE, ever-more-complete view per file — no
+    duplicate dumps, no 'you already read a-b' refusals. `keep` trims it to the kept ranges."""
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    total = max(len(lines), 1)
+    revealed = _merge_ranges([(s, e) for (s, e) in ctx.get("_served_ranges", {}).get(path, [])])
+    revealed = [(max(1, s), min(total, e)) for (s, e) in revealed if s <= total]
+    if not revealed:
+        return _too_large_view(ctx, path, total, content)        # nothing read yet → def-index
+    defs = _def_lines(content)
+    def _hole(a, b):
+        names = [f"{ln}:{nm}" for (ln, nm) in defs if a <= ln <= b]
+        tail = ("  — contains " + "; ".join(names[:10]) + (" …" if len(names) > 10 else "")) if names else ""
+        return (f"  ⋯ lines {a}-{b} not read — read_file(start_line={a}, end_line={b}) "
+                f"to reveal ⋯{tail}")
+    revealed_n = sum(e - s + 1 for s, e in revealed)
+    head = (f"=== VIEW: {path} — {total} lines — GROWING VIEW ({revealed_n} revealed; the rest "
+            f"are labelled gaps — read a range to fill any in) ===")
+    tree = _incrusted_tree(ctx, path)
+    sep = "  " + "─" * 46
+    out = [f"{head}\n{tree}\n{sep}" if tree else f"{head}\n{sep}"]
+    cursor = 1
+    for (s, e) in revealed:
+        if cursor < s:
+            out.append(_hole(cursor, s - 1))
+        for i in range(s, e + 1):
+            ln = lines[i - 1]
+            ind = len(ln) - len(ln.lstrip(' '))
+            out.append(f"{i} ⇥{ind}|{ln}")
+        cursor = e + 1
+    if cursor <= total:
+        out.append(_hole(cursor, total))
+    return "\n".join(out)
+
+
+def _supersede_prior_file_views(messages: list, path: str) -> int:
+    """Collapse every EARLIER tool-message view of `path` (a plain view OR a prior KEPT block) to a
+    one-line pointer, leaving the newest, most-complete view (messages[-1]) as the only live copy —
+    so there's exactly ONE view per file in context. Called after a read of a >cap file returns the
+    growing view. Pure content-swap on existing tool messages (no add/remove → API pairing intact).
+    Other files' views are untouched. Returns the number collapsed. (ckpt-196)"""
+    n = 0
+    for _m in messages[:-1]:
+        _c = _m.get("content")
+        if not (_m.get("role") == "tool" and isinstance(_c, str)):
+            continue
+        if "⟪earlier view" in _c:
+            continue
+        if (f"=== VIEW: {path} —" in _c or f"=== Code: {path}" in _c
+                or ("⟪KEPT only lines" in _c and path in _c)):
+            _m["content"] = (f"⟪earlier view of {path} — superseded by your newer, more "
+                             f"complete view of it below; scroll down.⟫")
+            n += 1
+    return n
+
+
 def _view_header(ctx: dict, rel_path: str, total_lines: int,
                  *, range_desc: str = "", structure_only: bool = False) -> str:
     """The incrusted VIEW header: a clear, unambiguous 'THIS file / FULL vs RANGE vs
@@ -677,6 +784,54 @@ async def _do_read(args: dict, ctx: dict) -> str:
         return ("✗ read_file: give BOTH start_line and end_line for a range, or "
                 "NEITHER to read the whole file (you provided only "
                 f"{'start_line' if s is not None else 'end_line'}).")
+    # ── BIG FILE → the ACCUMULATING VIEW (ckpt-196) ─────────────────────────────────────────
+    # A file over _FULL_VIEW_CAP that the coder does NOT already hold in full (NOT in view_at —
+    # i.e. not injected at step start, not a prior small-file full read) is navigated by ONE
+    # growing view: a whole-file read shows the current view (just the def-index until ranges are
+    # read); a range read REVEALS that range (merged into _served_ranges[path]) and returns the
+    # expanded view; re-reading a revealed range changes nothing (no refusal, no dup). The loop
+    # collapses any earlier copy of this file's view to a pointer. (Replaces the slice +
+    # short-circuit model that made a big file feel like 10 disconnected searches → gpt-oss looped
+    # to a 1800s timeout: a26 read urls.py 69× / edited 9×.) Files the coder already holds in full
+    # (view_at set) keep the existing short-circuit path below — re-serving them as a def-index
+    # would DOWNGRADE a view it already has.
+    if path not in ctx.get("view_at", {}):
+        _bcur = ctx.get("file_contents", {}).get(path)
+        if not (_bcur and _bcur.strip()):
+            _bsb = ctx.get("sandbox")
+            _bre = _bsb.load_file(path) if _bsb is not None else None
+            if _bre and _bre.strip():
+                _bcur = _bre
+                ctx.setdefault("file_contents", {})[path] = _bcur
+        if isinstance(_bcur, str) and _bcur.strip():
+            _bnl = _bcur.count("\n") + (0 if _bcur.endswith("\n") else 1)
+            if _bnl > _FULL_VIEW_CAP:
+                if s is not None and e is not None:
+                    try:
+                        s_i, e_i = int(s), int(e)
+                    except (TypeError, ValueError):
+                        return (f"✗ read_file: start_line/end_line must be integers "
+                                f"(got start_line={s!r}, end_line={e!r}).")
+                    if s_i < 1 or e_i < 1:
+                        return (f"✗ read_file: line numbers must be ≥ 1 (got start_line={s_i}, "
+                                f"end_line={e_i}). Re-issue with a positive 1-based range.")
+                    if e_i < s_i:
+                        return (f"✗ read_file: invalid range — start_line ({s_i}) must be ≤ "
+                                f"end_line ({e_i}). Put the smaller line number first.")
+                    if s_i > _bnl:
+                        return (f"✗ read_file: start_line {s_i} is out of range — {path} has only "
+                                f"{_bnl} line(s). Read within 1-{_bnl}.")
+                    e_i = min(e_i, _bnl)
+                    _rev = ctx.setdefault("_served_ranges", {}).setdefault(path, [])
+                    _rev.append((s_i, e_i))
+                    ctx["_served_ranges"][path] = _merge_ranges(_rev)
+                # else: whole-file read → reveal nothing new; show the current accumulated view.
+                # Record viewed_versions (so a following edit anchors on CURRENT content); do NOT
+                # set view_at — a big file is never "fully held" via reads, so the next whole
+                # re-read keeps returning the growing view rather than a no-body short-circuit.
+                if isinstance(ctx.get("viewed_versions"), dict):
+                    ctx["viewed_versions"][path] = _bcur
+                return _accumulated_view(ctx, path, _bcur)
     # RE-READ of an already-seen file (no range). The coder ALREADY holds this file's
     # current view — loaded at step start, read earlier this step, or handed back inside an
     # edit's diff — and (point 1) its full reasoning + those views are uncapped in history.
@@ -1909,6 +2064,10 @@ def _do_keep(args: dict, ctx: dict) -> str:
             return (f"✗ keep: you haven't viewed lines {s}-{e} of {path} — read_file that "
                     f"range first, then keep it.")
     ctx.setdefault("_kept", {})[path] = norm
+    # Accumulating-view sync (ckpt-196): keep is the trim for the growing view — set the file's
+    # REVEALED ranges to exactly what's kept, so a later read of this file shows only the kept
+    # ranges (+ whatever it newly reads) + labelled holes. Other files' views are untouched.
+    ctx.setdefault("_served_ranges", {})[path] = _merge_ranges(norm)
     _rng = ", ".join(f"{s}-{e}" for s, e in norm)
     return (f"✓ keep: keeping lines {_rng} of {path}; the rest of its view is dropped from your "
             f"context (read_file a range to bring any of it back).")
@@ -3013,6 +3172,15 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                 f"⟪KEPT only lines {_rngs} of {_kp} (you called keep); the rest "
                                 f"of this view was dropped to save context — read_file a range "
                                 f"to bring any of it back.⟫\n{_krender}")
+            # READ replace (ckpt-196): a read_file of a >cap file returns the ONE growing view of
+            # that file (def-index + every revealed range) — strictly MORE complete than any earlier
+            # view of it. Collapse every earlier copy to a pointer so there's exactly one live view
+            # per file: no duplicate dumps, the coder reads ONE coherent picture. Content-only swap.
+            if (name == "read_file" and isinstance(result_str, str) and "=== VIEW:" in result_str
+                    and ("GROWING VIEW" in result_str or "TOO LARGE" in result_str)):
+                _rp = (args.get("path") or "") if isinstance(args, dict) else ""
+                if _rp:
+                    _supersede_prior_file_views(messages, _rp)
         # TRACE grounding (JARVIS_TRACE): if the coder filled a trace this round,
         # check its `@ file:line | code` citations against the REAL files. An
         # imagined flow gets a concrete re-trace nudge — the SAME enforcement the

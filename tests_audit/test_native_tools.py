@@ -1086,25 +1086,33 @@ def test_range_read_small_file_serves_whole_and_marks_viewed():
         _cleanup(root)
 
 
-def test_range_read_large_file_serves_slice_and_caches():
-    """ckpt-178: a >3000-line file CAN'T be dumped whole, so a range read serves the slice
-    (does NOT enter view_at) and CACHES it; a later read fully covered by a served range
-    short-circuits (kills the overlapping re-read), while a fresh region still serves."""
+def test_range_read_large_file_accumulates_into_one_growing_view():
+    """ckpt-196 (replaces the ckpt-178 slice+short-circuit contract): a >cap file is navigated by
+    ONE growing view. A range read REVEALS that range as real code; a re-read fully covered by what
+    was already revealed changes nothing and is NOT refused (no 'already read' error); a fresh
+    region EXPANDS the same view (both ranges now shown), with the un-read gap labelled as a hole."""
     import tempfile, os as _os
     root = tempfile.mkdtemp(prefix="bigrange_")
-    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(2000))   # 4000 lines (>3000)
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(2000))   # 4000 lines (>cap)
     with open(_os.path.join(root, "big.py"), "w") as _f:
         _f.write(big)
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
            "project_root": root, "files_changed": set(), "step_num": 1}
     try:
         r = _disp("read_file", {"path": "big.py", "start_line": 100, "end_line": 200}, ctx)
-        assert "RANGE" in r and "return 50" in r                 # served the slice
-        assert "big.py" not in ctx.get("view_at", {})            # partial view ≠ full view
+        assert "GROWING VIEW" in r and "return 50" in r          # revealed range shown as real code
+        assert "big.py" not in ctx.get("view_at", {})            # partial view ≠ full view held
+        assert ctx["_served_ranges"]["big.py"] == [(100, 200)]
+        # re-read fully covered by what's revealed → NOT refused, just the same growing view
         covered = _disp("read_file", {"path": "big.py", "start_line": 120, "end_line": 180}, ctx)
-        assert covered.startswith("ℹ") and "already read" in covered   # fully covered → short-circuit
+        assert not covered.lstrip().startswith("✗") and "already read" not in covered
+        assert "GROWING VIEW" in covered and "return 50" in covered
+        assert ctx["_served_ranges"]["big.py"] == [(100, 200)]   # nothing new revealed
+        # a fresh region EXPANDS the one view — both ranges now present + the gap labelled
         fresh = _disp("read_file", {"path": "big.py", "start_line": 900, "end_line": 1000}, ctx)
-        assert "RANGE" in fresh and "return 450" in fresh        # a new region still serves
+        assert "return 50" in fresh and "return 450" in fresh    # both revealed ranges shown
+        assert "not read" in fresh                               # the gap between them is a labelled hole
+        assert ctx["_served_ranges"]["big.py"] == [(100, 200), (900, 1000)]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1449,9 +1457,9 @@ def test_reread_injected_target_shortcircuits():
 
 
 def test_large_file_first_read_is_def_index_not_full_dump():
-    # ckpt-179 CONTRACT: a file over _FULL_VIEW_CAP (1000 lines) is NEVER dumped in full — even on
-    # the FIRST read it comes back as a DEF/CLASS INDEX (names + line numbers, no bodies) + a
-    # "read a range" redirect, so it can't blow gpt-oss-120b's 131072 window. NOT marked viewed.
+    # CONTRACT: a file over _FULL_VIEW_CAP (1000 lines) is NEVER dumped in full — on the FIRST
+    # whole-file read (no ranges revealed yet) it comes back as a DEF/CLASS INDEX (names + line
+    # numbers, no bodies) + a "read a range" redirect. Reads then FILL it IN (accumulating view).
     big = "".join(f"def f{i}():\n    x = 1\n    y = 2\n    return {i}\n" for i in range(300))  # 1200 lines, 300 defs
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
            "project_root": ".", "files_changed": set()}
@@ -1464,7 +1472,7 @@ def test_large_file_first_read_is_def_index_not_full_dump():
 
 
 def test_moderate_file_first_read_serves_full_not_skeleton():
-    # The skeleton trap fix, under the new contract: a MODERATE file (≤ _FULL_VIEW_CAP=3000
+    # The skeleton trap fix, under the new contract: a MODERATE file (≤ _FULL_VIEW_CAP=1000
     # lines) read WITHOUT a range serves the REAL, line-numbered content — NOT a skeleton — so
     # the coder sees real indentation (guessing it wrong → IndentationError was the a26c325b /
     # 395e5e20 budget-exhaust on the ckpt-165 night run). Tested on the FIRST read (a re-read of
@@ -1498,7 +1506,7 @@ def test_big_file_edit_invalidates_served_ranges_and_reread_serves_fresh():
     # the CURRENT def-index, never the no-body refusal.
     import tempfile, os as _os
     root = tempfile.mkdtemp(prefix="bigreread_")
-    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines (>cap)
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines (>cap=1000)
     with open(_os.path.join(root, "big.py"), "w") as _f:
         _f.write(big)
     ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
@@ -1522,6 +1530,66 @@ def test_big_file_edit_invalidates_served_ranges_and_reread_serves_fresh():
         whole = _disp("read_file", {"path": "big.py"}, ctx)
         assert "TOO LARGE" in whole and "def f0" in whole
         assert "ALREADY have" not in whole
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_accumulated_view_renders_holes_between_revealed_ranges():
+    # ckpt-196: the growing view shows revealed ranges as real code, with the un-read GAP between
+    # them rendered as a labelled hole that lists the defs inside it — clear even with holes.
+    from core.native_tools import _accumulated_view
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines
+    ctx = {"file_contents": {"big.py": big}, "_served_ranges": {"big.py": [(3, 4), (101, 102)]}}
+    v = _accumulated_view(ctx, "big.py", big)
+    assert "GROWING VIEW" in v
+    assert "return 1" in v and "return 50" in v          # both revealed ranges shown as real code
+    assert "not read" in v                               # the gap between them is a labelled hole
+    assert "contains" in v and "5:def f2" in v           # the hole lists the defs inside it
+
+
+def test_merge_ranges_combines_overlapping_and_adjacent():
+    from core.native_tools import _merge_ranges
+    assert _merge_ranges([(10, 20), (15, 25)]) == [(10, 25)]      # overlap
+    assert _merge_ranges([(10, 20), (21, 30)]) == [(10, 30)]      # adjacent (touching) → one block
+    assert _merge_ranges([(30, 40), (10, 20)]) == [(10, 20), (30, 40)]  # sorted, disjoint
+    assert _merge_ranges([(5, 5), ("bad", None), (5, 5)]) == [(5, 5)]   # dedup + skip malformed
+
+
+def test_supersede_prior_file_views_leaves_one_live_view():
+    # ckpt-196: a read of a >cap file returns the ONE growing view; older views (and prior KEPT
+    # blocks) of THAT file collapse to a pointer, the newest stays, OTHER files are untouched.
+    from core.native_tools import _supersede_prior_file_views
+    msgs = [
+        {"role": "tool", "content": "=== VIEW: a/big.py — 2000 lines — GROWING VIEW (5) ===\n1 ⇥0|x"},
+        {"role": "tool", "content": "=== VIEW: a/other.py — 50 lines (FULL file) ===\nstuff"},
+        {"role": "tool", "content": "⟪KEPT only lines 10-20 of a/big.py (you called keep)…⟫\nkept"},
+        {"role": "tool", "content": "=== VIEW: a/big.py — 2000 lines — GROWING VIEW (40) ===\nNEWEST"},
+    ]
+    n = _supersede_prior_file_views(msgs, "a/big.py")
+    assert n == 2                                              # the old view + the KEPT block
+    assert "⟪earlier view of a/big.py" in msgs[0]["content"]
+    assert "⟪earlier view of a/big.py" in msgs[2]["content"]
+    assert "stuff" in msgs[1]["content"] and "⟪earlier" not in msgs[1]["content"]  # other file untouched
+    assert "NEWEST" in msgs[3]["content"]                      # the newest (last) view is left intact
+
+
+def test_keep_sets_served_ranges_to_kept():
+    # ckpt-196: keep is the trim for the growing view — it sets the revealed ranges to exactly
+    # what's kept, so a later read shows only the kept ranges (+ new) and the rest is a hole.
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="keepacc_")
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines (>cap)
+    with open(_os.path.join(root, "big.py"), "w") as _f:
+        _f.write(big)
+    ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "step_num": 1}
+    try:
+        _disp("read_file", {"path": "big.py", "start_line": 3, "end_line": 8}, ctx)
+        _disp("read_file", {"path": "big.py", "start_line": 100, "end_line": 110}, ctx)
+        assert ctx["_served_ranges"]["big.py"] == [(3, 8), (100, 110)]
+        r = _disp("keep", {"path": "big.py", "ranges": [[100, 110]]}, ctx)
+        assert r.startswith("✓")
+        assert ctx["_served_ranges"]["big.py"] == [(100, 110)]   # revealed trimmed to kept
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
