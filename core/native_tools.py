@@ -648,6 +648,45 @@ def _merge_ranges(ranges):
     return out
 
 
+def _resync_served_ranges_after_edit(ctx: dict, path: str, before: str, after: str) -> None:
+    """ROOT FIX (ckpt-205): keep the growing view ALIVE across an edit instead of discarding it.
+    ckpt-194 popped _served_ranges[path] on every edit (to avoid stale line numbers), but that
+    threw away the coder's whole accumulated view — so after each edit it had to re-read every
+    region for the NEXT edit (a26: 79 reads / 10 edits). Instead, SHIFT the revealed ranges by the
+    edit's net line delta so they keep pointing at the same logical code: ranges entirely ABOVE the
+    change are unchanged; ranges BELOW shift by delta; a range SPANNING the change has its end moved
+    by delta. The view then re-renders (post-edit content) showing the same regions, edit included —
+    no re-read needed. For a file NOT in growing-view mode (injected/small), fall back to the old
+    pop (its _served_ranges aren't the live navigation surface)."""
+    rngs = ctx.get("_served_ranges", {}).get(path)
+    if not rngs or path not in ctx.get("_accum", set()):
+        ctx.get("_served_ranges", {}).pop(path, None)   # non-growing-view file → old behavior
+        return
+    _bl, _al = before.split("\n"), after.split("\n")
+    delta = len(_al) - len(_bl)
+    # first line that differs = where the edit starts (robust; no hunk parsing)
+    L = 1
+    for i in range(min(len(_bl), len(_al))):
+        if _bl[i] != _al[i]:
+            L = i + 1
+            break
+    else:
+        L = min(len(_bl), len(_al)) + 1
+    total = len(_al) - (1 if (_al and _al[-1] == "") else 0)
+    out = []
+    for (s, e) in rngs:
+        if e < L:
+            ns, ne = s, e                       # entirely above the change
+        elif s > L:
+            ns, ne = s + delta, e + delta       # entirely below
+        else:
+            ns, ne = s, e + delta               # spans the change → extend end
+        ns, ne = max(1, ns), min(max(1, total), ne)
+        if ns <= ne:
+            out.append((ns, ne))
+    ctx["_served_ranges"][path] = _merge_ranges(out)
+
+
 def _def_lines(content: str):
     """[(lineno, 'kind name'), …] for every def/class, sorted by line — powers the hole
     summaries in the accumulating view (which defs sit in an un-read gap). Never raises."""
@@ -830,7 +869,11 @@ async def _do_read(args: dict, ctx: dict) -> str:
     # to a 1800s timeout: a26 read urls.py 69× / edited 9×.) Files the coder already holds in full
     # (view_at set) keep the existing short-circuit path below — re-serving them as a def-index
     # would DOWNGRADE a view it already has.
-    if path not in ctx.get("view_at", {}):
+    # A file ALREADY in growing-view mode (_accum) keeps using this handler even after an edit
+    # sets view_at (ckpt-205) — otherwise the post-edit read fell through to the slice path and
+    # the coder lost its accumulated view, re-reading every region per edit. Injected-in-full
+    # files (in view_at, NOT in _accum) still take the short-circuit path below.
+    if (path in ctx.get("_accum", set())) or (path not in ctx.get("view_at", {})):
         _bcur = ctx.get("file_contents", {}).get(path)
         if not (_bcur and _bcur.strip()):
             _bsb = ctx.get("sandbox")
@@ -841,6 +884,7 @@ async def _do_read(args: dict, ctx: dict) -> str:
         if isinstance(_bcur, str) and _bcur.strip():
             _bnl = _bcur.count("\n") + (0 if _bcur.endswith("\n") else 1)
             if _bnl > _FULL_VIEW_CAP:
+                ctx.setdefault("_accum", set()).add(path)   # growing-view mode (survives edits)
                 if s is not None and e is not None:
                     try:
                         s_i, e_i = int(s), int(e)
@@ -1241,12 +1285,10 @@ def _do_replace(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
-        # A big-file edit shifts the line numbers at/below it, so EVERY range we previously
-        # served for this file may now be stale. Drop the served-range cache so a range
-        # re-read serves FRESH current content instead of a stale "you already read a-b"
-        # short-circuit (the a26 reject-loop→timeout root cause — the coder copied pre-edit
-        # lines that no longer matched). keep-validation still works via view_at (set just below).
-        ctx.get("_served_ranges", {}).pop(path, None)
+        # ckpt-205: keep the growing view alive across the edit by SHIFTING the revealed ranges by
+        # the line delta (ckpt-194 popped them, which discarded the coder's whole accumulated view
+        # and forced a re-read before every subsequent edit — the 79-reads/10-edits storm root).
+        _resync_served_ranges_after_edit(ctx, path, before or "", result[path])
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
@@ -1809,12 +1851,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
-        # A big-file edit shifts the line numbers at/below it, so EVERY range we previously
-        # served for this file may now be stale. Drop the served-range cache so a range
-        # re-read serves FRESH current content instead of a stale "you already read a-b"
-        # short-circuit (the a26 reject-loop→timeout root cause — the coder copied pre-edit
-        # lines that no longer matched). keep-validation still works via view_at (set just below).
-        ctx.get("_served_ranges", {}).pop(path, None)
+        # ckpt-205: keep the growing view alive across the edit by SHIFTING the revealed ranges by
+        # the line delta (ckpt-194 popped them, which discarded the coder's whole accumulated view
+        # and forced a re-read before every subsequent edit — the 79-reads/10-edits storm root).
+        _resync_served_ranges_after_edit(ctx, path, before or "", result[path])
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         # Hand back the before/after diff with the file's CURRENT line numbers, so
@@ -2945,12 +2985,17 @@ def finalize_coder_system(system: str) -> str:
 async def call_with_native_tools(model_id: str, system: str, user_content: str,
                                  ctx: dict, max_rounds: int = 40,
                                  max_tokens: int = 32000,
-                                 max_history_chars: int = 400_000) -> dict:
+                                 max_history_chars: int = 400_000,
+                                 deadline: "float | None" = None) -> dict:
     """Run a structured tool-use coding loop. `ctx` carries the mutable state the
     tools act on: {file_contents, sandbox, project_root, viewed_versions,
     purpose_map, detailed_map}. Edits are applied to ctx['file_contents'] + the
     sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
-    reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
+    reason ∈ {finished, no-tool-call, budget-exhausted, time-budget, read-budget, …}.
+    `deadline` (monotonic seconds, A2/ckpt-205): when set, the loop stops cleanly at
+    that wall-clock — shared across the per-step coder chain so a slow big-file step
+    can't consume the whole instance timeout (the #1 fresh12 timeout cause)."""
+    import time
     short = model_id.split('/')[-1]
     # System-prompt finalization (env-gated appends) lives in finalize_coder_system so the render
     # harness sees the IDENTICAL final system (ckpt-197, CLAUDE.md doctrine: no audited/live drift).
@@ -2962,6 +3007,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
     final = ""
     reason = "budget-exhausted"
     rnd = 0
+    _reads_no_edit = 0        # A1 (ckpt-205): read/lookup ops since the last successful edit while
+    _read_spin_nudged = False # NO edit has landed yet — bounds the pre-edit read-storm (a26/f327)
     _fail_counts: dict = {}   # (tool, raw_args) → consecutive-reject count (audit #46)
     _total_rejects = 0        # TOTAL ✗ this step — backstop for the varied-reject evasion
                               # of _fail_counts (a coder that tweaks args each round never
@@ -3007,6 +3054,14 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 "import, a typo.)")
         return {"role": "user", "content": body}
     for rnd in range(1, max_rounds + 1):
+        # A2 (ckpt-205): wall-clock deadline shared across the step's coder chain — stop CLEANLY
+        # with whatever edits landed rather than getting hard-killed by the instance timeout
+        # mid-edit (the #1 fresh12 timeout cause: 40 rounds × chain × steps was unbounded in time).
+        if deadline is not None and time.monotonic() > deadline:
+            reason = "time-budget"
+            warn(f"  [native:{short}] hit the wall-clock budget at round {rnd} "
+                 f"({len(ctx.get('files_changed', set()))} file(s) edited) — stopping cleanly.")
+            break
         ctx["round"] = rnd   # so tools can stamp diffs/views with WHEN they happened
         messages = _trim_history(messages, max_history_chars, model_id)
         try:
@@ -3197,6 +3252,14 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     _stuck = True
             else:
                 _fail_counts.pop((name, raw_args), None)   # success clears the streak
+            # A1 (ckpt-205): track read/lookup ops since the last successful edit, to bound the
+            # pre-edit read-storm. A successful edit resets it; a read/lookup increments it.
+            if (name in ("edit_file", "replace_lines", "create_file")
+                    and isinstance(result_str, str) and result_str.startswith("✓")):
+                _reads_no_edit = 0
+            elif name in ("read_file", "search_text", "find_refs", "find_callers",
+                          "file_purpose", "semantic_search", "depends_on", "list_dir", "batch"):
+                _reads_no_edit += 1
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
             # SUPERSEDED marker: once an edit LANDS, mark any earlier read_file view
@@ -3268,6 +3331,25 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     status(f"  [native:{short}] round {rnd}: trace citations not "
                            f"grounded — asked to re-cite real lines")
                     continue
+        # A1 read-spin backstop (ckpt-205): only while NO edit has landed (a productive multi-edit
+        # step is never touched — that path is bounded by A2's wall-clock instead). Soft nudge at
+        # 12 reads-with-no-edit, hard stop at 20 (clearly stuck exploring, e.g. a26/f327 pre-edit).
+        if not ctx.get("files_changed"):
+            if _reads_no_edit >= 20:
+                reason = "read-budget"
+                warn(f"  [native:{short}] {_reads_no_edit} reads/lookups with ZERO edits — "
+                     f"stuck exploring; stopping for fallover.")
+                break
+            if _reads_no_edit >= 12 and not _read_spin_nudged:
+                _read_spin_nudged = True
+                messages.append({"role": "user", "content":
+                    f"⚠ You've made {_reads_no_edit} reads/lookups but NOT ONE edit yet. You have "
+                    f"enough to act — STOP exploring and edit_file from the view you hold (copy "
+                    f"`old` verbatim with its `LINENO ⇥INDENT|`). If a region you need is in a "
+                    f"`⋯ not read ⋯` gap, read ONLY that one range, then edit. Don't re-read what "
+                    f"you already have."})
+                status(f"  [native:{short}] round {rnd}: {_reads_no_edit} reads, 0 edits — nudging to edit")
+                continue
         if _stuck:
             reason = "stuck-repeating"
             break

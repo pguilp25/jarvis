@@ -1495,15 +1495,11 @@ def test_moderate_file_first_read_serves_full_not_skeleton():
 
 
 def test_big_file_edit_invalidates_served_ranges_and_reread_serves_fresh():
-    # a26 root cause (ckpt-194): on a >cap file, after an edit shifts the line numbers, the coder
-    # needs fresh content for its NEXT edit site — but the re-read short-circuits assumed
-    # "viewed == holds real content", which is FALSE for a >cap file (it only ever held a def-index
-    # skeleton + the ranges/diffs it explicitly saw). So:
-    #   (A) a RANGE re-read of a previously-served range got a STALE "you already read a-b" refusal;
-    #   (B) a WHOLE-file re-read got a NO-BODY "you already have it" message.
-    # The coder read both as "the system returns no content", GUESSED line content → reject loop →
-    # 1800s timeout. Fix A: edit clears _served_ranges[path]. Fix B: a >cap whole re-read serves
-    # the CURRENT def-index, never the no-body refusal.
+    # ckpt-194 → SUPERSEDED by ckpt-205. ckpt-194 CLEARED _served_ranges on edit (to avoid stale
+    # ranges) but that discarded the coder's accumulated view → re-read storm. ckpt-205 instead
+    # SHIFTS the ranges by the edit's line delta and keeps the file in growing-view mode, so the
+    # view SURVIVES the edit (no re-read needed) and a re-read is never the stale "already read"
+    # refusal nor a no-body "you already have it".
     import tempfile, os as _os
     root = tempfile.mkdtemp(prefix="bigreread_")
     big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines (>cap=1000)
@@ -1513,22 +1509,23 @@ def test_big_file_edit_invalidates_served_ranges_and_reread_serves_fresh():
            "project_root": root, "files_changed": set(), "round": 3, "step_num": 1,
            "_first_seen": {"big.py": big}}
     try:
-        # 1) a range read of a >cap file caches the served range
+        # 1) a range read of a >cap file reveals it + enters growing-view mode
         rng = _disp("read_file", {"path": "big.py", "start_line": 3, "end_line": 8}, ctx)
         assert "def f1" in rng
-        assert ctx["_served_ranges"]["big.py"]                       # range cached
-        # 2) edit a line inside that range
+        assert ctx["_served_ranges"]["big.py"] == [(3, 8)]
+        # 2) edit a line inside that range (delta 0 → range unchanged)
         out = _disp("edit_file", {"path": "big.py", "hunks": [
             {"start_line": 4, "old": ["    return 1"], "new": ["    return 111"]}]}, ctx)
         assert out.startswith("✓"), out
-        # Fix A: the edit invalidates the served-range cache for this file
-        assert not ctx.get("_served_ranges", {}).get("big.py")
-        # 3) a RANGE re-read of the same span is no longer the stale "you already read a-b" refusal
+        # ckpt-205: the edit SHIFTS/keeps the revealed range (does NOT clear it)
+        assert ctx["_served_ranges"]["big.py"] == [(3, 8)]
+        # 3) a RANGE re-read of the same span is not the stale "you already read a-b" refusal
         rng2 = _disp("read_file", {"path": "big.py", "start_line": 3, "end_line": 8}, ctx)
         assert "you already read" not in rng2 and not rng2.lstrip().startswith("ℹ")
-        # 4) Fix B: a WHOLE-file re-read serves the CURRENT def-index, not a no-body "ALREADY have"
+        # 4) a WHOLE-file re-read serves the GROWING VIEW (revealed region + its edit), never a
+        # no-body "ALREADY have" — the coder keeps its accumulated view across the edit
         whole = _disp("read_file", {"path": "big.py"}, ctx)
-        assert "TOO LARGE" in whole and "def f0" in whole
+        assert "GROWING VIEW" in whole and "return 111" in whole
         assert "ALREADY have" not in whole
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -1847,3 +1844,49 @@ def test_indent_retry_covers_col0_statement_and_no_leak_on_reject():
         "old": ["3 ⇥4|    return msg + name"], "new": ["4|return ("]}, ctx2))
     assert r2.startswith("✗"), r2
     assert ctx2["file_contents"]["m.py"] == src, "LEAK: rejected content left in file_contents"
+
+
+def test_growing_view_survives_edits_no_reread_storm():
+    # ROOT FIX (ckpt-205): the 79-reads/10-edits storm cause was ckpt-194 POPPING the file's
+    # revealed ranges on every edit — the coder lost its accumulated view and re-read every region
+    # before each subsequent edit. Now the ranges SHIFT (not cleared) and the file stays in
+    # growing-view mode across edits, so a later read of a NEW region still carries the earlier one.
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="growpersist_")
+    big = "".join(f"def f{i}(x):\n    return x + {i}\n\n" for i in range(700))   # ~2100 lines (>cap)
+    with open(_os.path.join(root, "u.py"), "w") as _f:
+        _f.write(big)
+    ctx = {"file_contents": {"u.py": big}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "step_num": 1, "view_at": {},
+           "_first_seen": {"u.py": big}}
+    try:
+        _disp("read_file", {"path": "u.py", "start_line": 1300, "end_line": 1320}, ctx)
+        assert ctx["_served_ranges"]["u.py"] == [(1300, 1320)]
+        assert "u.py" in ctx.get("_accum", set())              # growing-view mode
+        # edit a line in the revealed region (same line count → delta 0)
+        out = _disp("edit_file", {"path": "u.py", "start_line": 1301,
+                                  "old": ["1301 ⇥4|    return x + 433"], "new": ["4|    return x + 999"]}, ctx)
+        assert out.startswith("✓"), out
+        assert ctx["_served_ranges"].get("u.py") == [(1300, 1320)]   # SHIFTED/kept, NOT popped
+        # read a NEW region — the view must STILL carry the first region (the edit), no re-read needed
+        r2 = _disp("read_file", {"path": "u.py", "start_line": 1480, "end_line": 1500}, ctx)
+        assert ctx["_served_ranges"]["u.py"] == [(1300, 1320), (1480, 1500)]
+        assert "GROWING VIEW" in r2                              # growing view still engaged post-edit
+        assert "return x + 999" in r2                            # the earlier region + its edit retained
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_resync_served_ranges_shifts_by_line_delta():
+    from core.native_tools import _resync_served_ranges_after_edit
+    before = "\n".join(f"L{i}" for i in range(1, 301))
+    al = [f"L{i}" for i in range(1, 301)]
+    al[104:104] = ["NEW1", "NEW2", "NEW3"]              # insert after line 104 → L=105, delta +3
+    after = "\n".join(al)
+    ctx = {"_served_ranges": {"f": [(10, 20), (100, 110), (200, 210)]}, "_accum": {"f"}}
+    _resync_served_ranges_after_edit(ctx, "f", before, after)
+    assert ctx["_served_ranges"]["f"] == [(10, 20), (100, 113), (203, 213)]   # above / spans / below
+    # a NON-growing-view file (not in _accum) still gets the old pop behavior
+    ctx2 = {"_served_ranges": {"g": [(1, 5)]}, "_accum": set()}
+    _resync_served_ranges_after_edit(ctx2, "g", "a\n", "a\nb\n")
+    assert "g" not in ctx2["_served_ranges"]

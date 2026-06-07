@@ -451,3 +451,70 @@ def test_loop_batch_runs_lookups_then_edits():
         assert res["done"] is True and res["files_changed"] == [rel]  # then the edit landed
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+# ── A1: read-spin backstop (ckpt-205) ────────────────────────────────────────
+def test_read_spin_backstop_breaks_on_reads_without_edit():
+    # 25 read ops, never an edit → the loop must STOP (reason='read-budget') around 20 reads
+    # instead of burning the whole round budget exploring (the a26/f327 pre-edit storm).
+    ctx, rel, root = _mk_ctx()
+    try:
+        script = [_msg(tool_calls=[_tc(str(i), "read_file", path=rel)]) for i in range(25)]
+        res, model = _run(script, ctx, max_rounds=40)
+        assert res["reason"] == "read-budget", res["reason"]
+        assert not res["files_changed"]                 # nothing edited
+        assert model.calls <= 21                         # stopped ~20, didn't run all 40 rounds
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_read_spin_backstop_not_tripped_once_an_edit_lands():
+    # an edit early resets the counter → many subsequent reads do NOT trip read-budget (a
+    # productive multi-edit step is bounded by the wall-clock A2, never killed by A1).
+    ctx, rel, root = _mk_ctx()
+    try:
+        script = [
+            _msg(tool_calls=[_tc("0", "read_file", path=rel)]),                       # read first
+            _msg(tool_calls=[_tc("e", "replace_lines", path=rel, start_line=2, end_line=2,
+                                 new_content='4|return "hi " + name')]),              # edit lands
+        ] + [_msg(tool_calls=[_tc(str(i), "read_file", path=rel)]) for i in range(25)] \
+          + [_msg(tool_calls=[_tc("d", "finish", summary="done")]),
+             _msg(tool_calls=[_tc("d2", "finish", summary="verified")])]
+        res, model = _run(script, ctx, max_rounds=40)
+        assert res["reason"] != "read-budget", res["reason"]   # the edit reset the spin counter
+        assert res["files_changed"]                            # the edit landed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── A2: wall-clock deadline (ckpt-205) ───────────────────────────────────────
+def test_wall_clock_deadline_stops_cleanly():
+    # a deadline already in the past → the loop stops on the FIRST round with reason='time-budget'
+    # (and never calls the model), so a slow step can't consume the whole instance timeout.
+    import time
+    ctx, rel, root = _mk_ctx()
+    try:
+        script = [_msg(tool_calls=[_tc("1", "read_file", path=rel)])]   # never reached
+        res, model = _run(script, ctx, max_rounds=40, deadline=time.monotonic() - 1)
+        assert res["reason"] == "time-budget", res["reason"]
+        assert model.calls == 0                          # bailed before any model call
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_no_deadline_is_byte_identical_default():
+    # deadline=None (the default) must not change behavior — a normal read→edit→finish still works.
+    ctx, rel, root = _mk_ctx()
+    try:
+        script = [
+            _msg(tool_calls=[_tc("1", "read_file", path=rel)]),
+            _msg(tool_calls=[_tc("2", "replace_lines", path=rel, start_line=2, end_line=2,
+                                 new_content='4|return "hi " + name')]),
+            _msg(tool_calls=[_tc("3", "finish", summary="done")]),
+            _msg(tool_calls=[_tc("3b", "finish", summary="verified")]),
+        ]
+        res, model = _run(script, ctx)                   # no deadline kwarg
+        assert res["reason"] in ("finished", "budget-exhausted")
+        assert res["files_changed"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

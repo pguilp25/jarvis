@@ -10984,6 +10984,24 @@ def _build_file_block(
 _INJECT_BUDGET_CHARS = 160_000   # ~40k tokens; leaves room for system+history+32k output reserve
 
 
+def _implement_deadline():
+    """Monotonic wall-clock deadline for the coder, derived from the per-instance budget
+    swe_bench.py publishes as the ABSOLUTE wall time JARVIS_INSTANCE_DEADLINE (time.time seconds).
+    Recomputed per coder call so every step + fallback link shares ONE shrinking budget — a slow
+    big-file step can't consume the whole instance timeout and get hard-killed mid-edit (A2,
+    ckpt-205, the #1 fresh12 timeout cause). Returns None (no deadline, byte-identical to before)
+    when the env isn't set. Using time.time for the env value makes it correct across the plan
+    time already spent AND across a subprocess boundary; we convert to monotonic here."""
+    import os as _os, time as _t
+    _w = _os.environ.get("JARVIS_INSTANCE_DEADLINE")
+    if not _w:
+        return None
+    try:
+        return _t.monotonic() + max(0.0, float(_w) - _t.time())
+    except (TypeError, ValueError):
+        return None
+
+
 def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
                                   to_create=None, error_feedback=""):
     """Assemble the native coder's (system, user) turn EXACTLY as the live coder sends it.
@@ -12389,7 +12407,8 @@ async def _implement_one_step(
             for _k in ("_served_ranges", "_reread_count", "_kept"):
                 _ctx[_k] = {}
         async def _native_pass(_model):
-            _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx)
+            _r = await call_with_native_tools(_model, _nat_system, _nat_user, _ctx,
+                                              deadline=_implement_deadline())
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
             status(f"  [native:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("native coder step", step=step_num, files=len(_p), reason=_r.get("reason"))

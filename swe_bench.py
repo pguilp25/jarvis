@@ -429,6 +429,13 @@ async def run_one_instance(
             state["forced_complexity"] = 7
             state["project_root"] = str(inst_dir)
 
+            # A2 (ckpt-205): publish an ABSOLUTE wall-clock deadline so the coder stops CLEANLY
+            # ~5min before this hard wait_for kill — flushing whatever edits landed instead of
+            # being killed mid-edit. Margin > the slowest single coder round (~180s) so a round
+            # in flight at the deadline still finishes under the hard cap. Shared across the whole
+            # instance (PLAN+IMPLEMENT) since it's absolute time. (The #1 fresh12 timeout cause.)
+            import os as _os, time as _t
+            _os.environ["JARVIS_INSTANCE_DEADLINE"] = str(_t.time() + max(60, timeout - 300))
             try:
                 state = await asyncio.wait_for(code_agent(state), timeout=timeout)
             except asyncio.TimeoutError:
