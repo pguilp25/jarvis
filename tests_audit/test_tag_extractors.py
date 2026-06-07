@@ -300,3 +300,23 @@ def test_longcat_salvage_other_tools_and_no_range():
         "<longcat_tool_call>REFS: fetch_url</longcat_arg_value></longcat_tool_call>")
     assert "[SEARCH: open_url]" in out and "[REFS: fetch_url]" in out
     assert "longcat" not in out.lower()
+
+
+# ───────────────────── #16 LongCat think-close (ckpt-213) ─────────────────────
+
+from core.tool_call import _strip_think as _st16
+
+
+def test_longcat_think_close_does_not_swallow_trailing_tool_call():
+    # #16: a LongCat model opens [think] but closes with its native </longcat_think>; the trailing
+    # well-formed tool call/STOP must survive (the old [/think]-only close left [think] unclosed →
+    # everything after it was swallowed → the tool fired nothing).
+    t = ("[think]\nNeed current state.\n</longcat_think>\n"
+         "[tool use][KEEP: uri.py 605-612][/tool use]\n[STOP][CONFIRM_STOP]")
+    out = _st16(t)
+    assert "[KEEP: uri.py 605-612]" in out and "[STOP]" in out   # trailing call survives
+    assert "Need current state" not in out                        # reasoning still stripped
+    # plain </think> close on a [think] open also works
+    assert "[CODE: a.py]" in _st16("[think]reasoning</think>[CODE: a.py]")
+    # the canonical [/think] close is unaffected
+    assert "[CODE: b.py]" in _st16("[think]reasoning[/think][CODE: b.py]")

@@ -157,7 +157,11 @@ PLAN_DONE_TAG = re.compile(
 # `[think]` reasoning leaks into the plan body the coder reads. This leniency is
 # kept IN SYNC with _salvage_plan_from_think's regex below: if strip zeroes a
 # plan-inside-`[think]`, salvage must pull it back, so both accept the same close.
-_THINK_CLOSE = r'\[/\s*think\s*[\]>]'
+# Lenient close: `[/think]`, `[/think>`, AND native XML-ish closes `</think>` / `</longcat_think>`
+# (#16, ckpt-213). A LongCat model (owl-alpha) opens with `[think]` but closes with its native
+# `</longcat_think>`; without accepting that, the `[think]` never closes and SWALLOWS the
+# well-formed trailing tool call/STOP that follows it.
+_THINK_CLOSE = r'(?:\[/\s*think\s*[\]>]|</\s*\w*think\s*>)'
 _THINK_BLOCK = re.compile(
     r'(?:<think>.*?</think>|\[think\].*?' + _THINK_CLOSE + r')',
     re.DOTALL | re.IGNORECASE,
@@ -3136,6 +3140,11 @@ async def call_with_tools(
     # file apply successfully?" When the recent N attempts on a file
     # are all failures, we surface a stop-flailing nudge.
     _edit_attempts_per_file: dict[str, list[bool]] = {}
+    # #15 (ckpt-213): files that already got ONE flailing nudge. A SECOND 3-failure streak on the
+    # same file means the advice isn't working — ESCALATE (abort the step in coder mode so the
+    # coder fallover chain swaps models) instead of looping to the round cap (a26 step8: 15 wasted
+    # rounds → NO_PATCH). Planner/reviewer paths (cache_file_reads) never edit, so this is coder-only.
+    _flailed_files: set = set()
 
     # Terms whose SEARCH / REFS / LSP lookup returned NO MATCHES. When the
     # model re-requests one of these (or the cache surfaces it again on
@@ -4275,8 +4284,18 @@ async def call_with_tools(
         # (REPLACE LINES, REVERT then redo, or give up cleanly).
         # Observed: 19-round step-3 loop on domains/prompts.py where
         # the model kept tweaking SEARCH anchors that never matched.
+        _flail_abort = False
         for fp, history in _edit_attempts_per_file.items():
             if len(history) >= 3 and not any(history[-3:]):
+                # #15: a SECOND flail streak on this file in coder mode → the nudges aren't
+                # working; stop burning rounds and abort so the coder chain falls over to another
+                # model (it keeps whatever DID land). Don't escalate in planner/reviewer paths.
+                if fp in _flailed_files and not cache_file_reads:
+                    _flail_abort = True
+                    warn(f"  [{model.split('/')[-1]}] edits on {fp} flailed across multiple "
+                         f"streaks — aborting this step for coder fallover.")
+                    break
+                _flailed_files.add(fp)
                 _last_edit_feedback = (
                     (_last_edit_feedback + "\n\n") if _last_edit_feedback else ""
                 ) + (
@@ -4305,6 +4324,8 @@ async def call_with_tools(
                 # the same trigger — the model gets one strong nudge per
                 # 3-failure streak, not repeated nags.
                 _edit_attempts_per_file[fp] = []
+        if _flail_abort:
+            break   # #15: repeated flailing → abort the step (caller's coder chain falls over)
 
         # Run requested lookups — check cache first
         round_output = ""  # results from THIS round only (for logging)
@@ -4660,7 +4681,15 @@ async def call_with_tools(
         # model writes `16|raise TypeError(other)` and the runtime expands `16|`
         # into 16 spaces — it only has to get the NUMBER right, not type spaces.
         _display_mode = "prefix"
-        def _run_search(tag): return _run_code_searches([tag], _search_root)
+        def _run_search(tag):
+            # #11 (ckpt-213): strip ONE matched pair of surrounding quotes. _strip_label removed
+            # the #label but not quotes, so `[SEARCH: "def run"]` searched the LITERAL `"def run"`
+            # (ripgrep -F, quotes included) → silent 'no matches' → multi-round read-storm. A model
+            # quoting its pattern is common; honor it instead of failing it.
+            t = tag.strip()
+            if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'", '`'):
+                t = t[1:-1].strip()
+            return _run_code_searches([t or tag], _search_root)
         def _run_web(tag):    return _run_web_searches([tag])
         def _run_detail(tag): return _run_detail_lookups([tag], detailed_map, project_root=project_root)
         async def _run_code(tag):
@@ -5205,11 +5234,15 @@ async def call_with_tools(
                             "you still need the info."
                         )
                     else:
+                        # #9 (ckpt-213): don't say a flat "no tool results" — an EDIT this round is
+                        # NOT a lookup result and shows in the EDIT RESULT block at the top, not
+                        # here. The old wording contradicted a same-round "EDIT-FLAILING"/reject and
+                        # made the model think its edit vanished, locking the loop.
                         _past_thinking_parts.append(
-                            "\n(no tool results from this round — either "
-                            "no tools fired, or all results were dropped "
-                            "for budget; see [BUDGET OVERFLOW] above if "
-                            "shown)"
+                            "\n(no LOOKUP results this round — no read/search tools fired (or all "
+                            "were dropped for budget; see [BUDGET OVERFLOW] above if shown). If you "
+                            "made an EDIT this round, its ✓/✗ result is in the EDIT RESULT block at "
+                            "the TOP, not here.)"
                         )
                 _past_thinking_parts.append("")  # blank line between rounds
 
