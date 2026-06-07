@@ -1613,6 +1613,46 @@ def test_shorthand_insert_carries_start_line():
     assert out2.startswith("✓") and ctx2["file_contents"]["m.py"] == ctx["file_contents"]["m.py"]
 
 
+def test_keep_small_file_does_not_dead_end_dropped_region():
+    # bughunt #1/#4 (ckpt-200): keep evicts the file body; a SMALL fully-held file used to keep its
+    # view_at, so a later read of a DROPPED region was refused ("you already hold the whole file")
+    # → the coder could never anchor an edit there → stale-anchor loop → budget exhaust. keep now
+    # drops the fully-held claim, so a dropped region RE-SERVES.
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="keepdead_")
+    src = "\n".join(f"line{i}" for i in range(1, 21)) + "\n"   # 20-line small file
+    with open(_os.path.join(root, "s.py"), "w") as _f:
+        _f.write(src)
+    ctx = {"file_contents": {"s.py": src}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "step_num": 1}
+    try:
+        _disp("read_file", {"path": "s.py"}, ctx)                  # full read → view_at set
+        assert "s.py" in ctx.get("view_at", {})
+        k = _disp("keep", {"path": "s.py", "ranges": [[1, 2]]}, ctx)
+        assert k.startswith("✓")
+        assert "s.py" not in ctx.get("view_at", {})                # fully-held claim dropped
+        r = _disp("read_file", {"path": "s.py", "start_line": 10, "end_line": 12}, ctx)
+        assert not (r.lstrip().startswith("ℹ") and "already" in r)  # NOT refused
+        assert "line10" in r                                       # re-serves the dropped region
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_msg_is_view_of_is_header_precise():
+    # bughunt #15/#16 (ckpt-200): the supersede/keep-eviction loops used a loose `path in content`
+    # test, so a path merely MENTIONED in another file's view (an import line) collapsed THAT file's
+    # view by mistake. _msg_is_view_of is header-precise.
+    from core.native_tools import _msg_is_view_of
+    v = "=== VIEW: a/urls.py — 2000 lines — GROWING VIEW (5) ===\n1 ⇥0|x"
+    assert _msg_is_view_of(v, "a/urls.py")
+    assert not _msg_is_view_of(v, "a/url.py")                  # not a prefix false-match
+    other = "=== VIEW: a/other.py — 10 lines (FULL file) ===\n1 ⇥0|import a.urls  # a/urls.py"
+    assert _msg_is_view_of(other, "a/other.py")
+    assert not _msg_is_view_of(other, "a/urls.py")            # the loose substring bug — must NOT match
+    kept = "⟪KEPT only lines 1-2 of a/urls.py (you called keep)…⟫\nkept"
+    assert _msg_is_view_of(kept, "a/urls.py") and not _msg_is_view_of(kept, "a/other.py")
+
+
 def test_edit_diff_stamped_with_round_when_no_step():
     src = "a = 1\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},

@@ -709,6 +709,19 @@ def _accumulated_view(ctx: dict, path: str, content: str) -> str:
     return "\n".join(out)
 
 
+def _msg_is_view_of(content, path: str) -> bool:
+    """True iff this tool-message content is a VIEW/Code block (or a prior KEPT block) of EXACTLY
+    `path`. HEADER-PRECISE (`=== VIEW: {path} —`, `=== Code: {path} `, `⟪KEPT … of {path}`) so a
+    path merely MENTIONED inside another file's view (an import line) does NOT false-match — the
+    loose `path in content` test collapsed unrelated files' views (bughunt #15/#16). Single source
+    of truth for the supersede / keep-eviction / read-replace loops."""
+    if not isinstance(content, str):
+        return False
+    return (f"=== VIEW: {path} —" in content
+            or f"=== Code: {path} " in content
+            or ("⟪KEPT only lines" in content and f"of {path} " in content))
+
+
 def _supersede_prior_file_views(messages: list, path: str) -> int:
     """Collapse every EARLIER tool-message view of `path` (a plain view OR a prior KEPT block) to a
     one-line pointer, leaving the newest, most-complete view (messages[-1]) as the only live copy —
@@ -722,8 +735,7 @@ def _supersede_prior_file_views(messages: list, path: str) -> int:
             continue
         if "⟪earlier view" in _c:
             continue
-        if (f"=== VIEW: {path} —" in _c or f"=== Code: {path}" in _c
-                or ("⟪KEPT only lines" in _c and path in _c)):
+        if _msg_is_view_of(_c, path):
             _m["content"] = (f"⟪earlier view of {path} — superseded by your newer, more "
                              f"complete view of it below; scroll down.⟫")
             n += 1
@@ -1809,6 +1821,9 @@ def _do_edit(args: dict, ctx: dict) -> str:
             if isinstance(ctx.get("viewed_versions"), dict):
                 ctx["viewed_versions"][k] = v
             ctx.setdefault("files_changed", set()).add(k)
+            ctx.get("_served_ranges", {}).pop(k, None)  # ckpt-200 #5: edit shifted lines → drop
+            # the resolved key's stale revealed-ranges too (the main-path ckpt-194 fix missed this
+            # suffix-resolved net), else a range re-read short-circuits on pre-edit content.
             _note_view(ctx, k)   # keep view_at in step with the suffix-resolved key
         return (f"✓ Applied (your path '{path}' resolved to {', '.join(_changed)}). "
                 f"Use that exact path for further edits.")
@@ -2072,6 +2087,15 @@ def _do_keep(args: dict, ctx: dict) -> str:
     # REVEALED ranges to exactly what's kept, so a later read of this file shows only the kept
     # ranges (+ whatever it newly reads) + labelled holes. Other files' views are untouched.
     ctx.setdefault("_served_ranges", {})[path] = _merge_ranges(norm)
+    # ckpt-200 (bughunt #1/#4): keep evicts the file body from context (the loop renders only the
+    # kept ranges). For a SMALL fully-held file, view_at + viewed_versions still claimed "you hold
+    # the WHOLE file", so every later read of a DROPPED region was refused ("you already hold it")
+    # → the coder could never anchor an edit on a dropped line → stale-anchor loop → budget
+    # exhaust (the exact dead-end keep exists to avoid). Drop that "fully held" claim so a later
+    # read RE-SERVES the region. No-op for a big file (never in view_at — it uses the growing view).
+    ctx.get("view_at", {}).pop(path, None)
+    if isinstance(ctx.get("viewed_versions"), dict):
+        ctx["viewed_versions"].pop(path, None)
     _rng = ", ".join(f"{s}-{e}" for s, e in norm)
     return (f"✓ keep: keeping lines {_rng} of {path}; the rest of its view is dropped from your "
             f"context (read_file a range to bring any of it back).")
@@ -3145,8 +3169,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     _when = ctx.get("view_at", {}).get(_ep, "a later round")
                     for _m in messages[:-1]:
                         _c = _m.get("content")
-                        if (_m.get("role") == "tool" and isinstance(_c, str)
-                                and ("=== Code:" in _c or "=== VIEW:" in _c) and _ep in _c
+                        if (_m.get("role") == "tool" and _msg_is_view_of(_c, _ep)
                                 and "⟪SUPERSEDED" not in _c):
                             _m["content"] = (
                                 f"⟪SUPERSEDED — {_ep} was edited after this read ({_when}). "
@@ -3166,8 +3189,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                     _rngs = ", ".join(f"{s}-{e}" for s, e in _kr)
                     for _m in messages:
                         _c = _m.get("content")
-                        if (_m.get("role") == "tool" and isinstance(_c, str)
-                                and ("=== VIEW:" in _c or "=== Code:" in _c) and _kp in _c
+                        if (_m.get("role") == "tool" and _msg_is_view_of(_c, _kp)
                                 and "⟪KEPT" not in _c):
                             _m["content"] = (
                                 f"⟪KEPT only lines {_rngs} of {_kp} (you called keep); the rest "

@@ -8939,9 +8939,12 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # Layer-2 plan with real structure if the merger gave us thinking
     # instead of a plan. Costs nothing if the merger DID emit a plan.
     def _strip_think(t: str) -> str:
-        t = re.sub(r"\[think\][\s\S]*?\[/think\]", "", t, flags=re.IGNORECASE)
-        t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.IGNORECASE)
-        return re.sub(r"\n{3,}", "\n\n", t).strip()
+        # DELEGATE to the canonical stripper (core.tool_call._strip_think) so this never drifts
+        # again. ckpt-200: this local copy used the strict `[/think]` close and so MISSED the
+        # lenient `[/think>` form ckpt-193 added — owl-alpha (the merger) emits `[/think>`, so its
+        # whole reasoning dump leaked into best_plan the coder reads. Keep the blank-line collapse.
+        from core.tool_call import _strip_think as _canon_strip
+        return re.sub(r"\n{3,}", "\n\n", _canon_strip(t)).strip()
 
     # A plan DESCRIBES the change in prose; it must never carry live protocol /
     # tool directives. Drop those lines so an exploration transcript (all
