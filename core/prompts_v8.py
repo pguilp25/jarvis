@@ -238,11 +238,11 @@ The header is silent when the file is being read for the first
 time (sandbox = disk). If your session has already edited the
 file, the header will read `… from sandbox (edited)`.
 
-Files > 8000 lines come back as `(N lines — SKELETON ONLY)` with
-top-level defs only; follow up with `[KEEP:]` or `[VIEW:]` for the
-ranges you need. Files between 1500 and 8000 lines return in full
-with a small informational note suggesting `[KEEP:]` if you only
-need a specific region.
+Files > 1500 lines come back as `(N lines — SKELETON ONLY)` with
+top-level defs/classes only; follow up with `[VIEW: path L-R]` (or
+`[KEEP:]`) for the ranges you need — the skeleton's line numbers tell
+you where to look. Files ≤ 1500 lines return in full (with a small
+note suggesting `[KEEP:]` above ~700 lines if you only need a region).
 
 The `|appears N (#tag, ...)` annotation on a `def` line means the
 symbol is shared. See BLAST RADIUS above.
@@ -950,8 +950,8 @@ See SYSTEM RUNTIME / THINK INTERLEAVED above. Planner-specific cues:
 ## How to read code
 
 Use `[REFS:]` to locate a symbol, then `[CODE:]` to read it. For
-files over 8000 lines, `[CODE:]` returns a skeleton — follow up
-with `[KEEP: path L-R]` for the specific ranges you need.
+files over 1500 lines, `[CODE:]` returns a skeleton — follow up
+with `[VIEW: path L-R]` (or `[KEEP: path L-R]`) for the ranges you need.
 `[VIEW: path L-R]` reads a range; `[VIEW: path L]` reads ~80
 lines centered on L (symmetric ±40 window — exact line numbers,
 no scope extension).
@@ -1833,9 +1833,9 @@ against the contract:
       ONE post-edit `[CODE:]` / `[VIEW:]` to verify the change
       landed. If you need more, you probably need to take a step
       back in [think], not read more.
-    - Files > 8000 lines: `[CODE:]` returns a skeleton. Follow
-      up with `[KEEP: path L-R]` for the ranges you'll edit;
-      total kept ≤ 300 lines.
+    - Files > 1500 lines: `[CODE:]` returns a skeleton. Follow
+      up with `[VIEW: path L-R]` / `[KEEP: path L-R]` for the ranges
+      you'll edit; total kept ≤ 300 lines.
     - `[KEEP:]` works ON BOTH (a) files you've read this session
       via `[CODE:]`, AND (b) files arriving in `[FILE CONTENT]` —
       treat FILE CONTENT as an implicit CODE read. So if FILE

@@ -3298,6 +3298,11 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 status(f"  [native:{short}] round {rnd}: empty-turn "
                        + (f"(finish_reason={_fr}) " if _fr else "")
                        + f"— retrying with a forced tool call ({_empty_retries}/2)")
+                # #24 (ckpt-216): emit a trace row for the empty-turn round so it isn't a SILENT
+                # gap in the round sequence — the wasted-round churn must be auditable offline.
+                round_trace({"phase": "coder", "step": ctx.get("step_num"), "round": rnd,
+                             "model": short, "event": "empty-turn",
+                             "reasoning": (_reason or "")[:5000], "io": []})
                 continue
             # An empty assistant turn (no tool calls, no content) is a STALL, not
             # a finish — distinguish so the workflow can tell "model did nothing"
@@ -3411,7 +3416,10 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "") if isinstance(tc, dict) else "",
                              "content": result_str})
             _trace_io.append({"tool": name, "args": args,
-                              "result": (result_str if isinstance(result_str, str) else str(result_str))[:3000]})
+                              # #25 (ckpt-216): 3000 cut a 55-line file VIEW mid-word ("impo…"),
+                              # hiding the region the model actually saw — defeats offline audit.
+                              # 12000 holds a normal view; truly huge views still cap (gated env).
+                              "result": (result_str if isinstance(result_str, str) else str(result_str))[:12000]})
             # SUPERSEDED marker: once an edit LANDS, mark any earlier read_file view
             # of that file in the history — but do NOT tell the coder to re-read (the
             # old blanket "⟪STALE — read it again⟫" banner is exactly what drove the
