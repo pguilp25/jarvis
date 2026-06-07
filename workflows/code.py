@@ -9098,7 +9098,18 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # surfaced. Surface any gaps as a note the coder sees (we don't force scope
     # creep — the coder confirms change-or-skip). All data is already gathered;
     # fully guarded so it can NEVER break planning.
+    #
+    # ckpt-195: DISABLED BY DEFAULT (re-enable with JARVIS_SCOPE_BACKSTOP=1). This backstop
+    # injected REQUIRED-SCOPE gap notes + synthesized coverage STEPs for files the plan
+    # "omitted" — a deterministic crutch that masked the planner's TRUE scope. With the
+    # planner reflexes + [think]-close fix now landing correct scope unaided (a26 scopes all
+    # 4 gold files on its own), we want each run to reflect the PLANNER'S output, not the
+    # backstop's. Bail before any cross-check runs → the plan reaches the coder verbatim.
+    class _ScopeBackstopOff(Exception):
+        pass
     try:
+        if os.environ.get("JARVIS_SCOPE_BACKSTOP", "0") != "1":
+            raise _ScopeBackstopOff()
         from core.plan_scope import (imported_modules, modules_to_files,
             referenced_files_outside_scope, completeness_lint, format_plan_gaps,
             rank_relevant_tests, imported_symbols, missing_symbols)
@@ -9385,6 +9396,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             warn(f"  coverage enforcement: +{len(_cov_added)} STEP(s) for ≥2-consensus "
                  f"file(s) the merge left unstepped: {', '.join(_cov_added)}")
             _wlog.phase_warn("coverage steps added", files=",".join(_cov_added))
+    except _ScopeBackstopOff:
+        pass   # disabled by default (ckpt-195) — plan reaches the coder as the merger wrote it
     except Exception as _sce:
         warn(f"  plan-scope backstop skipped: {str(_sce)[:120]}")
 
