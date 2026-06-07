@@ -62,6 +62,11 @@ def round_trace(record: dict):
         return
     try:
         import json
+        # ckpt-223: stamp the instance id (set per-instance by swe_bench) so a multi-instance trace
+        # splits cleanly per instance — without it, all instances' step-1 rounds merge together.
+        _iid = os.environ.get("JARVIS_INSTANCE_ID")
+        if _iid and isinstance(record, dict) and "instance" not in record:
+            record = {"instance": _iid, **record}
         with open(_p, "a", encoding="utf-8") as _f:
             _f.write(json.dumps(record, default=str)[:200_000] + "\n")
     except Exception:

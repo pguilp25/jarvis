@@ -436,6 +436,8 @@ async def run_one_instance(
             # instance (PLAN+IMPLEMENT) since it's absolute time. (The #1 fresh12 timeout cause.)
             import os as _os, time as _t
             _os.environ["JARVIS_INSTANCE_DEADLINE"] = str(_t.time() + max(60, timeout - 300))
+            _os.environ["JARVIS_INSTANCE_ID"] = iid   # ckpt-223: tag round-trace rows per instance
+                                                       # so a multi-instance trace splits cleanly
             try:
                 state = await asyncio.wait_for(code_agent(state), timeout=timeout)
             except asyncio.TimeoutError:
