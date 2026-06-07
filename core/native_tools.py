@@ -834,6 +834,34 @@ def _json_keep_evict(messages: list, path: str, kept_render: str, rngs: str) -> 
     return n
 
 
+def _json_supersede_file_views(messages: list, path: str) -> int:
+    """JSON-ops analog of _supersede_prior_file_views (ckpt-219). Reads are batched into 'RESULTS of
+    your ops' USER turns, so the native loop's per-tool-message collapse can't run — and the full
+    growing-view of `path` was re-emitted and KEPT every round (a26 json step1: ~8 near-identical
+    copies of the same ~180-line block → quadratic context blowup → the dominant 1800s-timeout
+    driver). Collapse the read_file VIEW segment of `path` in EVERY RESULTS turn EXCEPT the most
+    recent to a one-line pointer, so exactly ONE live view per file remains. Surgical content-swap
+    on existing user turns (no add/remove → API pairing intact). Returns the count collapsed."""
+    seg = re.compile(r'(── op\[\d+\] read_file\([^\n]*' + re.escape(path)
+                     + r'[^\n]*──\n)(.*?)(?=\n── op\[|\Z)', re.DOTALL)
+    idxs = [i for i, m in enumerate(messages)
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and "── op[" in m["content"] and ("=== VIEW: " + path) in m["content"]]
+    if len(idxs) <= 1:
+        return 0
+    ptr = (f"⟪earlier view of {path} — superseded by your newer, more complete view of it below; "
+           f"scroll down. read_file a range to bring any region back.⟫\n")
+    n = 0
+    for i in idxs[:-1]:                     # keep ONLY the most recent (idxs[-1])
+        _c = messages[i]["content"]
+        _new = seg.sub(lambda mm: (mm.group(1) + ptr) if ("=== VIEW: " + path) in mm.group(2)
+                       else mm.group(0), _c)
+        if _new != _c:
+            messages[i]["content"] = _new
+            n += 1
+    return n
+
+
 def _supersede_prior_file_views(messages: list, path: str) -> int:
     """Collapse every EARLIER tool-message view of `path` (a plain view OR a prior KEPT block) to a
     one-line pointer, leaving the newest, most-complete view (messages[-1]) as the only live copy —
@@ -3671,6 +3699,16 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             break
         ops, want_done, summary = _parse_json_ops(content)
         ops = _coalesce_edit_ops(ops)   # flat same-file edits → one edits batch (refactor coherence)
+        # #1 (ckpt-219): drop BYTE-IDENTICAL ops within a round (a26 json R3 ran read_file 1450-1490
+        # TWICE in one round → a duplicate full growing-view in the same RESULTS turn). Keep first.
+        _seen_ops, _dedup = set(), []
+        for _o in ops:
+            _key = (_o.get("tool"), json.dumps(_o.get("args"), sort_keys=True, default=str))
+            if _key in _seen_ops:
+                continue
+            _seen_ops.add(_key)
+            _dedup.append(_o)
+        ops = _dedup
         messages.append({"role": "assistant", "content": (content or "(no output)")[:24000]})
         if not ops and not want_done:
             _empty += 1
@@ -3717,6 +3755,13 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                              "RESULTS of your ops (in order):\n\n" + "\n\n".join(results)
                              + "\n\nEmit your next ops, or `{\"tool\":\"done\",\"args\":{\"summary\":\"…\"}}` "
                                "when the edit is complete AND verified."})
+            # #1 (ckpt-219): collapse PRIOR copies of each file we read this round — the newest
+            # RESULTS turn (just appended) holds the most-complete view, so older copies are dead
+            # weight. Without this the growing-view re-emitted in full every round and piled up
+            # (~8 copies → quadratic blowup → the dominant a26-json timeout driver).
+            for _rp in {(_op.get("args") or {}).get("path") for _op in ops
+                        if _op.get("tool") == "read_file" and (_op.get("args") or {}).get("path")}:
+                _json_supersede_file_views(messages, _rp)
         # keep eviction (bughunt #13): a successful keep op this round must actually free context —
         # surgically drop the kept file's VIEW from the batched RESULTS turns it lives in.
         for _op in ops:

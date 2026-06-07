@@ -11,21 +11,17 @@ export const meta = {
 // Hardcoded fallback (workflow scripts can't glob the fs) so the audit runs even if args
 // plumbing drops the value.
 const DEFAULT_GROUPS = [
-  { kind: 'coder_step_1', path: '/tmp/a26_groups/coder_step_1.txt' },
-  { kind: 'coder_step_2', path: '/tmp/a26_groups/coder_step_2.txt' },
-  { kind: 'coder_step_3', path: '/tmp/a26_groups/coder_step_3.txt' },
-  { kind: 'coder_step_4', path: '/tmp/a26_groups/coder_step_4.txt' },
-  { kind: 'coder_step_5', path: '/tmp/a26_groups/coder_step_5.txt' },
-  { kind: 'coder_step_6', path: '/tmp/a26_groups/coder_step_6.txt' },
-  { kind: 'coder_step_7', path: '/tmp/a26_groups/coder_step_7.txt' },
-  { kind: 'planner_merge_final_owl', path: '/tmp/a26_groups/planner_merging_plans__final__owl-alpha.txt' },
-  { kind: 'planner_L1_gemma-4', path: '/tmp/a26_groups/planner_planning__Layer_1__gemma-4-31b-it.txt' },
-  { kind: 'planner_L1_nemotron-super', path: '/tmp/a26_groups/planner_planning__Layer_1__nemotron-3-super-120b-a12b.txt' },
-  { kind: 'planner_L1_nemotron-ultra', path: '/tmp/a26_groups/planner_planning__Layer_1__nemotron-3-ultra-550b-a55b.txt' },
-  { kind: 'planner_L1_owl', path: '/tmp/a26_groups/planner_planning__Layer_1__owl-alpha.txt' },
-  { kind: 'planner_step7_uri', path: '/tmp/a26_groups/planner_step_7__lib_ansible_modules_uri.py__Add__use_netrc__paramete_owl-alpha.txt' },
-  { kind: 'planner_step8_uri', path: '/tmp/a26_groups/planner_step_8__lib_ansible_modules_uri.py__Add__use_netrc__to__argu_owl-alpha.txt' },
-  { kind: 'prompt_round0', path: '/tmp/a26_groups/prompt_round0.txt' },
+  { kind: 'jsoncoder_step_1', path: '/tmp/a26json_groups/coder_step_1.txt' },
+  { kind: 'jsoncoder_step_2', path: '/tmp/a26json_groups/coder_step_2.txt' },
+  { kind: 'jsoncoder_step_3', path: '/tmp/a26json_groups/coder_step_3.txt' },
+  { kind: 'planner_merge_final_owl', path: '/tmp/a26json_groups/planner_merging_plans__final__owl-alpha.txt' },
+  { kind: 'planner_L1_gemma-4', path: '/tmp/a26json_groups/planner_planning__Layer_1__gemma-4-31b-it.txt' },
+  { kind: 'planner_L1_nemotron-super', path: '/tmp/a26json_groups/planner_planning__Layer_1__nemotron-3-super-120b-a12b.txt' },
+  { kind: 'planner_L1_nemotron-ultra', path: '/tmp/a26json_groups/planner_planning__Layer_1__nemotron-3-ultra-550b-a55b.txt' },
+  { kind: 'planner_L1_owl', path: '/tmp/a26json_groups/planner_planning__Layer_1__owl-alpha.txt' },
+  { kind: 'textcoder_step4_urls', path: '/tmp/a26json_groups/planner_step_4__lib_ansible_module_utils_urls.py__Add__use_netrc_dic_owl-alpha.txt' },
+  { kind: 'textcoder_step5_get_url', path: '/tmp/a26json_groups/planner_step_5__lib_ansible_modules_get_url.py__Add__use_netrc_True__owl-alpha.txt' },
+  { kind: 'prompt_round0', path: '/tmp/a26json_groups/prompt_round0.txt' },
 ]
 const groups = (args && args.groups && args.groups.length) ? args.groups : DEFAULT_GROUPS
 if (!groups.length) { log('no groups'); return { error: 'no groups' } }
@@ -57,7 +53,14 @@ const FINDINGS = {
 }
 
 const AUDIT_PROMPT = (g) => `You are auditing ONE slice of a JARVIS coding-agent trace for the ansible a26c325b SWE-bench instance.
-JARVIS is a 4-role agent (PLAN -> IMPLEMENT) running on weak/free LLMs. The point of THIS audit is to find HARNESS bugs:
+JARVIS is a 4-role agent (PLAN -> IMPLEMENT) running on weak/free LLMs. The CODER now runs in JSON-OPS
+mode: gpt-oss-120b in TEXT mode streams flat JSON-line ops ({"tool":...,"args":...} per line), the
+harness runs each op and feeds results back, until a {"tool":"done"} op. (Some steps fall over to a
+text-protocol coder — the "textcoder_step*" / owl-alpha slices.) This run TIMED OUT at 1800s after ~44
+JSON-ops rounds — the empty-turn problem is mostly gone, so the concern now is WHERE THE ROUNDS WENT:
+wasted re-reads, re-derived reasoning each round (the model not building on its prior thinking), ops that
+silently no-op, parse failures, redundant LOOK rounds before an edit, or a step that should've finished
+but kept going. The point of THIS audit is to find HARNESS bugs:
 places where the harness fed the model WRONG, STALE, TRUNCATED, CONTRADICTORY, or MISLEADING input, or mis-handled the model's output — NOT places where a weak model simply reasoned poorly despite correct inputs.
 
 Read this file FULLY and analyze it ROUND BY ROUND:

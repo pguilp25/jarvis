@@ -35,14 +35,15 @@ def main():
 
     for r in rows:
         phase = r.get("phase")
-        if phase == "coder" and r.get("event") == "prompt":
+        # "json-coder" (ckpt-217) is the JSON-OPS text-mode coder — same per-step shape as "coder".
+        if phase in ("coder", "json-coder") and r.get("event") == "prompt":
             p = os.path.join(out, "prompt_round0.txt")
             with open(p, "w", encoding="utf-8") as fh:
-                fh.write(f"=== FULL CODER PROMPT (step {r.get('step')}, model {r.get('model')}) ===\n\n")
+                fh.write(f"=== FULL CODER PROMPT (phase {phase}, step {r.get('step')}, model {r.get('model')}) ===\n\n")
                 for m in r.get("messages", []):
                     fh.write(f"\n----- [{m.get('role')}] -----\n{m.get('content','')}\n")
             manifest.append(("prompt", p))
-        elif phase == "coder":
+        elif phase in ("coder", "json-coder"):
             coder_steps.setdefault(r.get("step"), []).append(r)
         elif phase == "planner":
             planners.setdefault((r.get("label"), r.get("model")), []).append(r)
