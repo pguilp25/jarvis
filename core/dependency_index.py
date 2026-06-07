@@ -468,7 +468,7 @@ def build_index(project_root: str,
 # group(1) is the line number. (Was the dead `i<N>|<code> <trailing-lineno>` form, which
 # the renderer stopped producing when the line# moved to the front — so the annotation
 # silently never fired and `[DEPENDENCY: #tag]` became unreachable. audit fix C.)
-_VIEW_LINE_RE = re.compile(r'^(\d+):(\d+)\|(.*)$')
+_VIEW_LINE_RE = re.compile(r'^(\d+)\s*[:⇥](\d+)\|(.*)$')   # colon OR native ⇥ form (bughunt A)
 
 # Thresholds for the "central" marker. The marker fires when the
 # symbol's def file contains at least one symbol referenced from

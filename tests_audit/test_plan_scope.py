@@ -237,3 +237,16 @@ def test_coverage_steps_caps_additions():
 def test_coverage_steps_handles_empty_inputs():
     assert coverage_steps("", [], set(), [], {}) == ("", [])
     assert coverage_steps(None, None, None, None, None) == ("", [])
+
+
+def test_extract_impl_steps_handles_config_and_stub_paths():
+    # bughunt #D (ckpt-204): _PATH_RE dropped/mis-extracted config & stub files the planner is told
+    # to step (setup.cfg→setup.c, docs/index.rst→docs/index.rs, .pyi/.ini/.in were lost).
+    import workflows.code as wc
+    plan = ("## STEPS\n\n"
+            "### STEP 1: update setup config\nFILES: setup.cfg, src/pkg/mod.py\nDo the thing.\n\n"
+            "### STEP 2: stubs and docs\nFILES: stubs/foo.pyi, docs/index.rst, tox.ini, MANIFEST.in\nMore.\n")
+    allf = [f for s in wc._extract_impl_steps(plan) for f in s.get("files", [])]
+    for want in ("setup.cfg", "src/pkg/mod.py", "stubs/foo.pyi", "docs/index.rst", "tox.ini", "MANIFEST.in"):
+        assert want in allf, f"{want} missing from {allf}"
+    assert "setup.c" not in allf and "docs/index.rs" not in allf   # no greedy mis-extraction

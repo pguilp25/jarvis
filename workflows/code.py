@@ -9593,7 +9593,15 @@ def _extract_impl_steps(plan: str) -> list[dict]:
                 deps = [int(d) for d in dep_nums]
 
         # Parse FILES
-        _PATH_RE = r'([\w./\-]+\.(?:py|js|ts|jsx|tsx|html|css|json|lean|c|cpp|h|rs|java|go|rb|toml|yaml|yml|md|mjs|cjs|svelte|vue))'
+        # bughunt #D (ckpt-204): the old whitelist DROPPED config/data files the planner prompts
+        # explicitly tell it to step (.cfg/.ini/.rst/.pyi/.sql/…) AND greedily MIS-extracted them
+        # (`setup.cfg`→`setup.c`, `docs/index.rst`→`docs/index.rs`). Broadened the extension set and
+        # added `(?![\w])` after the extension so `.c` can't swallow `.cfg`; plus extensionless
+        # Makefile/Dockerfile. These files pervade the Django/sympy/sklearn/astropy instances.
+        _PATH_RE = (r'([\w./\-]+\.(?:py|js|ts|jsx|tsx|mjs|cjs|svelte|vue|html|css|json|lean|c|cc|cpp|h|hpp|'
+                    r'rs|java|go|rb|toml|yaml|yml|md|rst|txt|cfg|ini|in|pyi|pyx|pxd|sql|xml|sh|gradle|'
+                    r'properties|cu|cs|kt|scala|php|pl)(?![\w])'
+                    r'|(?<![\w./-])(?:Makefile|Dockerfile))')
         files = []
         files_match = re.search(r'FILES\s*[:]\s*(.+)', body, re.IGNORECASE)
         if files_match:

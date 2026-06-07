@@ -302,7 +302,7 @@ CODER_TOOLS = [
             "old": {"type": "array", "items": {"type": "string"},
                     "description": "single-edit shorthand: the EXACT existing lines, copied VERBATIM from your read (keep the `LINENO ⇥INDENT|` prefix). Include ~2 UNCHANGED lines above and below the change so the match is unique and the surrounding indent is visible. Use `edits` to batch several changes."},
             "new": {"type": "array", "items": {"type": "string"},
-                    "description": "single-edit shorthand: the replacement as `INDENT|code` (indent in the NUMBER, code with no leading spaces; no line number) — re-include the same ~2 bracketing context lines unchanged; [] to delete"},
+                    "description": "single-edit shorthand: the replacement as `INDENT|code` (indent in the NUMBER, code with no leading spaces; no line number) — re-include the same ~2 bracketing context lines unchanged. To DELETE a line, keep the context lines in `new` and just OMIT the removed line; `new=[]` deletes EVERY line in `old` (context included) — use it ONLY when `old` has no context lines"},
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
@@ -1519,7 +1519,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
         return ("✗ edit_file needs `old` (the exact existing block as INDENT|code lines, "
-                "copied verbatim from your read) and `new` (the replacement; [] to delete).")
+                "copied verbatim from your read) and `new` (the replacement; to DELETE a line keep "
+                "the context lines in `new` and omit the removed one — `new=[]` deletes ALL of `old`).")
 
     cur = ctx["file_contents"].get(path)
     if cur is None:
