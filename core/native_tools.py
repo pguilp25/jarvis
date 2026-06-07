@@ -1669,10 +1669,17 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # applier's "stale view? line N" wording, which sends it chasing
             # numbers. This is the f327e65d failure: editing AnsibleCollectionRef
             # in dataclasses.py when the class is in _collection_finder.py.
-            _, _n = _locate_block(cur_lines, old_list)
+            _loc, _n = _locate_block(cur_lines, old_list)
             if _n == 0:
                 return _old_not_found_msg(i, path, ctx, h.get("old"),
                                           cur_lines=cur_lines, start_line=sl)
+            if _n == 1 and _loc is not None:
+                # ckpt-206: the coder's start_line is often STALE (it edits from a view whose
+                # numbers shifted). When `old` is UNIQUELY here, anchor on the REAL line. Else the
+                # auto-sort orders hunks by the stale numbers, but the applier content-corrects to
+                # the TRUE positions — which then come out of order and the WHOLE batch is rejected
+                # ("edit lines out of order") → retry pile-up (a26: 5 of 7 rejects were this).
+                sl = _loc
         resolved.append((sl, old_list, new_raw))
 
     # The numbered [edit] applier requires lines top-to-bottom in FILE order.

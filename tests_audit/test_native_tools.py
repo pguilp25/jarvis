@@ -1890,3 +1890,19 @@ def test_resync_served_ranges_shifts_by_line_delta():
     ctx2 = {"_served_ranges": {"g": [(1, 5)]}, "_accum": set()}
     _resync_served_ranges_after_edit(ctx2, "g", "a\n", "a\nb\n")
     assert "g" not in ctx2["_served_ranges"]
+
+
+def test_multihunk_stale_start_lines_apply_not_out_of_order():
+    # ckpt-206: the coder often gives STALE start_lines (it edits from a view whose numbers
+    # shifted). When each hunk's `old` is UNIQUELY locatable, the edit must APPLY — not get the
+    # whole batch rejected "edit lines out of order" (a26: 5 of 7 rejects were this → retry pileup).
+    src = "def a():\n    return 1\n\ndef b():\n    return 2\n"   # return 1 @ line 2, return 2 @ line 5
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "files_changed": set(), "round": 1, "_first_seen": {"m.py": src}}
+    out = _disp("edit_file", {"path": "m.py", "edits": [
+        {"start_line": 2, "old": ["    return 2"], "new": ["4|    return 22"]},  # content is at line 5
+        {"start_line": 5, "old": ["    return 1"], "new": ["4|    return 11"]},  # content is at line 2
+    ]}, ctx)
+    assert out.startswith("✓"), out                          # applied, NOT "out of order"
+    assert "out of order" not in out
+    assert ctx["file_contents"]["m.py"] == "def a():\n    return 11\n\ndef b():\n    return 22\n"
