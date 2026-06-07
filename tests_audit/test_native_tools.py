@@ -1906,3 +1906,25 @@ def test_multihunk_stale_start_lines_apply_not_out_of_order():
     assert out.startswith("✓"), out                          # applied, NOT "out of order"
     assert "out of order" not in out
     assert ctx["file_contents"]["m.py"] == "def a():\n    return 11\n\ndef b():\n    return 22\n"
+
+
+def test_read_file_accepts_line_start_end_aliases():
+    # ckpt-209: gpt-oss repeatedly sent line_start/line_end (and start/end) instead of the schema's
+    # start_line/end_line, so read_file DROPPED the range → whole-file/def-index → the coder re-read
+    # the SAME region 11× without ever getting its lines (a26's read-spin). Aliases must be honored.
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="alias_")
+    big = "".join(f"def f{i}(x):\n    return x + {i}\n\n" for i in range(700))   # ~2100 lines (>cap)
+    with open(_os.path.join(root, "u.py"), "w") as _f:
+        _f.write(big)
+    for k_s, k_e in [("line_start", "line_end"), ("lineStart", "lineEnd"), ("start", "end")]:
+        ctx = {"file_contents": {"u.py": big}, "sandbox": None, "viewed_versions": {},
+               "project_root": root, "files_changed": set(), "step_num": 1, "view_at": {},
+               "_first_seen": {"u.py": big}}
+        r = _disp("read_file", {"path": "u.py", k_s: 1300, k_e: 1320}, ctx)
+        assert ctx["_served_ranges"]["u.py"] == [(1300, 1320)], f"{k_s}/{k_e} dropped: {ctx.get('_served_ranges')}"
+        assert "return x + 433" in r                          # the wanted region, not a def-index
+    shutil.rmtree(root, ignore_errors=True)
+    # the half-range error still fires for a genuine single bound (no alias present)
+    from core.native_tools import _range_arg
+    assert _range_arg({"start_line": 5}) == 5 and _range_arg({"path": "x"}) is None

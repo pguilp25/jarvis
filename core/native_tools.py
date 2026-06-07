@@ -457,6 +457,22 @@ def _note_view(ctx: dict, path: str) -> None:
     ctx.setdefault("view_at", {})[path] = _view_stamp(ctx)
 
 
+def _range_arg(args: dict, end: bool = False):
+    """Extract a range bound, tolerating the arg-NAME variants weak models emit. ckpt-209: gpt-oss
+    repeatedly sent `line_start`/`line_end` (and `lineStart`/`start`/`end`) instead of the schema's
+    `start_line`/`end_line`, so read_file silently DROPPED the range → whole-file/def-index read →
+    the coder never got the lines it asked for and re-read the SAME region 11× (a26's read-spin).
+    Accepting the aliases lets the model's intended range actually take effect. (harness computes
+    global, model acts local.) A model using the correct names is unaffected (checked first)."""
+    keys = (("end_line", "line_end", "lineEnd", "end") if end
+            else ("start_line", "line_start", "lineStart", "start"))
+    for k in keys:
+        v = args.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def _str_or_err(args: dict, key: str, tool: str):
     """Coerce a tool's primary string arg, or return (None, ✗msg) for a missing /
     empty / NON-STRING value. A weak model that passes 5 / [] / null / true for a
@@ -852,7 +868,7 @@ async def _do_read(args: dict, ctx: dict) -> str:
     _fc0 = ctx.get("file_contents", {}).get(path)
     if _fc0 is not None:
         ctx.setdefault("_first_seen", {}).setdefault(path, _fc0)
-    s = args.get("start_line"); e = args.get("end_line")
+    s = _range_arg(args); e = _range_arg(args, end=True)  # alias-tolerant (line_start/line_end/…) — ckpt-209
     _whole_note = ""   # set when a ≤3000 range read is upgraded to a whole-file serve (ckpt-178)
     if (s is None) != (e is None):
         # Exactly one bound given → the model asked for a region but the bound it
@@ -1209,7 +1225,7 @@ def _do_replace(args: dict, ctx: dict) -> str:
     # already knows how to apply.
     from workflows.code import _extract_code_blocks, _apply_extracted_code
     path = args.get("path", "")
-    s = args.get("start_line"); e = args.get("end_line")
+    s = _range_arg(args); e = _range_arg(args, end=True)  # alias-tolerant (line_start/line_end/…) — ckpt-209
     new = args.get("new_content", "")
     if not path or s is None or e is None:
         return "✗ replace_lines needs path, start_line, end_line, new_content."
@@ -1558,7 +1574,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
             # natural single insert `edit_file(path, old=[], new=[...], start_line=N)` lost its
             # anchor → "old is empty" reject, while the identical nested `edits=[{...,start_line}]`
             # inserted cleanly. (Recurring empty-old insert failure, e.g. f327.)
-            hunks = [{"old": _as(_o), "new": _as(_n), "start_line": args.get("start_line")}]
+            hunks = [{"old": _as(_o), "new": _as(_n), "start_line": _range_arg(args)}]  # alias-tolerant (ckpt-209)
     if not path:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
