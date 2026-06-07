@@ -10951,6 +10951,68 @@ def _build_file_block(
     return "\n".join(parts)
 
 
+# ── IMPLEMENT native-coder prompt assembly (ckpt-197) ───────────────────────────────────────────
+# Single source of truth for the coder's system + user turn, shared by the LIVE path
+# (_implement_one_step) AND the render harness (behavioral_audit/render_prompt.py) — so what we
+# AUDIT is byte-identical to what the model RECEIVES. Per the CLAUDE.md doctrine: never let the
+# rendered artifact drift from the real one. Pure (no I/O, no LLM): given the step's strings + the
+# existing-file contents, returns the assembled (system, user, injected, overflow).
+_INJECT_BUDGET_CHARS = 160_000   # ~40k tokens; leaves room for system+history+32k output reserve
+
+
+def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
+                                  to_create=None, error_feedback=""):
+    """Assemble the native coder's (system, user) turn EXACTLY as the live coder sends it.
+    `nat_targets`: {rel_path: current_content} for the step's EXISTING files. Returns
+    (nat_system, nat_user, injected, overflow): files injected in full vs deferred to read-on-demand.
+    NOTE: this builds the phase_implement half; call_with_native_tools then appends the always-on
+    _INDENT_FORMAT_BLOCK (+ batch/trace blocks) to `system` — render_prompt.py mirrors that via
+    core.native_tools.finalize_coder_system so the FULL artifact is faithful."""
+    from tools.codebase import add_line_numbers as _aln
+    to_create = to_create or []
+    injected, overflow, used = {}, [], 0
+    for fp, c in nat_targets.items():
+        _blk = _aln(c, display_mode="prefix_ws")
+        # a file bigger than the whole budget must NOT be force-injected (it would overflow the
+        # window) → read-on-demand, where >1000 lines come back as the growing def-index view.
+        if len(_blk) <= _INJECT_BUDGET_CHARS and used + len(_blk) <= _INJECT_BUDGET_CHARS:
+            injected[fp] = c
+            used += len(_blk)
+        else:
+            overflow.append(fp)
+    file_block = "\n\n".join(
+        f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n" + _aln(c, display_mode="prefix_ws")
+        for fp, c in injected.items()
+    ) or "(call read_file on the file(s) named in the step)"
+    overflow_note = ""
+    if overflow:
+        overflow_note = (
+            "\n=== OTHER STEP FILE(S) — too big to preload together; read on demand ===\n"
+            + "\n".join(f"  {fp} ({nat_targets[fp].count(chr(10)) + 1} lines)" for fp in overflow)
+            + "\n(read_file these when you work on them; a file >1000 lines opens as a def-index "
+              "that FILLS IN as you read ranges — one growing view, read the ranges you need and "
+              "`keep` the ones that matter to trim it.)\n")
+    nat_system = (
+        IMPLEMENT_NATIVE_PROMPT
+        + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
+    )
+    create_note = (
+        f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
+        f"edit_file): {', '.join(to_create)}\n" if to_create else ""
+    )
+    nat_user = (
+        f"{step_instructions}\n{iface_block}\n{create_note}"
+        f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{file_block}\n{overflow_note}\n"
+        f"The files above are already loaded — edit them directly (no need to read_file first). "
+        f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
+        f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
+        f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
+        f"hold). Read the 'read on demand' files only when you reach them. When done and verified, "
+        f"call finish."
+    )
+    return nat_system, nat_user, injected, overflow
+
+
 async def _implement_one_step(
     step_info: dict,
     task: str,
@@ -12234,55 +12296,15 @@ async def _implement_one_step(
         _to_create = [fp for fp in step_files
                       if fp not in _nat_targets
                       and (sandbox is None or sandbox.load_file(fp) is None)]
-        # ckpt-180: CAPPED injection. ckpt-178 injected ALL step files in full → a 10-file
-        # mega-step (a26c325b) = ~104k tokens > gpt-oss-120b's 131072 window → first-call 400 →
-        # slow-fallback timeout. ckpt-179 removed injection entirely → the weak coder couldn't
-        # construct correct `old` lines from a view it didn't hold → reject-loop thrash (f91:
-        # 56→248 rounds, PASS→FAIL). SO: inject files in full UP TO a budget (the common 1-3 file
-        # step is fully preloaded → coder edits immediately, no read-storm); files that DON'T fit
-        # are listed as "read on demand" (the coder reads them — >1000 lines come back as a
-        # def-index). Best of both: no overflow on mega-steps, no regression on normal steps.
-        _INJECT_BUDGET_CHARS = 160_000   # ~40k tokens; leaves room for system+history+32k output reserve
-        _injected, _overflow, _used = {}, [], 0
-        for fp, c in _nat_targets.items():
-            _blk = _aln(c, display_mode="prefix_ws")
-            # a file bigger than the whole budget must NOT be force-injected (it would overflow
-            # the window) — it goes to read-on-demand, where >1000 lines come back as a def-index.
-            if len(_blk) <= _INJECT_BUDGET_CHARS and _used + len(_blk) <= _INJECT_BUDGET_CHARS:
-                _injected[fp] = c
-                _used += len(_blk)
-            else:
-                _overflow.append(fp)
-        _file_block = "\n\n".join(
-            f"=== {fp} ({c.count(chr(10)) + 1} lines) ===\n" + _aln(c, display_mode="prefix_ws")
-            for fp, c in _injected.items()
-        ) or "(call read_file on the file(s) named in the step)"
-        _overflow_note = ""
-        if _overflow:
-            _overflow_note = (
-                "\n=== OTHER STEP FILE(S) — too big to preload together; read on demand ===\n"
-                + "\n".join(f"  {fp} ({_nat_targets[fp].count(chr(10)) + 1} lines)" for fp in _overflow)
-                + "\n(read_file these when you work on them; a file >1000 lines opens as a def-index "
-                  "that FILLS IN as you read ranges — one growing view, read the ranges you need and "
-                  "`keep` the ones that matter to trim it.)\n")
-        _nat_system = (
-            IMPLEMENT_NATIVE_PROMPT
-            + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
-        )
-        _create_note = (
-            f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
-            f"edit_file): {', '.join(_to_create)}\n" if _to_create else ""
-        )
-        _nat_user = (
-            f"{step_instructions}\n{iface_block}\n{_create_note}"
-            f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{_file_block}\n{_overflow_note}\n"
-            f"The files above are already loaded — edit them directly (no need to read_file first). "
-            f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
-            f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
-            f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
-            f"hold). Read the 'read on demand' files only when you reach them. When done and verified, "
-            f"call finish."
-        )
+        # CAPPED injection (ckpt-180) + assembly extracted to build_implement_native_prompt
+        # (ckpt-197, single source of truth shared with the render harness). ckpt-178 injected ALL
+        # step files in full → a 10-file mega-step (a26c325b) = ~104k tokens > the 131072 window →
+        # first-call 400 → timeout. ckpt-179 removed injection → the weak coder couldn't build
+        # correct `old` from a view it didn't hold → reject thrash. SO: inject in full UP TO a budget;
+        # the rest go read-on-demand (growing def-index view). Best of both.
+        _nat_system, _nat_user, _injected, _overflow = build_implement_native_prompt(
+            step_instructions, iface_block, _nat_targets,
+            to_create=_to_create, error_feedback=error_feedback)
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
                 # Seed view_at + viewed_versions ONLY for the fully-INJECTED files (the coder holds

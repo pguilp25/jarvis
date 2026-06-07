@@ -2827,20 +2827,13 @@ def _salvage_inline_tool_call(text: str, ctr: int):
     return None
 
 
-async def call_with_native_tools(model_id: str, system: str, user_content: str,
-                                 ctx: dict, max_rounds: int = 40,
-                                 max_tokens: int = 32000,
-                                 max_history_chars: int = 400_000) -> dict:
-    """Run a structured tool-use coding loop. `ctx` carries the mutable state the
-    tools act on: {file_contents, sandbox, project_root, viewed_versions,
-    purpose_map, detailed_map}. Edits are applied to ctx['file_contents'] + the
-    sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
-    reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
-    short = model_id.split('/')[-1]
+def finalize_coder_system(system: str) -> str:
+    """Apply the env-gated system-prompt appends EXACTLY as call_with_native_tools does, so the
+    render harness (behavioral_audit/render_prompt.py) sees the SAME final system the coder gets
+    (CLAUDE.md doctrine: no drift between audited and live artifacts). Order matters — the always-on
+    _INDENT_FORMAT_BLOCK is appended after the batch block and before trace/cot. Default env (no
+    flags) → just system + _INDENT_FORMAT_BLOCK."""
     if _BATCH_ONLY:
-        # batch is the SOLE callable tool — the tools listed above are OPERATIONS, invoked by
-        # putting them in batch's `calls`. Make that unmistakable so the coder doesn't try to
-        # call them directly (they aren't exposed → it would stall).
         system = system + (
             "\n\n## ⚠ ONE TOOL: batch — this OVERRIDES the calling convention above\n"
             "Your ONLY callable tool is `batch`. Every tool named above (read_file, edit_file, "
@@ -2851,17 +2844,11 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "op(s); then batch a run_code check; then batch finish. NEVER read_file and edit_file "
             "the same file in the same batch (the edit runs before you've seen the file). Aim for "
             "~4 rounds total.")
-    if True:  # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO ⇥INDENT|
-              # <real spaces>code), so this INDENT| write instruction must ALWAYS be
-              # appended. Gating it on JARVIS_NATIVE_WS used to drop it while the view
-              # stayed prefix_ws → re-armed the col-0 dedent bug. The flag no longer
-              # disables it. (audit fix E, 2026-06-02.)
-        # Authoritative INDENT| write-format instruction, appended LAST so it wins.
-        system = system + _INDENT_FORMAT_BLOCK
+    # ALWAYS-ON: the native view is always rendered prefix_ws (LINENO ⇥INDENT|<real spaces>code),
+    # so this INDENT| write instruction must ALWAYS be appended (was a flag; dropping it re-armed
+    # the col-0 dedent bug). Appended LAST of the always-on parts so it wins.
+    system = system + _INDENT_FORMAT_BLOCK
     if _TRACE_MODE:
-        # Force the trace→test→run→minimal-edit loop for subtle behaviour, so the
-        # coder UNDERSTANDS the flow instead of guessing a plausible-wrong impl, and
-        # bounds the change to the edge (anti-over-edit).
         system = system + (
             "\n\n## PROVE A SUBTLE EDIT — trace_to_test as your CLOSING step\n"
             "When a step's correctness hinges on a nuance (an order, a condition, an edge "
@@ -2874,11 +2861,6 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "(change only the edge, nothing extra). A subtle fix you've run a discriminating "
             "test on beats one you only reasoned about.")
     if _EDIT_COT:
-        # Grounding SLOTS are offered (goal/traced/check) and the coder is INVITED to fill
-        # them — but they are NOT enforced. ckpt-133 removed the verification: the verbatim-
-        # `traced`-quote teeth tripped weak models into 8×-reject loops on hard steps (cost an
-        # instance a timeout) and forced a rigid template the model gamed instead of thinking.
-        # The `old` field already carries the real, content-verified line. Advisory, not a gate.
         system = system + (
             "\n\n## GROUND YOUR EDITS WHEN IT HELPS (optional, not enforced)\n"
             "edit_file / replace_lines / create_file accept three OPTIONAL fields — fill them to "
@@ -2889,8 +2871,23 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             "Reason in whatever way fits the change — don't force a template. What matters is a "
             "correct edit grounded in the real code, not filled-in fields.")
     if os.environ.get("JARVIS_BULLET_COT", "0") == "1":
-        # ckpt-185 experiment: tight-bullet reasoning style (cost lever; soft, never a gate).
         system = system + _BULLET_COT_BLOCK
+    return system
+
+
+async def call_with_native_tools(model_id: str, system: str, user_content: str,
+                                 ctx: dict, max_rounds: int = 40,
+                                 max_tokens: int = 32000,
+                                 max_history_chars: int = 400_000) -> dict:
+    """Run a structured tool-use coding loop. `ctx` carries the mutable state the
+    tools act on: {file_contents, sandbox, project_root, viewed_versions,
+    purpose_map, detailed_map}. Edits are applied to ctx['file_contents'] + the
+    sandbox in place. Returns {answer, done, files_changed, rounds, reason} where
+    reason ∈ {finished, no-tool-call, empty-turn, budget-exhausted, api-error}."""
+    short = model_id.split('/')[-1]
+    # System-prompt finalization (env-gated appends) lives in finalize_coder_system so the render
+    # harness sees the IDENTICAL final system (ckpt-197, CLAUDE.md doctrine: no audited/live drift).
+    system = finalize_coder_system(system)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())

@@ -6,12 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A multi-brain AI agent that coordinates many **free/weak** LLMs (NVIDIA NIM, OpenRouter, DeepInfra, Groq, Gemini) to approximate frontier-model quality at $0, slower. The bet: several models plan independently, critique, and merge, beating one weak model thinking alone. The hardest and most actively developed part is the **coding agent** — a 4-role pipeline (UNDERSTAND → PLAN → IMPLEMENT → REVIEW) whose target is to score well on SWE-bench / SWE-bench Pro with weak models.
 
+## Engineering doctrine — VERIFY THE RENDERED ARTIFACT (read this before touching anything)
+
+The reachable standard for this project is **not "zero bugs ever"** — it is **every catchable bug caught in the first pass, offline, before a live run.** The recurring failure mode, proven over and over in this repo's own history, is *editing a string and never looking at the whole thing the model actually receives*: dead code (the legacy `PLAN_COT_EXISTING`/`MERGE_PROMPT_TEMPLATE` strings silently overwritten by their `_V8` versions — edits to them are no-ops), stale prompt anchors, leaked protocol tokens, an unclosed `[think]` that swallowed a correct plan. Each was invisible at edit time and cost a 30–60 min live run to surface. **We do not work that way.** Spending more tokens, more thinking, and more verification up front is *always* correct here — it is far cheaper than a wrong assumption found after the tenth run. Token budget is not a constraint; rigor is the constraint.
+
+**THE RULE: before any live run, render and read the FULL assembled artifact the model actually receives — end to end.** Not the source string — the assembled result: system prompt + tool schemas + user turn + injected files + the growing view + reject/nudge messages, exactly as the API sees it. If you changed a prompt, a tool description, a view renderer, or a reject message, you render it and you read all of it. A bug you could have seen in the rendered artifact must never reach a live run.
+
+Non-negotiables:
+- **Edits must land on the LIVE artifact.** The `_V8` constants in `core/prompts_v8.py` are what run; same-named legacy strings elsewhere are DEAD. After any prompt/format edit, render the assembled prompt and confirm your change is *in it* (use `behavioral_audit/render_prompt.py`).
+- **Render across MANY cases, not one.** A prompt is correct only across the shapes it meets in production: small/large files, a view with holes, post-edit diffs, rejects, multi-file steps, empty-turn retries, create-file. Render a representative spread and read them.
+- **Offline-first.** A live SWE run (30–60 min, partial logs) is the WRONG loop for finding mechanics/prompt bugs. Reproduce offline in seconds (`render_prompt.py`, `behavioral_audit/bridge.py`, `jarvis_emu.py`, trace replay). Live runs are for *measuring resolution*, not debugging.
+- **Capture the whole story.** When a run fails, dump the COMPLETE trace (every prompt, tool result, reject) and audit ALL causes at once — never grep one symptom and ship one fix.
+- **Adversarial review BEFORE commit, not after the run.** Spawn independent agents to attack new prompts/code. A 2-minute adversarial read beats a 40-minute run that finds the same bug. Use the tokens.
+- **No dead code, no stale instructions, no contradictions.** A model-facing instruction that contradicts the live format silently degrades a weak model — treat prompt/format drift as a P0 bug, not cosmetic.
+
 ## Commands
 
 ```bash
 # Run the agent
 python3 main.py            # terminal CLI (main pipeline entry)
 python3 ui_main.py         # web UI (aiohttp WebSocket server + ui/index.html)
+
+# Render the FULL artifact the coder model receives (offline, seconds) — DO THIS before any run
+# that touches a prompt/tool-schema/view (see the doctrine above). Calls the real assembly fns.
+python3 behavioral_audit/render_prompt.py            # all cases (small/big/multi/reject) — READ them
+python3 behavioral_audit/render_prompt.py --stats    # section sizes only (sweep)
+python3 behavioral_audit/render_prompt.py --case grow # the accumulating big-file "growing view"
+python3 behavioral_audit/render_prompt.py --file <path> --reads 1300-1320,1480-1500  # real file view
 
 # Tests (no pytest-asyncio — async tools are driven via asyncio.run inside tests)
 python3 -m pytest tests_audit/test_native_tools.py -q        # native-coder regression suite
