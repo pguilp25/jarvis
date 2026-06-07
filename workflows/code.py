@@ -8897,7 +8897,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             "\nYour merged plan MUST cover each of these (one STEP each) UNLESS you can "
             "say in one line why it's wrong — do not silently drop a file the drafts agreed on.")
 
-    merge_prompt = SYSTEM_KNOWLEDGE + MERGE_PROMPT_TEMPLATE.format(
+    # #20 (ckpt-215): MERGE_PROMPT_TEMPLATE_V8 ALREADY begins with CORE_V8 (the "## JARVIS RUNTIME"
+    # preamble), so prepending SYSTEM_KNOWLEDGE here injected the ~480-line preamble TWICE (verified
+    # in the a26 merger prompt: "## JARVIS RUNTIME" at lines 6 AND 483). Drop the redundant prefix.
+    merge_prompt = MERGE_PROMPT_TEMPLATE.format(
         n_plans=len(plans),
         task=task,
         context=context[:12000],
@@ -11125,6 +11128,15 @@ async def _implement_one_step(
             "=== THE ISSUE YOU ARE SOLVING (context — implement the STEP below, "
             "not the whole issue) ===\n"
             f"{_t}\n\n"
+            # #18 (ckpt-215): the REQUIREMENTS list inside `task` is headed "every one must hold
+            # after YOUR change" — TRUE for the planner (it owns the whole issue) but a CONTRADICTION
+            # for a single-step coder, which the audit showed nudges over-editing unloaded files /
+            # another step's work. Re-frame it explicitly for the coder without touching the shared
+            # `task` (still correct for the planner).
+            "⚠ The REQUIREMENTS / INTERFACE above are the WHOLE issue's contract across ALL steps — "
+            "OTHER steps own most of them. You are assigned ONLY the STEP below: make exactly its "
+            "change, in the file(s) it names, and do NOT edit symbols or files the step doesn't "
+            "name (a later step handles those — editing them here causes conflicts and over-scope).\n\n"
         )
 
     step_instructions = (
@@ -12882,7 +12894,10 @@ async def phase_review(
     # Pre-load research cache so reviewer already has planner+coder lookups
     preloaded_research = _format_research_cache(research_cache)
 
-    review_prompt = SYSTEM_KNOWLEDGE + REVIEW_PROMPT_TEMPLATE.format(
+    # #20 (ckpt-215): REVIEW_PROMPT_TEMPLATE_V8 ALREADY begins with SYSTEM_KNOWLEDGE_V8 (the same
+    # preamble), so prepending SYSTEM_KNOWLEDGE here doubled it — the identical double-prepend the
+    # merger had. Drop the redundant prefix. (Review is currently gated off, but keep it correct.)
+    review_prompt = REVIEW_PROMPT_TEMPLATE.format(
         task=task,
         plan=plan[:10000],
         all_files_block=all_files_block,
@@ -13253,9 +13268,21 @@ async def code_agent(state: AgentState) -> AgentState:
             ])
         ])
         if existing_files:
-            file_list = "\n".join(f"  {f}" for f in existing_files[:200])
+            # #23 (ckpt-215): this list is alphabetical and capped at 200. On a large repo
+            # (ansible) it truncates BEFORE reaching the real targets (lib/ansible/modules/uri.py
+            # etc.), yet the old header "FILES ALREADY IN THE PROJECT" read as COMPLETE — so a
+            # planner could wrongly conclude a target file is absent. Name it as partial and tell
+            # the planner to use tools to find anything not shown.
+            _shown = existing_files[:200]
+            file_list = "\n".join(f"  {f}" for f in _shown)
+            _more = (f"\n  … and {len(existing_files) - len(_shown)} MORE files NOT listed (this is "
+                     f"only the first {len(_shown)} alphabetically). Use [LS: dir] / [SEARCH:] to "
+                     f"find any file not shown — do NOT assume a file is absent just because it's "
+                     f"not in this partial list."
+                     if len(existing_files) > len(_shown) else "")
             context_parts.append(
-                f"FILES ALREADY IN THE PROJECT:\n{file_list}"
+                f"SOME FILES IN THE PROJECT (first {len(_shown)}, alphabetical — PARTIAL):\n"
+                f"{file_list}{_more}"
             )
 
         if general_map:
@@ -13310,19 +13337,20 @@ async def code_agent(state: AgentState) -> AgentState:
             # task-type gate (skip for SWE-bench/backend) + a precise matcher if needed.
             pass
 
+            # #19 (ckpt-215): the old "TOOLS — use in order" tail re-defined tools with signatures
+            # that CONTRADICT the canonical TOOL TABLE above ([PURPOSE: category] vs the table's
+            # [PURPOSE: path]; a phantom [DETAIL: section] and [DEPENDENCY:] not in the table; an
+            # EMPTY [KNOWLEDGE: topic] —). Two disagreeing catalogs in one prompt is the exact
+            # prompt-drift the doctrine treats as P0. Keep ONLY the escalation philosophy + the
+            # protocol mechanics (which the table does NOT cover) and point at the table for every
+            # tool's EXACT signature — no second, drifting definition.
             context_parts.append(
-                "TOOLS — use in order, escalate only if you need more:\n"
-                "  1. [REFS: name]          — definitions, imports, usages (fast)\n"
-                "  2. [DEPENDENCY: #tag]    — type-resolved callers (if REFS not enough)\n"
-                "  3. [DETAIL: section]     — organized code map for a feature\n"
-                "     [PURPOSE: category]   — all code for a purpose (e.g. 'UI colors')\n"
-                "  4. [CODE: path/to/file]  — read actual source code (last resort)\n"
-                "     [SEARCH: pattern]     — ripgrep search\n"
-                "     [WEBSEARCH: query]    — web search for API docs\n"
-                "  [KNOWLEDGE: topic]       — consult design/game/planning guidelines\n"
-                "Wrap tool calls in [tool use]...[/tool use] then [STOP].\n"
-                "Tags outside [tool use] blocks are ignored. Add #label to name results.\n"
-                "Use [DISCARD: #label] to remove irrelevant results from context."
+                "How to explore (cheap → costly): triage with [PURPOSE:] / [SEARCH:] / [REFS:], "
+                "then read real source with [CODE:] / [VIEW:] ONLY where the change goes. Use the "
+                "EXACT tool signatures from the TOOL TABLE above — do not invent variants.\n"
+                "Wrap every tool call in [tool use]...[/tool use], then [STOP]. Tags outside a "
+                "[tool use] block are ignored. Add #label to name a result; "
+                "[DISCARD: #label] removes an irrelevant one."
             )
         else:
             context_parts.append(
