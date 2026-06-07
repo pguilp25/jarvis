@@ -8701,21 +8701,20 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     else:
         from core.exploration_tools import build_repo_tree
         tree = build_repo_tree(project_root)
-        if files:
-            hint = "\n".join(f"  {f}" for f in sorted(files)[:60])
-            file_list_str = (
-                tree
-                + "\n\nRESEARCH FLAGGED THESE (candidates only — each was scraped from "
-                  "model prose and MAY name a path that doesn't exist; CONFIRM every one "
-                  "against the tree above, or with [LS:]/[SEARCH:], before you put it in a "
-                  "FILES: line):\n" + hint
-            )
-        else:
-            file_list_str = tree
+        # #7 (ckpt-222): the old "RESEARCH FLAGGED THESE (scraped from model prose)" block was a
+        # FALSE label — both callers pass `files=existing_files` (the FULL repo glob), so it just
+        # re-listed the first 60 files alphabetically (docs/bin/hacking noise on ansible), redundant
+        # with the tree above and misleadingly framed as relevant candidates. Drop it; the tree (and
+        # [LS:]/[SEARCH:]) is the real file map.
+        file_list_str = tree
+    # #17 (ckpt-222): the old context[:30000] cut mid-word (e.g. "TOOL TABLE abov"), silently
+    # dropping trailing project context. Cut at the last newline before the cap + a visible marker.
+    _ctx = context if len(context) <= 30000 else (
+        context[:30000].rsplit("\n", 1)[0] + "\n…(project context truncated at 30k chars)…")
     plan_prompt = PLAN_PROMPT.format(
         task=task,
         file_list=file_list_str,
-        context=context[:30000],
+        context=_ctx,
         cot_instructions=cot,
     )
 
@@ -8776,11 +8775,20 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # immediately) filled a winner slot and a HEALTHY slow planner got cancelled, sometimes
     # leaving the merger only 1 real plan (or failing the phase). Now "first 3 of 4 win" means
     # "first 3 that produced a usable plan".
+    # #11 (ckpt-222): a draft is "usable" only if it actually contains a PLAN (a === PLAN === block,
+    # STEP markers, or a numbered list) and isn't trivially short — NOT just any non-empty text. A
+    # pure-leaked-reasoning draft (no plan, no steps) was being counted as usable AND admitted to the
+    # merge as a numbered INPUT PLAN, feeding the merger garbage.
+    def _looks_like_plan(_a):
+        _a = _a or ""
+        if len(_a.strip()) < 200:
+            return False
+        return bool(re.search(r'(?im)(=== *PLAN|^#{1,3} *STEP|^\s*STEP\s+\d+\s*[:.)]|^\s*\d+\.\s)', _a))
     if len(PLAN_MODELS) > 3:
         def _usable(_t):
             try:
                 _r = _t.result()
-                return isinstance(_r, dict) and bool(_r.get("answer"))
+                return isinstance(_r, dict) and _looks_like_plan(_r.get("answer"))
             except Exception:
                 return False
         completed: list = list(done)                       # all finished (usable or not) — kept for
@@ -8806,10 +8814,11 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
 
     # Collect results from winners
     plans = []
+    _degenerate = []          # #11: non-empty but no plan structure — fallback only if NOTHING else
     for t in done_tasks:
         try:
             r = t.result()
-            if isinstance(r, dict) and r.get("answer"):
+            if isinstance(r, dict) and _looks_like_plan(r.get("answer")):
                 plans.append(r)
                 _wlog.phase_event(
                     "Layer 1 plan complete",
@@ -8817,6 +8826,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                     chars=len(r["answer"]),
                     done=bool(r.get("done")),
                 )
+            elif isinstance(r, dict) and r.get("answer"):
+                _degenerate.append(r)   # #11: pure-reasoning, no plan/steps — don't feed the merger
+                _wlog.phase_warn("Layer 1 plan DEGENERATE (no === PLAN ===/steps) — held back",
+                                 model=r["model"].split("/")[-1])
             else:
                 _wlog.phase_warn(
                     "Layer 1 plan EMPTY",
@@ -8824,6 +8837,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
                 )
         except Exception as ex:
             _wlog.phase_error("Layer 1 plan raised", error=str(ex)[:200])
+    # #11: if EVERY draft was degenerate (none had plan structure), fall back to them so the merge
+    # still has SOMETHING to work from — better a weak input than none.
+    if not plans and _degenerate:
+        plans = _degenerate
 
     # Snapshot every collected plan to its own file under plans/
     for i, p in enumerate(plans):
@@ -8850,6 +8867,12 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     _per_plan = max(7000, 36000 // max(1, len(plans)))
     def _cap_plan(ans):
         ans = ans or ""
+        # #18 (ckpt-222): STRIP a draft's leaked <think> reasoning AND any injected [SYSTEM NOTE: …]
+        # scaffolding before handing it to the merger — otherwise the merger reads a draft's private
+        # CoT / runtime notes as if they were plan content and mixes them in.
+        from core.tool_call import _strip_think as _cs
+        ans = _cs(ans)
+        ans = re.sub(r'\[SYSTEM NOTE:.*?\]', '', ans, flags=re.S).strip()
         return ans if len(ans) <= _per_plan else (ans[:_per_plan] + "\n…(this plan was truncated for length)…")
     all_plans_text = "\n\n".join(
         f"──────────────────────────────────────────────────────────────────────\n"
