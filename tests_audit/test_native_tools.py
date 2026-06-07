@@ -1594,6 +1594,25 @@ def test_keep_sets_served_ranges_to_kept():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_shorthand_insert_carries_start_line():
+    # ckpt-199: the natural single insert `edit_file(path, old=[], new=[...], start_line=N)` must
+    # work — it was dropping the top-level start_line when synthesizing the hunk, so it hit the
+    # "old is empty" reject while the identical nested `edits=[{...,start_line}]` inserted cleanly
+    # (recurring empty-old insert failure, e.g. f327). Verifies the shorthand now matches nested.
+    src = "a = 1\nb = 2\nc = 3\n"
+    ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+           "files_changed": set(), "round": 1, "_first_seen": {"m.py": src}}
+    out = _disp("edit_file", {"path": "m.py", "old": [], "new": ["x = 99"], "start_line": 2}, ctx)
+    assert out.startswith("✓"), out
+    assert ctx["file_contents"]["m.py"] == "a = 1\nb = 2\nx = 99\nc = 3\n"
+    # and the nested form still works identically (the reference behavior)
+    ctx2 = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},
+            "files_changed": set(), "round": 1, "_first_seen": {"m.py": src}}
+    out2 = _disp("edit_file", {"path": "m.py", "edits": [
+        {"old": [], "new": ["x = 99"], "start_line": 2}]}, ctx2)
+    assert out2.startswith("✓") and ctx2["file_contents"]["m.py"] == ctx["file_contents"]["m.py"]
+
+
 def test_edit_diff_stamped_with_round_when_no_step():
     src = "a = 1\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},

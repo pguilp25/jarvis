@@ -1343,8 +1343,8 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
             f"UNCHANGED and your view is STILL CURRENT — do NOT re-read. Two causes: (1) Your "
             f"`old` doesn't match {path} character-for-character — copy it again EXACTLY from "
             f"the view you ALREADY have (keep the full `LINENO ⇥INDENT|` prefix) and resend. "
-            f"(2) WRONG FILE — the symbol may live elsewhere; [SEARCH] for it and edit THAT "
-            f"file. (read_file a start_line/end_line range ONLY for a region of {path} you've "
+            f"(2) WRONG FILE — the symbol may live elsewhere; use search_text (or find_refs) to "
+            f"locate it and edit THAT file. (read_file a start_line/end_line range ONLY for a region of {path} you've "
             f"genuinely never seen — never re-dump the whole file.)"
             + _actual_region_hint(cur_lines, start_line, old_raw))
 
@@ -1469,7 +1469,11 @@ def _do_edit(args: dict, ctx: dict) -> str:
         _o = args.get("old"); _n = args.get("new")
         if _o is not None or _n is not None:
             _as = lambda v: v if isinstance(v, list) else ([] if v in (None, "") else str(v).split("\n"))
-            hunks = [{"old": _as(_o), "new": _as(_n)}]
+            # carry top-level start_line into the synthesized hunk (ckpt-199): without it, the
+            # natural single insert `edit_file(path, old=[], new=[...], start_line=N)` lost its
+            # anchor → "old is empty" reject, while the identical nested `edits=[{...,start_line}]`
+            # inserted cleanly. (Recurring empty-old insert failure, e.g. f327.)
+            hunks = [{"old": _as(_o), "new": _as(_n), "start_line": args.get("start_line")}]
     if not path:
         return "✗ edit_file needs a path."
     if not hunks or not isinstance(hunks, list):
