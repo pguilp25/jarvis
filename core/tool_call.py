@@ -1386,15 +1386,16 @@ async def _run_code_reads(
     import os
     from tools.codebase import read_file, norm_path, add_line_numbers, file_uses_tabs
 
-    KEEP_HINT_THRESHOLD = 1500  # lines — informational note above this
-    KEEP_FORCE_THRESHOLD = 8000 # lines — REQUIRE KEEP above this; full-file
-                                # [CODE:] returns a skeleton view instead.
-                                # Why: workflows/code.py (~12k lines, ~120k tokens)
-                                # would overflow a 200k context when stacked with
-                                # the prompt + history. The 8000-line threshold
-                                # keeps small/medium files un-truncated for the
-                                # exploration workflow (subagent feedback) while
-                                # still protecting the truly oversized files.
+    KEEP_HINT_THRESHOLD = 700   # lines — informational "largish, KEEP what you need" note above this
+    KEEP_FORCE_THRESHOLD = 1500 # lines — above this, full-file [CODE:] returns a SKELETON (def/class
+                                # index + line numbers); the model reads the RANGES it needs.
+                                # ckpt-208: LOWERED 8000→1500 ("smaller lookups"). At 8000 a single
+                                # 2066-line file (urls.py ≈ 100k chars) dumped IN FULL and blew the
+                                # 80k tool-results budget by itself, forcing the planner's earlier
+                                # lookups to be DROPPED from its prompt — it planned big-file
+                                # (ansible) instances from partial context. The skeleton+range model
+                                # keeps each lookup SMALL so many fit the budget (the coder's
+                                # _FULL_VIEW_CAP=1000 is the same idea on the native side).
     sandbox_dir = os.path.join(project_root, ".jarvis_sandbox")
 
     output_parts = []
@@ -4950,11 +4951,22 @@ async def call_with_tools(
             stale = "" if rn == round_num else " — DO NOT re-request"
             return f"\n[← {tt}: {arg} — from R{rn}{stale}]\n{v}"
 
-        TOOL_OUTPUT_BUDGET = 80_000  # chars
+        # Token budget for accumulated tool-results: up to 70% of the model's CONTEXT WINDOW,
+        # leaving ~30% for the system+plan prompt and the model's own reasoning/output (ckpt-208).
+        # FIXED the unit + size: was a flat 80_000-CHAR cap (≈20k tokens) — both the wrong unit AND
+        # only ~6-15% of a 128-256k window, so it DROPPED the planner's lookups while the window had
+        # plenty of room (it then planned big-file instances from partial context). Paired with the
+        # skeleton threshold (big files → def-index + ranges), each lookup is small, so this generous
+        # budget is rarely hit at all — it only trims a genuinely over-large set.
+        from core.tokens import count_tokens as _ctok
+        from config import MODELS as _BMODELS
+        _win = _BMODELS.get(model, {}).get("window", 128_000)
+        TOOL_OUTPUT_BUDGET = int(_win * 0.70)   # TOKENS (not chars)
         this_round_keys = round_keys  # set built earlier this round
         all_entries = list(persistent_lookups.items())
-        total_chars = sum(len(v) for _, v in all_entries)
-        if total_chars > TOOL_OUTPUT_BUDGET and len(all_entries) > 1:
+        _tok_of = {k: _ctok(v) for k, v in all_entries}   # count tokens ONCE per entry
+        total_tokens = sum(_tok_of.values())
+        if total_tokens > TOOL_OUTPUT_BUDGET and len(all_entries) > 1:
             # ── Recency scoring ─────────────────────────────────────────
             # Bump every entry the model has been REFERENCING in its
             # recent prose (by tag argument substring match against
@@ -4982,21 +4994,20 @@ async def call_with_tools(
             dropped_entries: list[tuple[str, str]] = []
             running = 0
             for k, v in all_entries:
-                # HARD CAP — every entry (including this-round ones) is
-                # subject to the budget. Previously this-round entries were
-                # exempted, which let a single round of 7 large KEEPs blow
-                # the model's input-token limit and return HTTP 400 "0
-                # output tokens." The model can ALWAYS re-issue a dropped
-                # tag if needed; an API failure ends the whole pipeline.
-                if running + len(v) > TOOL_OUTPUT_BUDGET:
+                # HARD CAP (now in TOKENS) — every entry (including this-round ones) is subject to
+                # the budget. Previously this-round entries were exempted, which let a single round
+                # of 7 large KEEPs blow the model's input-token limit and return HTTP 400 "0 output
+                # tokens." The model can ALWAYS re-issue a dropped tag if needed.
+                _vt = _tok_of[k]
+                if running + _vt > TOOL_OUTPUT_BUDGET:
                     dropped_entries.append((k, v))
                     continue
                 kept_entries.append((k, v))
-                running += len(v)
+                running += _vt
             if dropped_entries:
                 warn(
                     f"  [{model.split('/')[-1]}] round {round_num}: "
-                    f"tool-results over {TOOL_OUTPUT_BUDGET:,}-char budget — "
+                    f"tool-results over {TOOL_OUTPUT_BUDGET:,}-token budget (70% of {_win:,}) — "
                     f"dropped {len(dropped_entries)} lookup(s) from prompt"
                 )
                 # Surface the drop to the model so it stops re-issuing the
