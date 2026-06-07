@@ -1486,6 +1486,46 @@ def test_moderate_file_first_read_serves_full_not_skeleton():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_big_file_edit_invalidates_served_ranges_and_reread_serves_fresh():
+    # a26 root cause (ckpt-194): on a >cap file, after an edit shifts the line numbers, the coder
+    # needs fresh content for its NEXT edit site — but the re-read short-circuits assumed
+    # "viewed == holds real content", which is FALSE for a >cap file (it only ever held a def-index
+    # skeleton + the ranges/diffs it explicitly saw). So:
+    #   (A) a RANGE re-read of a previously-served range got a STALE "you already read a-b" refusal;
+    #   (B) a WHOLE-file re-read got a NO-BODY "you already have it" message.
+    # The coder read both as "the system returns no content", GUESSED line content → reject loop →
+    # 1800s timeout. Fix A: edit clears _served_ranges[path]. Fix B: a >cap whole re-read serves
+    # the CURRENT def-index, never the no-body refusal.
+    import tempfile, os as _os
+    root = tempfile.mkdtemp(prefix="bigreread_")
+    big = "".join(f"def f{i}():\n    return {i}\n" for i in range(700))   # 1400 lines (>cap)
+    with open(_os.path.join(root, "big.py"), "w") as _f:
+        _f.write(big)
+    ctx = {"file_contents": {"big.py": big}, "sandbox": None, "viewed_versions": {},
+           "project_root": root, "files_changed": set(), "round": 3, "step_num": 1,
+           "_first_seen": {"big.py": big}}
+    try:
+        # 1) a range read of a >cap file caches the served range
+        rng = _disp("read_file", {"path": "big.py", "start_line": 3, "end_line": 8}, ctx)
+        assert "def f1" in rng
+        assert ctx["_served_ranges"]["big.py"]                       # range cached
+        # 2) edit a line inside that range
+        out = _disp("edit_file", {"path": "big.py", "hunks": [
+            {"start_line": 4, "old": ["    return 1"], "new": ["    return 111"]}]}, ctx)
+        assert out.startswith("✓"), out
+        # Fix A: the edit invalidates the served-range cache for this file
+        assert not ctx.get("_served_ranges", {}).get("big.py")
+        # 3) a RANGE re-read of the same span is no longer the stale "you already read a-b" refusal
+        rng2 = _disp("read_file", {"path": "big.py", "start_line": 3, "end_line": 8}, ctx)
+        assert "you already read" not in rng2 and not rng2.lstrip().startswith("ℹ")
+        # 4) Fix B: a WHOLE-file re-read serves the CURRENT def-index, not a no-body "ALREADY have"
+        whole = _disp("read_file", {"path": "big.py"}, ctx)
+        assert "TOO LARGE" in whole and "def f0" in whole
+        assert "ALREADY have" not in whole
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_edit_diff_stamped_with_round_when_no_step():
     src = "a = 1\n"
     ctx = {"file_contents": {"m.py": src}, "sandbox": None, "viewed_versions": {},

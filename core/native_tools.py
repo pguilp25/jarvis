@@ -707,6 +707,17 @@ async def _do_read(args: dict, ctx: dict) -> str:
             # (a) the coder's view is CURRENT (identical to what it last saw) → say so in one
             # line, no body, nothing capped. This is the common case (it just re-asked).
             if _last is not None and _last == cur:
+                # BIG FILE (> cap): "you already have THIS file's current view" is a LIE — the
+                # coder NEVER held real bodies for a >cap file, only a def-index skeleton + the
+                # ranges/diffs it explicitly saw. After an edit (which sets view_at + makes
+                # _last==cur), a whole-file re-read landed here and returned a NO-BODY message;
+                # the coder read that as "the system returns no content", then GUESSED line
+                # content → reject loop → 1800s timeout (a26). Serve the CURRENT def-index so it
+                # can pick a fresh range (range re-reads now serve fresh content — see Fix A).
+                _nl_cur = cur.count("\n") + (0 if cur.endswith("\n") else 1)
+                if _nl_cur > _FULL_VIEW_CAP:
+                    _note_view(ctx, path)
+                    return _too_large_view(ctx, path, _nl_cur, cur)
                 _where = ctx.get("view_at", {}).get(path, "earlier this step")
                 _editnote = ""
                 if _base is not None and _base != cur:
@@ -1034,6 +1045,12 @@ def _do_replace(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
+        # A big-file edit shifts the line numbers at/below it, so EVERY range we previously
+        # served for this file may now be stale. Drop the served-range cache so a range
+        # re-read serves FRESH current content instead of a stale "you already read a-b"
+        # short-circuit (the a26 reject-loop→timeout root cause — the coder copied pre-edit
+        # lines that no longer matched). keep-validation still works via view_at (set just below).
+        ctx.get("_served_ranges", {}).pop(path, None)
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
@@ -1586,6 +1603,12 @@ def _do_edit(args: dict, ctx: dict) -> str:
         if isinstance(ctx.get("viewed_versions"), dict):
             ctx["viewed_versions"][path] = result[path]
         ctx.setdefault("files_changed", set()).add(path)
+        # A big-file edit shifts the line numbers at/below it, so EVERY range we previously
+        # served for this file may now be stale. Drop the served-range cache so a range
+        # re-read serves FRESH current content instead of a stale "you already read a-b"
+        # short-circuit (the a26 reject-loop→timeout root cause — the coder copied pre-edit
+        # lines that no longer matched). keep-validation still works via view_at (set just below).
+        ctx.get("_served_ranges", {}).pop(path, None)
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
         n = result[path].count("\n") + 1
         # Hand back the before/after diff with the file's CURRENT line numbers, so
