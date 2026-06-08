@@ -102,11 +102,15 @@ def _apply_gptoss_pin(payload: dict, url: str, api_model: str) -> None:
         # the planner pool to owl-alpha alone (free-only 402s were starving it). gpt-oss-120b is the
         # paid coder (DeepInfra-pinned above); owl-alpha is a free alpha (no :free suffix, no pin).
         payload["provider"] = {"allow_fallbacks": False}
-    # NOTE (2026-06-08): NO max_tokens cap on :free models. The "requires more credits, or fewer
-    # max_tokens" 402 was NOT a token limit — it was the planner client (clients/openrouter.py)
-    # sending the BARE slug with no `:free` suffix → OpenRouter billed the PAID variant. A true
-    # :free model costs $0, so that cost-vs-balance check never trips. The real fix is the correct
-    # :free slug (clients/openrouter._resolve_and_pin); planners keep their full max_tokens.
+    # FREE models: do NOT impose our output `max_tokens` (user directive 2026-06-08). A :free
+    # variant often has a SMALL context window (e.g. ~35k); requesting 16384 OUTPUT reserves that
+    # much of the window, so a large coder/planner prompt overflows → HTTP 402 "requires more
+    # credits, or fewer max_tokens. You requested up to 16384." Dropping max_tokens lets the
+    # provider grant the MAX available completion (full context window − prompt) — never over-
+    # reserves, never that 402. The PAID coder gpt-oss-120b is exempt (handled above) and keeps
+    # its explicit 16384.
+    if api_model.endswith(":free"):
+        payload.pop("max_tokens", None)
 
 # Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
 # DeepInfra serves Pro FP4-quantized at only 66k context (vs 200k+ on NVIDIA
