@@ -234,6 +234,15 @@ def _salvage_plan_from_think(text: str) -> str:
     )
     reasoning = "\n".join((a or b) for a, b in blocks).strip()
     if not reasoning:
+        # Fix #4 (ckpt-233): UNCLOSED think — the model opened `[think]`/`<think>` and reasoned its
+        # whole plan but never closed (forgot the tag, or the stream was cut). The closed-block regex
+        # above misses it, so the plan would be silently lost. Fail-open: if there's an opener and NO
+        # close anywhere, salvage from the opener to end-of-text.
+        if not re.search(_THINK_CLOSE, text, re.IGNORECASE):
+            om = re.search(r'\[think\]|<think>', text, re.IGNORECASE)
+            if om:
+                reasoning = text[om.end():].strip()
+    if not reasoning:
         return ""
     m = _PLAN_BODY_MARKER.search(reasoning)
     out = reasoning[m.start():].strip() if m else reasoning
@@ -718,6 +727,13 @@ def _plan_done_context_kind(text: str, signal_start: int) -> "str | None":
     short_window = text[max(0, signal_start - _PLAN_DONE_SHORT_LOOKBACK):signal_start]
     if _THINK_CLOSE_TAG.search(short_window):
         return "post-think"
+    # Fix #4 (ckpt-233): FAIL-OPEN on a missing `=== END PLAN ===`. If the model OPENED `=== PLAN ===`
+    # anywhere before the signal (a plan body exists) but forgot the closing marker, accept the
+    # PLAN_DONE and auto-close — discarding a written plan over a missing fence is the most expensive
+    # failure (the work existed and was thrown away). The opener can be >2000 chars back on a long
+    # plan, so scan the whole prefix. (current_plan / raw-response fallback below then captures it.)
+    if _PLAN_OPEN.search(text[:signal_start]):
+        return "open-plan-autoclose"
     return None
 
 
