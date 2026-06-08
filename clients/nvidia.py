@@ -91,13 +91,16 @@ def _apply_gptoss_pin(payload: dict, url: str, api_model: str) -> None:
     if api_model == "openai/gpt-oss-120b":
         payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
                                "allow_fallbacks": False}
-    elif api_model.endswith(":free"):
-        # User directive (2026-06-08): planner models must NEVER incur PAID charges. A bare `:free`
-        # slug still SILENTLY ESCALATES to the model's PAID provider when the free pool is busy
-        # (allow_fallbacks defaults true) — the user's dashboard showed Nemotron 3 Ultra billed
-        # $3.95 this way. Pinning allow_fallbacks=False keeps the request on the FREE provider only:
-        # it serves free or returns an error/402 (the planner chain then falls through) — but it
-        # never bills. gpt-oss-120b is exempt above (it's the paid coder, intentionally).
+    elif "nemotron-3-ultra" in api_model:
+        # User directive (2026-06-08, refined): keep the EXPENSIVE planner free-only. Nemotron 3
+        # Ultra bills up to $0.94/request ($3.95 burned on the first bad run) — a bare `:free` slug
+        # SILENTLY ESCALATES to that paid provider when the free pool is busy (allow_fallbacks
+        # defaults true). Pinning allow_fallbacks=False keeps Ultra on the FREE provider only:
+        # serves free or 402s (chain falls through) — never bills. The OTHER :free planners
+        # (nemotron-super ~$0.02/req, gemma-4 ~$0.04/req) are CHEAP, so we leave allow_fallbacks at
+        # the default → they fall back to paid when the free pool is exhausted instead of crippling
+        # the planner pool to owl-alpha alone (free-only 402s were starving it). gpt-oss-120b is the
+        # paid coder (DeepInfra-pinned above); owl-alpha is a free alpha (no :free suffix, no pin).
         payload["provider"] = {"allow_fallbacks": False}
 
 # Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
