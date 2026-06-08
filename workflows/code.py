@@ -11114,6 +11114,10 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
     _overflow_clause = (
         "Any file listed under 'TOO LARGE TO PRELOAD' is NOT loaded — read_file it FIRST (it opens "
         "as a def-index that fills in as you read ranges), then edit from what you read. " if overflow else "")
+    # (ckpt-233, user 2026-06-08): the "read on demand" trailer only makes sense when overflow files
+    # EXIST — emitting it on a single-fully-loaded-file step was stale junk referencing a nonexistent
+    # list. Gate it on `overflow`.
+    _rod_clause = "Read the 'read on demand' files only when you reach them. " if overflow else ""
     nat_user = (
         f"{step_instructions}\n{iface_block}\n{create_note}"
         f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{file_block}\n{overflow_note}\n"
@@ -11122,9 +11126,7 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
         f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
         f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
         f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
-        f"hold). Read the 'read on demand' files only when you reach them. When done and verified, "
-        f"finish the step."   # #16 (ckpt-222): mode-agnostic — native calls finish(), JSON-OPS emits
-                              # the `done` op; the old "call finish" contradicted the JSON-OPS override.
+        f"hold). {_rod_clause}When done and verified, finish the step."
     )
     return nat_system, nat_user, injected, overflow
 
@@ -13332,23 +13334,10 @@ async def code_agent(state: AgentState) -> AgentState:
                 "/build/", "/.pytest_cache/",
             ])
         ])
-        if existing_files:
-            # #23 (ckpt-215): this list is alphabetical and capped at 200. On a large repo
-            # (ansible) it truncates BEFORE reaching the real targets (lib/ansible/modules/uri.py
-            # etc.), yet the old header "FILES ALREADY IN THE PROJECT" read as COMPLETE — so a
-            # planner could wrongly conclude a target file is absent. Name it as partial and tell
-            # the planner to use tools to find anything not shown.
-            _shown = existing_files[:200]
-            file_list = "\n".join(f"  {f}" for f in _shown)
-            _more = (f"\n  … and {len(existing_files) - len(_shown)} MORE files NOT listed (this is "
-                     f"only the first {len(_shown)} alphabetically). Use [LS: dir] / [SEARCH:] to "
-                     f"find any file not shown — do NOT assume a file is absent just because it's "
-                     f"not in this partial list."
-                     if len(existing_files) > len(_shown) else "")
-            context_parts.append(
-                f"SOME FILES IN THE PROJECT (first {len(_shown)}, alphabetical — PARTIAL):\n"
-                f"{file_list}{_more}"
-            )
+        # (ckpt-233, user 2026-06-08): the flat "SOME FILES IN THE PROJECT (first 200, alphabetical)"
+        # list was REMOVED — it was redundant with the real repo TREE (build_repo_tree → {file_list}),
+        # truncated before the real targets on big repos, and re-sent every round as noise. The tree +
+        # [LS: dir] / [SEARCH:] are the file map.
 
         if general_map:
             # Only show section headings — not the full content.
