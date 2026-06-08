@@ -952,6 +952,20 @@ def _arg_looks_ident(arg: str) -> bool:
     return bool(_IDENT_ARG_RE.match(arg.strip()))
 
 
+def _normalize_range_spec(spec: str) -> str:
+    """Fix #3 (ckpt-233, planner-audit): a weak model writes the line range in forms the parser
+    rejected — `L1-L30` (LongCat-style L-prefix) and `1 30` (space-separated, no dash) — and burned
+    6+ rounds re-issuing the same [VIEW:] until it stumbled onto `1-30`. Normalize the RANGE spec
+    (path already split off) to the canonical dashed form so all equivalent shapes fire identically.
+    Never raises."""
+    if not isinstance(spec, str):
+        return spec
+    s = spec.strip()
+    s = re.sub(r'(?i)\bL(\d+)', r'\1', s)        # L100 / L100-L160 → 100 / 100-160
+    s = re.sub(r'^(\d+)\s+(\d+)$', r'\1-\2', s)  # "100 160" → "100-160" (space → dash)
+    return s
+
+
 # Per-round cap on the number of tags we'll FIRE. The model has written
 # 12+ tags in a single block in practice (deepseek's 8 KEEPs); this lets
 # legitimate exploration through but rejects pathological 50-tag dumps
@@ -2457,7 +2471,7 @@ async def _run_view(
         )
         if ws_split:
             filepath = ws_split.group(1).strip()
-            spec = ws_split.group(2).strip()
+            spec = _normalize_range_spec(ws_split.group(2).strip())   # #3: L-prefix + "N M" → "N-M"
         else:
             # Fallback: split before the first digit
             digit_match = re.search(r'\d', arg_no_label)
@@ -2472,7 +2486,7 @@ async def _run_view(
                 _persist_view_failure(arg, _msg)
                 continue
             filepath = arg_no_label[:digit_match.start()].strip()
-            spec = arg_no_label[digit_match.start():].strip()
+            spec = _normalize_range_spec(arg_no_label[digit_match.start():].strip())   # #3
 
         filepath = norm_path(filepath)
         if _path_escapes_root(filepath, project_root):

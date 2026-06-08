@@ -37,7 +37,7 @@ def _resolve_and_pin(model_id: str, payload: dict) -> str:
     # DegenerationDetector still aborts the worst cases; this REDUCES how often they happen). Applied
     # to every planner call routed through this client (free + :paid). Conservative 0.3 — high enough
     # to break loops, low enough not to hurt plan quality. setdefault → never clobbers a caller value.
-    payload.setdefault("frequency_penalty", 0.3)
+    payload.setdefault("frequency_penalty", 0.2)
     # ":paid" variant (ckpt-232, user 2026-06-08): the PAID fallback for a free planner that just
     # failed (stall/429). Strip the marker → use the BARE slug (no :free) so OpenRouter serves a PAID
     # provider; allow_fallbacks stays default-true. Cheap planners (gemma ~$0.04, super ~$0.02) use
