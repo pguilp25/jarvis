@@ -31,6 +31,13 @@ def _resolve_and_pin(model_id: str, payload: dict) -> str:
     the planners here get the SAME treatment: :free slugs, max_tokens capped to 4096 for :free,
     nemotron-3-ultra pinned allow_fallbacks=False (never billed), cheap planners allowed paid fallback.
     Never raises. (ckpt-227, 2026-06-08.)"""
+    # gemma mitigation (ckpt-233, user 2026-06-08): the weak free planners (esp. gemma-4) sometimes
+    # collapse into token-repetition degeneration ("same same sameL_use_use", "額額額…") with no output
+    # cap — a mild frequency_penalty discourages the verbatim loop at the sampler level (the
+    # DegenerationDetector still aborts the worst cases; this REDUCES how often they happen). Applied
+    # to every planner call routed through this client (free + :paid). Conservative 0.3 — high enough
+    # to break loops, low enough not to hurt plan quality. setdefault → never clobbers a caller value.
+    payload.setdefault("frequency_penalty", 0.3)
     # ":paid" variant (ckpt-232, user 2026-06-08): the PAID fallback for a free planner that just
     # failed (stall/429). Strip the marker → use the BARE slug (no :free) so OpenRouter serves a PAID
     # provider; allow_fallbacks stays default-true. Cheap planners (gemma ~$0.04, super ~$0.02) use
