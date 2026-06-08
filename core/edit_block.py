@@ -50,6 +50,15 @@ _BLOCK_RE  = re.compile(
     re.S | re.I | re.M)
 _EDIT_NUM_RE = re.compile(r'\[edit:\s*(\d+)\]', re.I)
 _GUTTER_LEAK_RE = re.compile(r'^\s*\d+:')   # a bare-`+` line whose content still carries a gutter
+# prefix_ws view gutter `LINENO ⇥` (the native view now shared by all roles). The
+# keep/del/add markers below all anchor on `LINENO:` (colon); normalize a copied
+# `LINENO ⇥` gutter to `LINENO:` FIRST so a line the coder copied verbatim from the
+# view (`12 ⇥4|code`) is recognized as a keep, and a `12 ⇥-…`/`12 ⇥+…` resolves to
+# the `:-`/`:+` markers. The prompt-instructed colon forms pass through untouched.
+# The trailing `\s*` also EATS a stray space the coder may leave after the ⇥ and
+# before a `-`/`+` marker (`12 ⇥ -4|` → `12:-4|`), which would otherwise split the
+# marker from its colon and fall through unmatched.
+_PREFIX_WS_GUTTER_RE = re.compile(r'^(\d+)\s*⇥\s*')
 
 # Prefix-mode (v12) bodies carry indentation as a COUNT: `INDENT|code` (e.g.
 # `16|raise TypeError(other)` = 16 leading spaces). The view shows
@@ -63,16 +72,49 @@ _INDENT_PREFIX_RE = re.compile(r'^(\d+)\|(.*)$')
 
 
 def _expand_indent(content: str) -> str:
-    """`INDENT|code` → `<INDENT spaces>code` (for an ADDED line). Else verbatim."""
-    m = _INDENT_PREFIX_RE.match(content)
-    return (" " * int(m.group(1)) + m.group(2)) if m else content
+    """`INDENT|code` → `<INDENT spaces>code` (for an ADDED line). Else verbatim.
+
+    The COUNT is authoritative: any real leading spaces still typed in the code
+    part are dropped (`lstrip`) before the count's spaces are re-emitted. This is
+    what makes the prefix_ws view (`INDENT|<real spaces>code`) safe — the coder
+    copying a line keeps both the count AND the visible spaces, and we must not
+    DOUBLE them (`4|    x` is 4 spaces, not 8). Mirrors core/native_tools.py:
+    _expand_indent_lines, which already lstrips. A count-only `4|x` is unaffected.
+
+    A leading space BEFORE the count is also tolerated — the documented add form
+    is `N:+ <code>` (a space after the marker), so `+ 4|y = 2` arrives here as
+    ` 4|y = 2`; match against the space-stripped form so the count still fires.
+    If there is NO count prefix (whitespace-mode add), return the ORIGINAL content
+    verbatim so genuine leading indentation is preserved.
+
+    Two further guards mirror core/native_tools.py:_expand_indent_lines so the text
+    and native coders behave IDENTICALLY on the shared prefix_ws view:
+      • the ⇥ tab-glyph is the harness's display marker and is NEVER valid source —
+        a stray one copied into the code part is stripped (else it ships as a literal
+        `⇥` → `SyntaxError: invalid character`).
+      • STRUCTURAL-line guard: if the code is a `def`/`class`/decorator AND the typed
+        leading spaces disagree with the count, trust the TYPED spaces — trusting the
+        number would EJECT a method to a shallower scope (the f631 failure)."""
+    m = _INDENT_PREFIX_RE.match(content.lstrip(' '))
+    if not m:
+        return content
+    ind = int(m.group(1))
+    code = m.group(2).replace("⇥", "")
+    typed = len(code) - len(code.lstrip(' '))
+    if typed > 0 and typed != ind:
+        _cs = code.lstrip(' ')
+        if re.match(r'(?:async\s+def|def|class)\b', _cs) or _cs.startswith('@'):
+            ind = typed
+    return " " * ind + code.lstrip(' ')
 
 
 def _bare_code(content: str) -> str:
     """Strip a leading `INDENT|` so keep/del match the file by CODE, not the
-    count. Else return content unchanged (whitespace mode)."""
+    count. Else return content unchanged (whitespace mode). A stray ⇥ display
+    glyph is dropped either way (it's never in the real file, so it would only
+    break the content match)."""
     m = _INDENT_PREFIX_RE.match(content)
-    return m.group(2) if m else content
+    return (m.group(2) if m else content).replace("⇥", "")
 
 
 def edit_label(block_text: str) -> "str | None":
@@ -133,6 +175,7 @@ def apply_edit_block(src, block_text):
     #      | ("bulk", start, end)
     ops = []
     for ln in m.group(1).strip("\n").split("\n"):
+        ln = _PREFIX_WS_GUTTER_RE.sub(r'\1:', ln)   # prefix_ws `N ⇥` gutter → `N:` so markers match
         mb = _BULKDEL_RE.match(ln)
         if mb:
             ops.append(("bulk", int(mb.group(1)), int(mb.group(2)))); continue
@@ -161,8 +204,8 @@ def apply_edit_block(src, block_text):
                     "Write the initial content with `=== FILE: <path> === … "
                     "=== END FILE ===`, not an [edit] block.", [])
         return (None, "no kept or deleted line to anchor on — copy at least one "
-                "surrounding line VERBATIM as `LINENO:INDENT|code` (e.g. "
-                "`43:8|raise ValueError(\"x\")`) so the edit's location is "
+                "surrounding line VERBATIM as `LINENO ⇥INDENT|code` (e.g. "
+                "`43 ⇥8|        raise ValueError(\"x\")`) so the edit's location is "
                 "unambiguous. A block of only `+` adds has nowhere to attach.", [])
 
     # ── 2. resolve keep/del positions (number-first, content-verified) ───────
@@ -220,7 +263,7 @@ def apply_edit_block(src, block_text):
                         ind = len(cur_ln) - len(cur_ln.lstrip(" "))
                         if cur_ln.strip():
                             actual = (f" Line {n} CURRENTLY reads: "
-                                      f"`{n}:{ind}|{cur_ln.strip()}` — anchor on THAT "
+                                      f"`{n} ⇥{ind}|{' ' * ind}{cur_ln.strip()}` — anchor on THAT "
                                       f"(or the correct line), do not re-type your "
                                       f"old version.")
                         else:

@@ -281,15 +281,21 @@ def file_uses_tabs(content: str) -> bool:
     return False
 
 
-def add_line_numbers(content: str, display_mode: str = "prefix") -> str:
+def add_line_numbers(content: str, display_mode: str = "prefix_ws") -> str:
     """Add line numbers to code content.
 
     display_mode controls how the indent is rendered:
 
-      "prefix"     — v9 LINENO|INDENT|content (default; coder/reviewer).
-                     Token-efficient: 12 spaces becomes `12|`. The model
-                     reuses the same INDENT|content shape in REPLACE
-                     bodies. Required for any role that emits edits.
+      "prefix_ws"  — LINENO ⇥INDENT|<real spaces>content (DEFAULT; ALL roles).
+                     The native coder's view, now unified across the whole
+                     pipeline: bare line# + `⇥INDENT` count + `|` + the real
+                     leading spaces (visible nesting) + code. Edit-safe — the
+                     count is authoritative, so a NEW line is still written as
+                     `INDENT|code`; the visible spaces are a reading aid.
+
+      "prefix"     — v9 LINENO:INDENT|content (legacy; colon gutter, no real
+                     spaces). Token-efficient: 12 spaces becomes `12|`. Kept
+                     for back-compat; superseded by prefix_ws.
 
       "whitespace" — LINENO|<actual spaces><content> (planner/understand/
                      merger / exploration CLI). Reads natural; the model

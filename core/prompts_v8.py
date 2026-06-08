@@ -224,25 +224,26 @@ is the most reliable way to break unrelated tests.
 
 ### Tool output formats — what you'll see
 
-CODE returns lines in PREFIX format for every role:
-        LINENO:INDENT|content
-            — e.g.  `57:4|model_id: str,`  (INDENT=4 → 4 leading spaces)
-The `LINENO:` is a gutter; `INDENT` is the leading-space COUNT; `content` is the
-code with leading spaces stripped. To keep a line in an `[edit]` block, copy it
-VERBATIM — gutter, count and all (`57:4|model_id: str,`).
+CODE returns lines in this format for every role:
+        LINENO ⇥INDENT|<real spaces>content
+            — e.g.  `57 ⇥4|    model_id: str,`  (INDENT=4 → 4 real leading spaces, shown)
+Read it left-to-right: the bare LINENO (1-indexed), a space, the `⇥` glyph that
+marks the INDENT (the leading-space COUNT), `|`, then the line's REAL indentation
+(so the nesting is visible to you) and the code. To keep a line in an `[edit]`
+block, copy it VERBATIM — line number, `⇥INDENT|`, spaces and all.
 
 Example:
 
     === Code: path/to/file.py (229 lines) ===
-    1:0|# module header
-    2:0|import asyncio
+    1 ⇥0|# module header
+    2 ⇥0|import asyncio
     ...
-    56:0|def call_with_retry( |appears 117 (#3df, shared name)
-    57:4|model_id: str,
+    56 ⇥0|def call_with_retry( |appears 117 (#3df, shared name)
+    57 ⇥4|    model_id: str,
     ...
 
-LINENO (1-indexed) is at the FRONT, then `:`, then the INDENT count, then `|`,
-then the code.
+LINENO is at the FRONT, then ` ⇥` + the INDENT count, then `|`, then the real
+leading spaces, then the code.
 
 The header is silent when the file is being read for the first
 time (sandbox = disk). If your session has already edited the
@@ -257,7 +258,7 @@ note suggesting `[KEEP:]` above ~700 lines if you only need a region).
 The `|appears N (#tag, ...)` annotation on a `def` line means the
 symbol is shared. See BLAST RADIUS above.
 
-VIEW and KEEP return the same PREFIX format as CODE — `LINENO:INDENT|content`,
+VIEW and KEEP return the same format as CODE — `LINENO ⇥INDENT|<real spaces>content`,
 where INDENT is the leading-space COUNT — with a header like
 `KEPT 31/8204 lines, line numbers accurate for [REPLACE LINES]` —
 the LINENO values shown are the real file line numbers, suitable
@@ -268,8 +269,8 @@ prepends a one-line warning before the content:
 
     === VIEW: foo.py (lines 8161-8204 of 8204) ===
     ⚠ Requested L9700 is past EOF (file has 8204 lines). Returning end of file.
-    8161:0|def _guess_filename(task: str, content: str) -> str:
-    8162:4|name = _re.search(r'...', task)
+    8161 ⇥0|def _guess_filename(task: str, content: str) -> str:
+    8162 ⇥4|    name = _re.search(r'...', task)
     ...
 
 Don't reissue the same request — check the file's actual line count
@@ -359,11 +360,15 @@ The diff is GROUND TRUTH. Verify it before you finish:
 read every `:-` (intended?) and every `:+` (right place + indent?)
 before you write `[DONE]`.
 
+⚠ This DIFF is for READING ONLY — its `N:+`/`N:-`/`N:` rows are NOT the read view
+and are NOT copyable into an edit. When you write the NEXT edit, anchor on lines
+from the `LINENO ⇥INDENT|` read view (re-read if needed), never on a diff row.
+
 Rejections — the file is UNCHANGED; fix and re-emit (do NOT retry the
 same anchor verbatim):
 
   ✗ anchor text doesn't match the file (stale view):
-    re-read with [CODE:] and copy the kept line (`LINENO:INDENT|code`) VERBATIM.
+    re-read with [CODE:] and copy the kept line (`LINENO ⇥INDENT|code`) VERBATIM.
 
   ✗ AMBIGUOUS anchor — your kept line repeats elsewhere in the file:
     a lone `return` / `pass`, or any line that occurs more than once, can't
@@ -382,45 +387,47 @@ diagnose, fix the anchor, re-emit. Don't retry the same call.
 
 ### How you read code, and how you edit it
 
-Files are SHOWN to you as `LINENO:INDENT|content`:
-    43:8|raise ValueError("foo")
-means file line 43, indented 8 spaces, then the code. `LINENO:` is a gutter;
-`INDENT` is the COUNT of leading spaces (0, 4, 8, 12, 16, …); `content` is the
-code with leading spaces stripped. You reproduce indentation by writing the
-COUNT — the runtime turns `8|` into 8 real spaces, so you NEVER type spaces.
+Files are SHOWN to you as `LINENO ⇥INDENT|<real spaces>content`:
+    43 ⇥8|        raise ValueError("foo")
+means file line 43, indented 8 spaces (the `⇥8` states the COUNT, and the 8 real
+spaces are shown after the `|` so you SEE the nesting), then the code. INDENT is
+the COUNT of leading spaces (0, 4, 8, 12, 16, …). You reproduce indentation for a
+NEW line by writing that COUNT — the runtime turns `8|` into 8 real spaces, so you
+never have to type or count spaces yourself.
 
 To EDIT, you write an `[edit:N]` block — a small window of the file shown as a
-DIFF. Copy each line from the read view with its `LINENO:` gutter; a marker
-right after the colon says what happens to that line:
+DIFF. Copy each line from the read view with its `LINENO ⇥INDENT|` gutter; a
+marker says what happens to that line:
 
-  • `LINENO:INDENT|code`   KEEP unchanged — copy the line verbatim. A couple of
-                           kept lines above and below bound your edit.
-  • `LINENO:-INDENT|code`  DELETE this line — copy the current line so the
-                           removal is explicit and the runtime can check it.
-  • `LINENO:+INDENT|code`  ADD a new / changed line. INDENT is the leading-space
-                           COUNT for the new line; the runtime expands it. A
-                           bare `+INDENT|code` (no LINENO) works too.
+  • `LINENO ⇥INDENT|code`   KEEP unchanged — copy the line VERBATIM (`⇥`, count,
+                           spaces and all). A couple of kept lines above and below
+                           bound your edit.
+  • `LINENO ⇥-INDENT|code`  DELETE this line — copy the current line and put a `-`
+                           right after the `⇥`, so the removal is explicit and the
+                           runtime can check it.
+  • `+INDENT|code`          ADD a new / changed line. INDENT is the leading-space
+                           COUNT for the new line; the runtime expands it. (No
+                           line number — a `+` line is new, so it has none yet.)
   • `M-N:-`                BULK-DELETE lines M through N.
 
 A line you DON'T list is KEPT — deletion always needs a `-`, it never happens by
-leaving a line out. To CHANGE a line, delete the old and add the new at the same
-number:  `13:-8|old`  then  `13:+8|new`.
+leaving a line out. To CHANGE a line, delete the old and add the new:
+`13 ⇥-8|old`  then  `+8|new`.
 ⚠ DO NOT keep a line AND add a near-duplicate of it — that gives you BOTH lines.
-  WRONG (yields two defs):   `13:8|def f(x):`   then   `13:+8|def f(x=None):`
-  RIGHT (replaces the line):  `13:-8|def f(x):`  then   `13:+8|def f(x=None):`
-  A plain `13:...` (no `-`) KEEPS line 13 unchanged; the `+` then ADDS another.
+  WRONG (yields two defs):   `13 ⇥8|        def f(x):`   then   `+8|def f(x=None):`
+  RIGHT (replaces the line):  `13 ⇥-8|        def f(x):`  then   `+8|def f(x=None):`
+  A plain `13 ⇥...` (no `-`) KEEPS line 13 unchanged; the `+` then ADDS another.
 
-INDENT IS A COUNT YOU COMPUTE — this is the point of the format, and where edits
-fail most:
-  • A block BODY is its keyword's indent + 4. `else:` at `12|` → its body at
-    `16|`. `def f():` at `4|` → its body at `8|`. `if x:` at `8|` → its body at
-    `12|`. Read the surrounding counts and add 4 per nesting level — never eyeball.
+INDENT IS A COUNT YOU COMPUTE — for NEW (`+`) lines this is where edits fail most:
+  • A block BODY is its keyword's indent + 4. `else:` at `⇥12` → its body at
+    `+16|`. `def f():` at `⇥4` → its body at `+8|`. `if x:` at `⇥8` → its body at
+    `+12|`. Read the surrounding counts and add 4 per nesting level — never eyeball.
   • Every `+` line MUST carry an `INDENT|`. `+raise x` (no count) is WRONG;
     write `+16|raise x`.
 
 ANCHOR RULE:
   • Anchor with TWO lines of real CODE you are KEEPING — one just above and one
-    just below the change, copied verbatim as `LINENO:INDENT|code`. Prefer a
+    just below the change, copied verbatim as `LINENO ⇥INDENT|code`. Prefer a
     DISTINCTIVE line: a kept line whose content repeats elsewhere (a lone
     `return`/`pass`, or a blank) carries no identity, so the runtime can't pin it
     and REJECTS the edit as AMBIGUOUS. Use the nearest distinctive code line.
@@ -444,35 +451,35 @@ edit THAT, copying its real line numbers and indentation.
 Example A — insert a guard (pure addition; surrounding lines kept as anchors):
     === EDIT: path/to/file.py ===
     [edit:1]
-    5:4|def deposit(self, amount):
+    5 ⇥4|    def deposit(self, amount):
     +8|if amount <= 0:
     +12|raise ValueError("amount must be positive")
-    6:8|self.balance += amount
+    6 ⇥8|        self.balance += amount
     [/edit]
     === END EDIT ===
 
 Example B — change one line (delete the old, add the new):
     === EDIT: path/to/file.py ===
     [edit:1]
-    242:8|cleft = np.zeros((noutp, left.shape[1]))
-    243:-8|cright = np.zeros((noutp, right.shape[0]))
-    243:+8|cright = np.zeros((noutp, right.shape[1]))
-    244:8|cright[:right.shape[0], :right.shape[1]] = right
+    242 ⇥8|        cleft = np.zeros((noutp, left.shape[1]))
+    243 ⇥-8|        cright = np.zeros((noutp, right.shape[0]))
+    +8|cright = np.zeros((noutp, right.shape[1]))
+    244 ⇥8|        cright[:right.shape[0], :right.shape[1]] = right
     [/edit]
     === END EDIT ===
 
 Example C — remove a block you no longer need (bulk shorthand):
     === EDIT: path/to/file.py ===
     [edit:1]
-    11:8|result = compute(x)
+    11 ⇥8|        result = compute(x)
     12-15:-
-    16:8|return result
+    16 ⇥8|        return result
     [/edit]
     === END EDIT ===
 
 Indentation is a COUNT, not spaces: write `INDENT|` (the leading-space count)
 and the runtime expands it — a block body is its keyword's count + 4 (`else:`
-at `12|` → its body at `16|`). The runtime checks the result after applying: if
+at `⇥12` → its body at `+16|`). The runtime checks the result after applying: if
 a line's indent doesn't fit the file it names the line and you fix the count. It
 also warns if an edit removes a line you may have meant to keep, or duplicates
 one you both kept as an anchor and re-added.
@@ -1588,8 +1595,8 @@ test if one exists, the user's described expected behavior if not.
 
 Every change you make to the file system must be inside an EDIT block;
 anything outside is prose that won't be applied. The numbered `[edit:N]`
-diff format — KEEP / `N:-` delete / `+INDENT|` add / `M-N:-` bulk-delete, with
-INDENT as the leading-space COUNT — is defined in the edit-mechanics section
+diff format — KEEP (copy the line verbatim) / `LINENO ⇥-INDENT|` delete / `+INDENT|`
+add / `M-N:-` bulk-delete, with INDENT as the leading-space COUNT — is defined in the edit-mechanics section
 above (with worked examples). Two variants + the size rule are specific here:
 
     `=== FILE: path === <body> === END FILE ===` — a brand-NEW file only,
@@ -1692,7 +1699,7 @@ Q-DONE (always) — already done?
 Q-FORMAT (always) — your `[edit]` block is well-formed
     The KEEP/DELETE/ADD marks and the INDENT-count rule are defined in 'The edit
     envelope' above. Re-check just two things each round: (1) to CHANGE a line,
-    DELETE the old (`N:-`, copied verbatim) AND ADD the new (`+`) — never keep the
+    DELETE the old (`⇥-`, copied verbatim) AND ADD the new (`+`) — never keep the
     old line too, or it duplicates; (2) one line of real CODE (never a blank) above
     and below as anchors.
 
@@ -1788,9 +1795,9 @@ shipping.
 
             === EDIT: foo.py ===
             [edit:1]
-            43:4|if not line:
+            43 ⇥4|    if not line:
             +8|if line is None:
-            44:8|return None
+            44 ⇥8|        return None
             [/edit]
             === END EDIT ===
 
@@ -1799,9 +1806,9 @@ shipping.
 
             === REVISE EDIT: foo.py ===
             [edit:1]
-            42:0|def parse_header(line):
+            42 ⇥0|def parse_header(line):
             +4|if line is None:
-            44:8|return None
+            44 ⇥8|        return None
             [/edit]
             === END REVISE EDIT ===
 
@@ -1862,8 +1869,8 @@ against the contract:
 ## Indent safety
 
 Read indentation from the FILE, not from your head. Lines are shown as
-`LINENO:INDENT|code`, where INDENT is the leading-space COUNT, so a KEPT line
-(`N:INDENT|`) or DELETED line (`N:-INDENT|`) is copied verbatim — the count
+`LINENO ⇥INDENT|<real spaces>code`, where INDENT is the leading-space COUNT, so a KEPT line
+(`LINENO ⇥INDENT|`) or DELETED line (`LINENO ⇥-INDENT|`) is copied verbatim — the count
 comes for free. For a `+` line you write `+INDENT|code`; the runtime expands
 INDENT into that many real spaces, so you NEVER type leading spaces yourself.
 
@@ -1894,9 +1901,9 @@ A complete coder round, for reference:
 
     === EDIT: foo.py ===
     [edit]
-    42:0|def parse_header(line):
+    42 ⇥0|def parse_header(line):
     +4|if line is None:
-    44:8|return None
+    44 ⇥8|        return None
     [/edit]
     === END EDIT ===
 
@@ -1919,15 +1926,15 @@ Next round (the runtime shows the DIFF — verify it, then trace):
 
 ### Variant: deleting a line
 
-To remove a line, mark it `N:-` (copy the current line) with kept anchors around
-it; the runtime's diff shows one `N:-` removal — confirm it's the only one. For a
+To remove a line, mark it `⇥-` (copy the current line) with kept anchors around
+it; the runtime's diff shows one `:-` removal — confirm it's the only one. For a
 contiguous run, use `M-N:-`.
 
     === EDIT: dashboards/views.py ===
     [edit]
-    52:12|events.extend(source.fetch())
-    53:-12|events.append(None)
-    54:8|return events[:20]
+    52 ⇥12|            events.extend(source.fetch())
+    53 ⇥-12|            events.append(None)
+    54 ⇥8|        return events[:20]
     [/edit]
     === END EDIT ===
     [STOP][CONFIRM_STOP]
@@ -2476,15 +2483,16 @@ that were complete the first time.
 
 Same surgical-edit rules as the coder and the reviewer:
 
-    - Use a numbered `[edit:N]` block: `N:` keep / `N:-` delete / `N:+` add
-      (or a bare `+`) / `M-N:-` bulk-delete. An omitted line is KEPT.
+    - Use a numbered `[edit:N]` block: `LINENO ⇥INDENT|` keep (copy verbatim) /
+      `LINENO ⇥-INDENT|` delete / a bare `+INDENT|code` add / `M-N:-` bulk-delete.
+      An omitted line is KEPT.
     - Keep a line or two of context above and below your change.
     - No `=== FILE: …` for existing files. Close the block with `[/edit]` and the
       envelope with `=== END EDIT ===` (both lowercase/exact — there is no
       uppercase `[/EDIT]` token).
-    - Copy kept/deleted lines VERBATIM (gutter + `INDENT|` and all); write `+`
-      lines as `+INDENT|code` (INDENT = leading-space COUNT; a body = its
-      keyword's count +4) — the runtime expands the count and flags indent slips.
+    - Copy kept/deleted lines VERBATIM (the `LINENO ⇥INDENT|` gutter, real spaces
+      and all); write `+` lines as `+INDENT|code` (INDENT = leading-space COUNT; a
+      body = its keyword's count +4) — the runtime expands the count and flags indent slips.
 
 
 ## Revert

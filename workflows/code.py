@@ -1230,14 +1230,14 @@ HOW TO READ CODE
 
 When you read files with [CODE:], every line appears as:
 
-    LINENO:INDENT|content
+    LINENO ⇥INDENT|<real spaces>content
 
-LINENO at front, then ':', then INDENT (the leading-space count), then '|',
-then the code. Example:
+LINENO at front, then ' ⇥' + INDENT (the leading-space count), then '|', then the
+real leading spaces (so you SEE the nesting), then the code. Example:
 
-    10:0|class Memory:
-    11:4|def add(self, role):
-    12|8|entry = {"role": role}
+    10 ⇥0|class Memory:
+    11 ⇥4|    def add(self, role):
+    12 ⇥8|        entry = {"role": role}
 
 Reference code in your plan as: "add() at memory.py:11".
 The coder uses these line-number anchors to find the exact lines to edit.
@@ -2622,14 +2622,14 @@ treats it as "I forgot to emit edits" and forces a retry. If your
 [think] concludes "no change needed," your ONLY correct signal is
 [FORCE DONE][CONFIRM_FORCE_DONE].
 
-⚠ VIEW FORMAT NOTE — each line is shown as `LINENO:INDENT|content`.
+⚠ VIEW FORMAT NOTE — each line is shown as `LINENO ⇥INDENT|<real spaces>content`.
 The file_content section shows lines as:
-    LINENO:INDENT|content   ← LINENO + ':' + INDENT (the leading-space
-                              count) + '|' + the code.
+    LINENO ⇥INDENT|<real spaces>content   ← LINENO + ' ⇥' + INDENT (the leading-space
+                              count) + '|' + the real spaces + the code.
 
-To EDIT, copy the line from the view VERBATIM (gutter + INDENT| and all), then
-mark it: keep = `LINENO:INDENT|code`, delete = `LINENO:-INDENT|code`, add =
-`+INDENT|code` (the `+` replaces the LINENO: gutter; INDENT is the count for the
+To EDIT, copy the line from the view VERBATIM (the `⇥INDENT|` gutter, real spaces
+and all), then mark it: keep = `LINENO ⇥INDENT|code`, delete = `LINENO ⇥-INDENT|code`,
+add = `+INDENT|code` (a bare `+` then the count; INDENT is the count for the
 new line — a block body is its keyword's count + 4; the runtime expands it).
 
 So SEARCH = `243|0|<code>` (LINENO optional) OR `0|<code>`
@@ -3267,35 +3267,35 @@ HARD CONSTRAINTS — VIOLATING ANY OF THESE FAILS THE STEP
      request. Do not "while I'm here" cleanup unrelated code.
 
 ══════════════════════════════════════════════════════════════════════
-THE LINE FORMAT — LINENO:INDENT|content
+THE LINE FORMAT — LINENO ⇥INDENT|<real spaces>content
 ══════════════════════════════════════════════════════════════════════
 
-[CODE:]/[VIEW:]/[KEEP:] show each line as `LINENO:INDENT|content`. `LINENO:`
-is a gutter; `INDENT` is the COUNT of leading spaces; `content` is the code
-with its leading spaces stripped:
-    10:0|def foo():
-    11:4|if x:
-    12:8|return x
-You reproduce indentation by writing the COUNT — the runtime turns `8|` into 8
-real spaces, so you NEVER type spaces.
+[CODE:]/[VIEW:]/[KEEP:] show each line as `LINENO ⇥INDENT|<real spaces>content`. The
+bare `LINENO` is the line number; `⇥INDENT` states the COUNT of leading spaces; then
+`|`, the real leading spaces (so you SEE the nesting), and the code:
+    10 ⇥0|def foo():
+    11 ⇥4|    if x:
+    12 ⇥8|        return x
+You reproduce indentation for a NEW line by writing the COUNT — the runtime turns
+`8|` into 8 real spaces, so you NEVER have to type or count spaces.
 
-WRITING an edit — copy the line from the view VERBATIM (gutter + INDENT| and
-all), then mark it:
-    12:8|return x       KEEP   — copy unchanged (keep a few CODE lines to anchor)
-    12:-8|return x      DELETE — copy the current line so the removal is explicit
-    +8|return x         ADD    — INDENT is the leading-space COUNT for the new line
-    M-N:-               BULK-DELETE lines M through N
+WRITING an edit — copy the line from the view VERBATIM (the `⇥INDENT|` gutter, real
+spaces and all), then mark it:
+    12 ⇥8|        return x   KEEP   — copy unchanged (keep a few CODE lines to anchor)
+    12 ⇥-8|        return x  DELETE — copy the line, add `-` after the `⇥`, so it's explicit
+    +8|return x            ADD    — INDENT is the leading-space COUNT for the new line
+    M-N:-                  BULK-DELETE lines M through N
 
   RULES:
     1. INDENT is a COUNT you COMPUTE, not spaces you type. A block BODY is its
-       keyword's count + 4: `else:` at 12| → its body at 16|; `if x:` at 8| →
-       its body at 12|. Read the surrounding counts; never eyeball spaces.
+       keyword's count + 4: `else:` at `⇥12` → its body at `+16|`; `if x:` at `⇥8`
+       → its body at `+12|`. Read the surrounding counts; never eyeball spaces.
     2. Every `+` (added) line MUST carry an `INDENT|` — `+raise x` is WRONG;
-       write `+16|raise x`. The `+` replaces the `LINENO:` gutter.
+       write `+16|raise x`. A `+` line has no line number (it's new).
     3. On [DONE] the file is parsed — a wrong count raises an IndentationError
        that names the line; fix the count and re-verify.
     4. ANCHOR on TWO lines of real CODE you KEEP (one above, one below the
-       change), copied as `LINENO:INDENT|code`. NEVER anchor on a BLANK line — a
+       change), copied as `LINENO ⇥INDENT|code`. NEVER anchor on a BLANK line — a
        blank matches many lines and the edit is REJECTED as ambiguous. If the
        neighbour is blank, use the nearest NON-blank code line instead.
     5. Touch ONLY the lines that change. Do NOT delete-then-re-add a line that
@@ -3417,18 +3417,18 @@ EDIT FORMS — WHICH ONE TO USE
 
   === EDIT: path/to/file.py ===
   [SEARCH]
-  22:4|def foo(self):
-  23:8|return 1
+  22 ⇥4|    def foo(self):
+  23 ⇥8|        return 1
   [/SEARCH]
   [REPLACE]
   4|def foo(self, x):
   8|return x
   [/REPLACE]
 
-  SEARCH: copy the lines from the view VERBATIM — the `LINENO:` gutter is fine
-  (the runtime strips it and the INDENT| count, and content-matches the rest).
+  SEARCH: copy the lines from the view VERBATIM — the `LINENO ⇥INDENT|` gutter is fine
+  (the runtime strips the line# and the INDENT| count, and content-matches the rest).
   REPLACE: write each new line as `INDENT|code` (the leading-space COUNT, NO
-  `LINENO:` gutter); the runtime expands the count into real spaces.
+  `LINENO ⇥` gutter); the runtime expands the count into real spaces.
   If SEARCH doesn't match → edit is SILENTLY SKIPPED. Make SEARCH unique:
   include 2+ consecutive lines that don't appear elsewhere.
 
@@ -5511,12 +5511,12 @@ HARD CONSTRAINTS — VIOLATING ANY OF THESE FAILS THE REVIEW
 CODE FORMAT
 ══════════════════════════════════════════════════════════════════════
 
-Display: `LINENO:INDENT|content` — INDENT is the leading-space COUNT.
-Edits: copy keep/del lines VERBATIM (gutter + INDENT|); write `+INDENT|code` for adds (a block body = its keyword's count + 4; the runtime expands the count).
+Display: `LINENO ⇥INDENT|<real spaces>content` — INDENT is the leading-space COUNT.
+Edits: copy keep/del lines VERBATIM (the `⇥INDENT|` gutter and real spaces); write `+INDENT|code` for adds (a block body = its keyword's count + 4; the runtime expands the count).
 
 ⚠ NEVER carry the leading LINENO from the [CODE:] view into your
   REPLACE content. `198|4|return x` in REPLACE makes INDENT=198 → giant
-  whitespace → SyntaxError. Strip the LINENO|.
+  whitespace → SyntaxError. A REPLACE line is `INDENT|code` ONLY — no line#.
 
 ⚠ ORPHAN EDIT BLOCKS: every [REPLACE LINES N-M] / [INSERT AFTER LINE N]
   / [DELETE LINE N] block MUST live inside `=== EDIT: <path> === …
@@ -6018,16 +6018,17 @@ def _extend_ranges_to_scope_anchor(
 
 
 def _filter_by_ranges(content: str, ranges: list[tuple[int, int]], filepath: str,
-                       display_mode: str = "prefix") -> str:
+                       display_mode: str = "prefix_ws") -> str:
     """Build a filtered view of a file showing only the kept ranges.
 
     Line numbers are PRESERVED — [REPLACE LINES] still works on the result.
     Hidden sections are marked with "(lines X-Y hidden)".
 
     display_mode mirrors `tools.codebase.add_line_numbers`:
-      "prefix"     — `LINENO|INDENT|content` (default, edit-safe).
-      "whitespace" — `LINENO|<actual leading whitespace><content>` (read-
-                     only roles; planner/understand/merger/exploration).
+      "prefix_ws"  — `LINENO ⇥INDENT|<real spaces>content` (DEFAULT, all roles;
+                     edit-safe — count authoritative, real spaces a reading aid).
+      "prefix"     — `LINENO:INDENT|content` (legacy colon gutter, no real spaces).
+      "whitespace" — `LINENO|<actual leading whitespace><content>` (read-only).
 
     v9.1: ranges are returned EXACTLY as requested. The prior auto-extension
     to enclosing def/class surprised the model — it broke the contract that
@@ -7723,6 +7724,11 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
     first_num = None
     has_numbers = False
 
+    # prefix_ws view (native coder's view, shared by all roles):
+    # `LINENO ⇥INDENT|<real spaces>content`. Strip the line# + ⇥ gutter and
+    # expand to real source spaces (the count is authoritative; the typed
+    # spaces that follow agree with it and are dropped via lstrip).
+    ws_prefix_format = re.compile(r'^(\d+)\s*⇥(\d+)\|(.*)$')  # LINENO ⇥INDENT|content
     # v9 formats — line# at FRONT, no trailing-integer ambiguity.
     v9_full_format = re.compile(r'^(\d+)\|(\d+)\|(.*)$')   # LINE|INDENT|content
     v9_indent_only = re.compile(r'^(\d+)\|(.*)$')           # INDENT|content
@@ -7731,6 +7737,23 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
     new_format_no_lineno = re.compile(r'^i(\d+)\|(.*)$')
 
     for line in lines:
+        # prefix_ws priority 0: LINENO ⇥INDENT|content (the native view, copied
+        # verbatim). Strip line# (kept as the fuzzy-match hint) and ⇥ gutter,
+        # then expand the INDENT count to real spaces.
+        mpw = ws_prefix_format.match(line)
+        if mpw:
+            has_numbers = True
+            lineno = int(mpw.group(1))
+            indent = int(mpw.group(2))
+            # drop the duplicated real spaces AND any stray ⇥ display glyph (never
+            # valid source — mirrors native_tools._expand_indent_lines so a leaked
+            # marker can't ship as a literal `⇥` → SyntaxError).
+            code = mpw.group(3).replace("⇥", "").lstrip(' ')
+            if first_num is None:
+                first_num = lineno
+            stripped.append(' ' * indent + code)
+            continue
+
         # v9 priority 1: LINE|INDENT|content — extract line# as hint.
         m9f = v9_full_format.match(line)
         if m9f:
@@ -7913,6 +7936,7 @@ def _restore_replace_whitespace(text: str, strip_markers: bool = True) -> str:
         # Strip any INDENT|/LINE|INDENT|/i{N}| prefix first so we check
         # the actual content the line would emit.
         for pat in (
+            re.compile(r'^\s*\d+\s*[:⇥]\d+\|'),   # LINE[:⇥]INDENT| (v10 colon / prefix_ws)
             re.compile(r'^\s*\d+\|\d+\|'),
             re.compile(r'^\s*\d+\|'),
             re.compile(r'^\s*i\d+\|'),
@@ -7938,7 +7962,12 @@ def _restore_replace_whitespace(text: str, strip_markers: bool = True) -> str:
     # '|'), so a view line copied VERBATIM into REPLACE lands here. Strip the
     # `N:` line#, keep INDENT + content. Handled defensively even if
     # strip_view_linenos already ran (then this just won't match).
-    v10_full_re = re.compile(r'^\s*(\d+):(\d+)\|(.*)$')    # LINE:INDENT|content
+    # LINE:INDENT|content (v10 colon) AND LINENO ⇥INDENT|content (prefix_ws,
+    # the native view now shared by all roles). `[:⇥]` + optional space matches
+    # both gutters; the handler drops the line# + the duplicated real spaces and
+    # re-emits INDENT spaces (count == typed spaces in prefix_ws → exact). Mirror
+    # of core/native_tools.py:_VIEW_LINE_RE so both protocols parse identically.
+    v10_full_re = re.compile(r'^\s*(\d+)\s*[:⇥](\d+)\|(.*)$')   # LINE[:⇥]INDENT|content
     v9_full_re = re.compile(r'^\s*(\d+)\|(\d+)\|(.*)$')   # LINE|INDENT|content
     v9_indent_re = re.compile(r'^\s*(\d+)\|(.*)$')         # INDENT|content
     # Legacy v8 format: i{N}|content  →  N spaces + content
@@ -7984,7 +8013,7 @@ def _restore_replace_whitespace(text: str, strip_markers: bool = True) -> str:
         m = v10_full_re.match(line)
         if m:
             indent = int(m.group(2))
-            content = m.group(3).lstrip(_LSTRIP_CHARS)
+            content = m.group(3).replace("⇥", "").lstrip(_LSTRIP_CHARS)
             return ' ' * indent + content
         # v9 priority 1: LINE|INDENT|content — leaked line# prefix.
         # Strip the line# (first int+pipe), keep INDENT + content.
@@ -7992,13 +8021,13 @@ def _restore_replace_whitespace(text: str, strip_markers: bool = True) -> str:
         if m:
             # m.group(2) = indent, m.group(3) = content
             indent = int(m.group(2))
-            content = m.group(3).lstrip(_LSTRIP_CHARS)
+            content = m.group(3).replace("⇥", "").lstrip(_LSTRIP_CHARS)
             return ' ' * indent + content
         # v9 priority 2: INDENT|content — legitimate REPLACE format.
         m = v9_indent_re.match(line)
         if m:
             indent = int(m.group(1))
-            content = m.group(2).lstrip(_LSTRIP_CHARS)
+            content = m.group(2).replace("⇥", "").lstrip(_LSTRIP_CHARS)
             return ' ' * indent + content
         # v8 legacy: i{N}|content format
         m = indent_re.match(line)
@@ -8008,7 +8037,7 @@ def _restore_replace_whitespace(text: str, strip_markers: bool = True) -> str:
             # DEFENSIVE: strip leading whitespace from content. The `i{N}|`
             # prefix is authoritative; any extra indent in the content is
             # almost certainly a model mistake (typed both prefix + spaces).
-            content = content.lstrip(_LSTRIP_CHARS)
+            content = content.replace("⇥", "").lstrip(_LSTRIP_CHARS)
             # (c) Pure trailer — line is just whitespace + digits.
             if _PURE_LINENO.match(content):
                 content = ""
@@ -10685,7 +10714,7 @@ will try a different approach.
 CODE FORMAT
 ══════════════════════════════════════════════════════════════════════
 
-  LINENO:INDENT|content   ← reading [CODE:] output (INDENT = leading-space count)
+  LINENO ⇥INDENT|<real spaces>content   ← reading [CODE:] output (INDENT = leading-space count)
   INDENT|content          ← in edit bodies (the `+`/`-` marker goes before it)
 
 Indentation is a COUNT: `4|return x` → "    return x" (4 spaces). A block body is
@@ -10996,11 +11025,11 @@ def _build_file_block(
             continue
 
         line_count = content.count('\n') + 1
-        # PREFIX view (LINENO:INDENT|content) so the inline file block matches
-        # the `[edit]` format the prompt teaches AND the [CODE:] reads (also
-        # prefix). INDENT is a leading-space COUNT the model computes, which the
+        # prefix_ws view (LINENO ⇥INDENT|<real spaces>content) so the inline file block
+        # matches the `[edit]` format the prompt teaches AND the [CODE:] reads (also
+        # prefix_ws). INDENT is a leading-space COUNT the model computes, which the
         # weak coder reproduces more reliably than typing real spaces.
-        numbered = add_line_numbers(content, display_mode="prefix")
+        numbered = add_line_numbers(content, display_mode="prefix_ws")
 
         if line_count <= SMALL_FILE_THRESHOLD:
             parts.append(
@@ -11468,7 +11497,7 @@ async def _implement_one_step(
                                         f"of {fp} is STALE — its line numbers shifted when this "
                                         f"edit applied. DISCARD it. For any further edit to {fp}, "
                                         f"copy line numbers from THIS view ONLY:\n"
-                                        + _aln(content, display_mode="prefix")
+                                        + _aln(content, display_mode="prefix_ws")
                                         + f"\n══ END NEW FILE — {fp} ══"
                                     )
                                 else:
@@ -11541,7 +11570,7 @@ async def _implement_one_step(
                                         indent = len(actual) - len(actual.lstrip(' '))
                                         hint = (
                                             f"\n      you searched : {want[:80]}"
-                                            f"\n      file line {ln} : {ln}:{indent}|{near[0][:80]}"
+                                            f"\n      file line {ln} : {ln} ⇥{indent}|{' ' * indent}{near[0][:80]}"
                                             f"\n      → copy that line VERBATIM into SEARCH."
                                         )
                         except Exception:
@@ -12948,9 +12977,9 @@ async def phase_review(
     for fp, content in changed_files.items():
         line_count = content.count('\n') + 1
         if line_count <= SMALL_FILE_THRESHOLD:
-            # whitespace view to match the v11 [edit]/LINENO:= format (see
-            # _build_file_block note) — prefix mode mismatched and broke anchors.
-            numbered = add_line_numbers(content, display_mode="prefix")
+            # prefix_ws view (LINENO ⇥INDENT|<real spaces>content) — the unified native
+            # view, matching the [edit] format the prompt teaches and the [CODE:] reads.
+            numbered = add_line_numbers(content, display_mode="prefix_ws")
             all_files_block += f"\n{'═' * 60}\n== {fp} ({line_count} lines) ==\n{'═' * 60}\n{numbered}\n"
         else:
             all_files_block += (

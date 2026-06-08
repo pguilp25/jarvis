@@ -32,6 +32,13 @@ migrated. New code emits only the v9 format.
 """
 import re
 
+# prefix_ws view (the NATIVE coder's view, now shared by ALL roles): each
+# line is `LINENO ⇥INDENT|<real spaces>content`. The gutter is `LINENO ⇥`
+# (line# + space + the ⇥ tab-glyph that marks the INDENT count). Strip the
+# `LINENO ⇥` gutter, leaving `INDENT|<real spaces>content` for the indent-
+# expander downstream (it strips the duplicated real spaces and re-emits
+# `INDENT` of them — count and spaces AGREE in this view, so it's a no-op).
+_WS_PREFIX_WS_RE = re.compile(r'^\d+\s*⇥')             # LINENO ⇥ gutter
 # v11 whitespace view: `LINENO:<real whitespace>content`. The line# is a
 # `N:` gutter; everything after the FIRST `:` is the real line. Stripping
 # the gutter also handles the older v10 `N:N|` form (drops `N:` → `N|`).
@@ -73,6 +80,15 @@ def strip_view_linenos(text: str) -> str:
         return text
     out_lines = []
     for line in text.splitlines(keepends=False):
+        # prefix_ws view: `LINENO ⇥INDENT|<real spaces>content`. Strip the
+        # `LINENO ⇥` gutter, leaving `INDENT|<real spaces>content` for the
+        # indent-expander (count == typed spaces here → it re-emits the same
+        # indent). Checked FIRST: the `⇥` gutter is unambiguous, and the
+        # colon/pipe rules below would not match it anyway.
+        mpw = _WS_PREFIX_WS_RE.match(line)
+        if mpw:
+            out_lines.append(line[mpw.end():])
+            continue
         # v11 whitespace view: `LINENO:<real whitespace>content`. Strip the
         # `N:` gutter, leaving the line with its real indentation. Also covers
         # the v10 `N:N|` case (drops the `N:`, leaving `N|` for the indent-
@@ -80,13 +96,6 @@ def strip_view_linenos(text: str) -> str:
         mws = _WS_COLON_RE.match(line)
         if mws:
             out_lines.append(line[mws.end():])
-            continue
-        # v9: strip leaked LINE prefix when both LINE|INDENT| are present
-        m = _V9_FULL_PREFIX_RE.match(line)
-        if m:
-            # `77|4|return result` → `4|return result`
-            line = line[m.end(1) + 1:]  # drop "77|"
-            out_lines.append(line)
             continue
         # v9: strip leaked LINE prefix when both LINE|INDENT| are present
         m = _V9_FULL_PREFIX_RE.match(line)

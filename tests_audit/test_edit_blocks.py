@@ -437,3 +437,98 @@ def test_edit__crlf_line_endings_in_response():
     # If the parser respects \n only, CRLF still works because \n is in CRLF
     if out["text_edits"]:
         assert "a.py" in out["text_edits"]
+
+
+# ───────────── prefix_ws view: ⇥ gutter in [edit] markers (ckpt-234) ─────────────
+# The read view is now `LINENO ⇥INDENT|<real spaces>code` for ALL roles. A text
+# coder copies those lines into [edit] blocks. apply_edit_block normalizes the
+# `LINENO ⇥` gutter to `LINENO:` so the keep/del/add markers still match, and
+# _expand_indent treats the count as authoritative (it must NOT double the visible
+# real spaces). These lock that in.
+
+def test_prefix_ws__keep_and_add_round_trip():
+    from core.edit_block import apply_edit_block
+    src = "def foo():\n    x = 1\n    return x\n"
+    # copy the ⇥ keep-anchors verbatim; add a count-form new line between them
+    blk = "[edit]\n2 ⇥4|    x = 1\n2:+ 4|y = 2\n3 ⇥4|    return x\n[/edit]"
+    new, info, warn = apply_edit_block(src, blk)
+    assert new == "def foo():\n    x = 1\n    y = 2\n    return x\n", new
+    assert warn == []
+
+
+def test_prefix_ws__delete_via_arrow_gutter():
+    from core.edit_block import apply_edit_block
+    src = "def foo():\n    x = 1\n    return x\n"
+    # delete the middle line by adding `-` right after the ⇥
+    blk = "[edit]\n1 ⇥0|def foo():\n2 ⇥-4|    x = 1\n3 ⇥4|    return x\n[/edit]"
+    new, info, warn = apply_edit_block(src, blk)
+    assert new == "def foo():\n    return x\n", new
+
+
+def test_prefix_ws__no_double_indent_on_added_line():
+    from core.edit_block import _expand_indent
+    # count is authoritative; copied real spaces must be dropped, not doubled
+    assert _expand_indent("4|    y = 2") == "    y = 2"      # prefix_ws dup spaces
+    assert _expand_indent("4|y = 2") == "    y = 2"          # count-only
+    assert _expand_indent(" 8|        z") == "        z"     # space-after-+ AND dup
+    assert _expand_indent("    raw") == "    raw"            # whitespace-mode verbatim
+
+
+def test_prefix_ws__colon_markers_still_work():
+    from core.edit_block import apply_edit_block
+    src = "def foo():\n    x = 1\n    return x\n"
+    # the prompt-documented colon forms must remain valid (back-compat)
+    blk = "[edit]\n2:4|    x = 1\n2:+ 4|y = 2\n3:4|    return x\n[/edit]"
+    new, info, warn = apply_edit_block(src, blk)
+    assert new == "def foo():\n    x = 1\n    y = 2\n    return x\n", new
+
+
+def test_prefix_ws__strip_view_linenos_drops_arrow_gutter():
+    from core.view_lineno_strip import strip_view_linenos
+    # leaves INDENT|<real spaces>content for the downstream indent-expander
+    assert strip_view_linenos("12 ⇥4|    return x") == "4|    return x"
+    # colon back-compat still works
+    assert strip_view_linenos("12:4|return x") == "4|return x"
+
+
+def test_prefix_ws__strip_line_numbers_expands_to_real_source():
+    from workflows.code import _strip_line_numbers
+    view = "1 ⇥0|def foo():\n2 ⇥4|    return x"
+    clean, hint = _strip_line_numbers(view)
+    assert clean == "def foo():\n    return x", repr(clean)
+    assert hint == 1
+
+
+# ───── ckpt-234 review fixes: ⇥ strip, structural guard, space-after-⇥ marker ─────
+
+def test_prefix_ws__stray_arrow_glyph_stripped_from_code():
+    # the ⇥ display glyph is never valid source; a leaked one in the code part
+    # must be dropped (parity with native_tools._expand_indent_lines) — else it
+    # ships as a literal ⇥ → SyntaxError.
+    from core.edit_block import _expand_indent, _bare_code
+    from workflows.code import _strip_line_numbers, _restore_replace_whitespace
+    assert _expand_indent("8|⇥def f") == "        def f"
+    assert _bare_code("8|⇥def f") == "def f"
+    assert _strip_line_numbers("42 ⇥8|⇥def f")[0] == "        def f"
+    assert _restore_replace_whitespace("8|⇥def f") == "        def f"
+
+
+def test_prefix_ws__structural_line_guard_keeps_indent():
+    # a def/class whose typed spaces disagree with the count: trust the TYPED
+    # spaces (don't eject the method to a shallower scope — the f631 failure).
+    from core.edit_block import _expand_indent
+    assert _expand_indent("0|    def foo") == "    def foo"      # def: typed 4 wins over count 0
+    assert _expand_indent("0|    class C") == "    class C"
+    assert _expand_indent("0|    @deco") == "    @deco"
+    # non-structural line keeps count-authoritative (intentional dedent honoured)
+    assert _expand_indent("4|        x = 1") == "    x = 1"
+
+
+def test_prefix_ws__space_after_arrow_before_marker():
+    # a sloppy space between ⇥ and the -/+ marker still resolves to a del/add
+    from core.edit_block import apply_edit_block
+    src = "class C:\n    def m(self):\n        return 1\n"
+    blk = ("[edit]\n1 ⇥0|class C:\n2 ⇥ -4|    def m(self):\n"
+           "2:+ 4|def m(self, x):\n3 ⇥8|        return 1\n[/edit]")
+    new, info, warn = apply_edit_block(src, blk)
+    assert new == "class C:\n    def m(self, x):\n        return 1\n", new

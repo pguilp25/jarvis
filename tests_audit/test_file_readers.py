@@ -100,39 +100,40 @@ def test_read_files__missing_gets_marker(tmp_path):
 def test_addnums__basic_format():
     src = "def f():\n    return 1\n"
     out = add_line_numbers(src)
-    # v9 prefix format: LINENO:INDENT|content (line# moved to front; no
-    # trailing-empty line emitted). Was v8 `iN|content N`.
+    # DEFAULT is now prefix_ws (unified native view): LINENO ⇥INDENT|<real
+    # spaces>content. line# bare on the left, `⇥INDENT` count, `|`, real spaces,
+    # code. (Was the v9 colon `LINENO:INDENT|content`; that's now display_mode="prefix".)
     lines = out.split('\n')
-    assert lines[0] == "1:0|def f():"
-    assert lines[1] == "2:4|return 1"
+    assert lines[0] == "1 ⇥0|def f():"
+    assert lines[1] == "2 ⇥4|    return 1"
 
 
 def test_addnums__deep_indent():
     src = "                pass\n"  # 16 spaces
     out = add_line_numbers(src)
-    assert out.startswith("1:16|pass")
+    assert out.startswith("1 ⇥16|                pass")
 
 
 def test_addnums__tabs_expanded():
     """Tab is expanded to 4 spaces (TAB_WIDTH=4)."""
     src = "\tpass\n"
     out = add_line_numbers(src)
-    # Tab → 4 spaces → 1:4|
-    assert out.startswith("1:4|pass")
+    # Tab → 4 spaces → 1 ⇥4|    pass
+    assert out.startswith("1 ⇥4|    pass")
 
 
 def test_addnums__blank_line_format():
     src = "a\n\nb\n"
     out = add_line_numbers(src)
     lines = out.split('\n')
-    # Blank line in middle: "2:0|" (lineno 2, indent 0, empty content)
-    assert lines[1] == "2:0|"
+    # Blank line in middle: "2 ⇥0|" (lineno 2, indent 0, empty content)
+    assert lines[1] == "2 ⇥0|"
 
 
 def test_addnums__no_trailing_newline():
     src = "single line"
     out = add_line_numbers(src)
-    assert out == "1:0|single line"
+    assert out == "1 ⇥0|single line"
 
 
 def test_addnums__line_count_preserved():

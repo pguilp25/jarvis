@@ -1533,7 +1533,7 @@ def _path_escapes_root(filepath: str, project_root: str) -> bool:
 async def _run_code_reads(
     filepaths: list[str], project_root: str,
     viewed_versions: "dict[str, str] | None" = None,
-    display_mode: str = "prefix",
+    display_mode: str = "prefix_ws",
 ) -> str:
     """Read source code files from the sandbox.
 
@@ -2011,7 +2011,7 @@ async def _run_keep(
     research_cache: dict | None = None,
     viewed_versions: "dict[str, str] | None" = None,
     on_keep_seen: "Callable[[str, str], None] | None" = None,
-    display_mode: str = "prefix",
+    display_mode: str = "prefix_ws",
 ) -> str:
     """Process [KEEP: filepath X-Y, A-B] tags.
 
@@ -2407,7 +2407,7 @@ async def _run_view(
     research_cache: dict | None = None,
     viewed_versions: "dict[str, str] | None" = None,
     on_view_seen: "Callable[[str, str], None] | None" = None,
-    display_mode: str = "prefix",
+    display_mode: str = "prefix_ws",
 ) -> str:
     """Read a slice of a large file by line number.
 
@@ -4854,13 +4854,16 @@ async def call_with_tools(
         # variable. The previous inline-`async def` form was correct only
         # because we awaited every result before the next iteration; making
         # it explicit removes the foot-gun.
-        # v12: roles read in PREFIX mode — `LINENO:INDENT|content` (INDENT = a
-        # leading-space COUNT). Reverted from whitespace: the coder kept
-        # mis-indenting NEW block bodies (e.g. an `else:` body at the keyword's
-        # level) when it had to type real spaces. With the explicit count the
-        # model writes `16|raise TypeError(other)` and the runtime expands `16|`
-        # into 16 spaces — it only has to get the NUMBER right, not type spaces.
-        _display_mode = "prefix"
+        # All roles read in the NATIVE coder's view — `LINENO ⇥INDENT|<real
+        # spaces>content` (prefix_ws). Unified across the whole pipeline (planner /
+        # understand / merger / reviewer / fallback coders) so every model sees the
+        # SAME clear layout: bare line# on the left, then `⇥INDENT` (the authoritative
+        # leading-space COUNT), then `|` + the real spaces (so nesting is VISIBLE) +
+        # code. This does NOT reintroduce the old "whitespace mode" mis-indent
+        # regression: the COUNT is still present, so a NEW block body is still written
+        # as `16|raise TypeError(other)` (count-only) and the runtime expands `16|`
+        # into 16 spaces — the visible spaces are a reading aid, not the write contract.
+        _display_mode = "prefix_ws"
         def _run_search(tag):
             # #11 (ckpt-213): strip ONE matched pair of surrounding quotes. _strip_label removed
             # the #label but not quotes, so `[SEARCH: "def run"]` searched the LITERAL `"def run"`
