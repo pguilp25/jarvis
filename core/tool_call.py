@@ -732,7 +732,10 @@ def _plan_done_context_kind(text: str, signal_start: int) -> "str | None":
     # PLAN_DONE and auto-close — discarding a written plan over a missing fence is the most expensive
     # failure (the work existed and was thrown away). The opener can be >2000 chars back on a long
     # plan, so scan the whole prefix. (current_plan / raw-response fallback below then captures it.)
-    if _PLAN_OPEN.search(text[:signal_start]):
+    # AUDIT FIX (ckpt-233): anchor to an OWN-LINE `=== PLAN ===` — an inline/mid-sentence MENTION must
+    # NOT satisfy the fail-open (_mask_for_signals only blanks `[`, not `=== PLAN ===` text, so a prose
+    # mention would otherwise wrongly accept a premature [PLAN DONE] when current_plan is empty).
+    if re.search(r'(?m)^[ \t]*===\s*PLAN\s*===[ \t]*$', text[:signal_start]):
         return "open-plan-autoclose"
     return None
 
