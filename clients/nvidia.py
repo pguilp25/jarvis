@@ -86,9 +86,19 @@ def _apply_gptoss_pin(payload: dict, url: str, api_model: str) -> None:
     the slug (bughunt #18 — the NIM last-resort route resolves to the SAME slug but a different URL
     and must NOT get this OR-only pin). Shared by call_nvidia_tools AND call_nvidia_stream so the
     streaming JSON-ops coder is pinned too (bughunt #11)."""
-    if url == OPENROUTER_API_URL and api_model == "openai/gpt-oss-120b":
+    if url != OPENROUTER_API_URL:
+        return
+    if api_model == "openai/gpt-oss-120b":
         payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
                                "allow_fallbacks": False}
+    elif api_model.endswith(":free"):
+        # User directive (2026-06-08): planner models must NEVER incur PAID charges. A bare `:free`
+        # slug still SILENTLY ESCALATES to the model's PAID provider when the free pool is busy
+        # (allow_fallbacks defaults true) — the user's dashboard showed Nemotron 3 Ultra billed
+        # $3.95 this way. Pinning allow_fallbacks=False keeps the request on the FREE provider only:
+        # it serves free or returns an error/402 (the planner chain then falls through) — but it
+        # never bills. gpt-oss-120b is exempt above (it's the paid coder, intentionally).
+        payload["provider"] = {"allow_fallbacks": False}
 
 # Models we deliberately route to DeepInfra. Pro is intentionally NOT here:
 # DeepInfra serves Pro FP4-quantized at only 66k context (vs 200k+ on NVIDIA
@@ -328,6 +338,8 @@ async def call_nvidia(
         "max_tokens": max(int(max_tokens), 4096),
         **_max_thinking_payload(model_id),
     }
+
+    _apply_gptoss_pin(payload, url, api_model)   # free-only pin for :free planners + gpt-oss DeepInfra pin
 
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
