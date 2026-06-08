@@ -51,7 +51,7 @@ import json
 import os
 import re
 
-from core.cli import status, warn, round_trace
+from core.cli import status, warn, round_trace, clip_ht
 from core import thought_logger
 
 # Models built for native function-calling — use the structured loop, not text.
@@ -1128,7 +1128,11 @@ async def _do_read(args: dict, ctx: dict) -> str:
             if sb0 is not None:
                 _base = sb0.load_file(path)
         if _base is not None:
-            _total = _base.count("\n") + 1
+            # Cluster L (ckpt-224): match the VIEW's line numbering — a trailing newline does NOT add
+            # a rendered line (the view ends at the last real line, not an empty line after it). The
+            # old unconditional +1 over-reported by 1 (header "452 lines" while the view stopped at 451)
+            # and let an out-of-range start_line on the phantom last line slip through.
+            _total = _base.count("\n") + (0 if _base.endswith("\n") else 1)
             if s_i > _total:
                 return (f"✗ read_file: start_line {s_i} is out of range — {path} has "
                         f"only {_total} line(s). Read within 1-{_total}, or omit the "
@@ -1423,7 +1427,6 @@ def _do_replace(args: dict, ctx: dict) -> str:
         # and forced a re-read before every subsequent edit — the 79-reads/10-edits storm root).
         _resync_served_ranges_after_edit(ctx, path, before or "", result[path])
         _note_view(ctx, path)   # the diff + unchanged remainder = a current view
-        n = result[path].count("\n") + 1
         from core.edit_diff import render_diff
         _dbase = ctx.get("_first_seen", {}).get(path, before)   # step-start baseline (point 2)
         _diff = render_diff(_dbase or "", result[path], path)
@@ -1490,25 +1493,44 @@ def _actual_region_hint(cur_lines, start_line, old_list) -> str:
         return ""
     if not isinstance(old_list, list):          # defensive (ckpt-149): tolerate non-list `old`
         old_list = [] if old_list is None else [old_list]
-    n = len([o for o in old_list if str(o).strip()]) or 1
-    anchor = None
+    # Cluster E (ckpt-224): size the window by TEXT-LINE count, not element count. A multi-line
+    # `old` passed as ONE newline-joined STRING is a single list element → the old `len(old_list)`
+    # gave n=1 and a ~5-line window for a 13-line failed hunk, so the coder saw only the matching
+    # TOP of its block and misdiagnosed a last-line mismatch. Count embedded newlines too; cap so a
+    # huge `old` can't dump the whole file.
+    n = min(40, sum(str(o).count('\n') + 1 for o in old_list if str(o).strip()) or 1)
+    import difflib
+    # first TEXT LINE (split embedded newlines so a newline-joined `old` still anchors per-line)
+    _alltext = [t for o in old_list for t in str(o).split('\n')]
+    first = next((t.strip() for t in _alltext if t.strip()), "")
+    # CONTENT anchor (ckpt-224, Cluster E): locate the region by the `old` CONTENT, never blindly by
+    # a possibly-STALE start_line. A stale number (file moved under the coder) pointed the hint at an
+    # UNRELATED region while telling it "copy your `old` VERBATIM from these" — actively misleading.
+    content_anchor, content_best = None, 0.0
+    if first:
+        best, bi = 0.0, None
+        for idx, ln in enumerate(cur_lines):
+            r = difflib.SequenceMatcher(None, ln.strip(), first).ratio()
+            if r > best:
+                best, bi = r, idx
+        if best >= 0.6:
+            content_anchor, content_best = bi, best
+    num_anchor = None
     try:
         sl = int(start_line)
         if 1 <= sl <= len(cur_lines):
-            anchor = sl - 1
+            num_anchor = sl - 1
     except (TypeError, ValueError):
-        anchor = None
-    if anchor is None and old_list:        # no usable start_line → fuzzy-locate the first old line
-        import difflib
-        first = next((str(o).strip() for o in old_list if str(o).strip()), "")
-        if first:
-            best, bi = 0.0, None
-            for idx, ln in enumerate(cur_lines):
-                r = difflib.SequenceMatcher(None, ln.strip(), first).ratio()
-                if r > best:
-                    best, bi = r, idx
-            if best >= 0.6:
-                anchor = bi
+        num_anchor = None
+    # start_line is the PRIMARY anchor — the coder usually knows WHERE, even when it imagined the
+    # `old` text (the ckpt-134 case: show the REAL line at that number so it can copy it). Only
+    # OVERRIDE with the content match when that match is STRONG and lands FAR from the number — the
+    # signature of a STALE number (file moved under the coder) pointing the hint at an unrelated
+    # region. A weak/nearby content match doesn't override. (ckpt-224, Cluster E #2.)
+    anchor = num_anchor if num_anchor is not None else content_anchor
+    if (num_anchor is not None and content_anchor is not None
+            and content_best >= 0.75 and abs(content_anchor - num_anchor) > n + 2):
+        anchor = content_anchor
     if anchor is None:
         return ""
     lo = max(0, anchor - 2); hi = min(len(cur_lines), anchor + n + 2)
@@ -1648,9 +1670,21 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
             # mistral). Strip it BEFORE lstrip so the spaces it shielded aren't kept as indent.
             code = m.group(2).replace("⇥", "")
             ind = int(m.group(1))
-            if trust_spaces:
-                typed = len(code) - len(code.lstrip(' '))
-                if typed > 0:                    # typed spaces disagree → trust them (retry mode)
+            typed = len(code) - len(code.lstrip(' '))
+            if typed > 0 and typed != ind:
+                _cs = code.lstrip(' ')
+                if trust_spaces:
+                    ind = typed                  # parse-fail retry: typed spaces win everywhere
+                elif re.match(r'(?:async\s+def|def|class)\b', _cs) or _cs.startswith('@'):
+                    # STRUCTURAL-line dual-channel guard (ckpt-224): a def/class/decorator line whose
+                    # TYPED leading spaces disagree with the declared NUMBER almost always means the
+                    # coder copied the right indent but fat-fingered the number — trusting the number
+                    # EJECTS the def/class to a shallower scope. f631 FAIL: methods declared `0|    def
+                    # __bool__` landed at MODULE scope (number 0 won, 4 typed spaces dropped), parsed
+                    # fine, and shipped semantically dead (methods outside their class). For structural
+                    # lines, prefer the typed spaces. Non-structural lines stay number-authoritative so
+                    # an intentional dedent `4|        x` is still honoured; a real module-level def is
+                    # typed with ZERO leading spaces (`0|def f`), so this never mis-fires on those.
                     ind = typed
             out.append(' ' * ind + code.lstrip(' '))
         else:
@@ -1730,7 +1764,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
         return _cot_reject
 
     def _as_list(v):
-        if v is None:
+        # Cluster L (ckpt-224): "" must mean EMPTY (delete / no lines), NOT [""] (one blank line).
+        # `str("").split("\n")` is [''] → a `new`:"" in an `edits` array left a residual blank line
+        # instead of deleting, inconsistent with `new`:[] and with the single-hunk old/new path.
+        if v is None or v == "":
             return []
         if isinstance(v, list):
             return [str(x) for x in v]
@@ -2714,6 +2751,13 @@ def _do_run(args: dict, ctx: dict) -> str:
         # in the real env (4a5d2a7d ✓→broken on ckpt-166). The applier-side block is
         # the safety net the prose alone didn't provide.
         ctx.setdefault("_failed_imports", set()).add(_mod)
+        # Cluster C (ckpt-224): an ENV-BLOCKED verify attempt counts as a verify attempt — the
+        # coder TRIED to validate but the smoke box can't import this 3rd-party dep, and forcing
+        # another round won't change that (it only wastes wall-clock on timeout-prone steps AND
+        # pushes the coder toward the shims the message just forbade). Credit it so the finish
+        # verify-gate accepts the first `done`. NOT set on a REAL exit≠0 failure below (that's a
+        # genuine bug the coder must still fix before finishing).
+        ctx["_run_code_env_blocked"] = True
         return (f"⚠ run_code: `import {_mod}` failed (ModuleNotFoundError). The smoke-check "
                 f"sandbox runs a MINIMAL python — the standard library only; third-party packages "
                 f"and test plugins are NOT installed. If `{_mod}` is a third-party dependency (i.e. NOT a file you "
@@ -2733,6 +2777,7 @@ def _do_run(args: dict, ctx: dict) -> str:
     if (("read-only file system" in _olow or "errno 30" in _olow
          or ("permission denied" in _olow and "__pycache__" in _olow))
             and "traceback (most recent call last)" not in _olow):
+        ctx["_run_code_env_blocked"] = True   # Cluster C: env-blocked attempt credits the verify-gate
         return (f"⚠ run_code: exit {code} — the smoke sandbox is READ-ONLY, so Python couldn't write "
                 f"its compiled .pyc to __pycache__ (a read-only/permission OSError). This is an "
                 f"ENVIRONMENT limitation of the smoke box, NOT a bug in your edit — the real test "
@@ -3217,6 +3262,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
     ctx["_run_code_verified"] = False   # #5: per-step — a green run_code lets the verify-gate accept the first done
+    ctx["_run_code_env_blocked"] = False  # Cluster C: per-step — an env-blocked run_code also credits the gate
     done = False
     final = ""
     reason = "budget-exhausted"
@@ -3287,7 +3333,7 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             round_trace({"phase": "coder", "step": ctx.get("step_num"), "round": 0,
                          "model": short, "event": "prompt",
                          "messages": [{"role": m.get("role"),
-                                       "content": (m.get("content") or "")[:60000]}
+                                       "content": clip_ht(m.get("content") or "")}
                                       for m in messages]})
         try:
             _tools = _BATCH_ONLY_TOOLS if _BATCH_ONLY else CODER_TOOLS
@@ -3355,7 +3401,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             final = msg.get("content") or ""
             # Stopped WITH edits but never verified → force one self-check pass
             # before accepting the stop (catches the detail-level bugs).
-            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
+            if (ctx.get("files_changed") and not _verify_nudged
+                    and not ctx.get("_run_code_verified") and not ctx.get("_run_code_env_blocked")):
                 _verify_nudged = True
                 messages.append(_verify_nudge_msg())
                 status(f"  [native:{short}] round {rnd}: stopped with edits — "
@@ -3423,6 +3470,18 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
                         result_str = _NO_EDIT_FINISH_NUDGE
                         status(f"  [native:{short}] round {rnd}: finish with ZERO "
                                f"edits — nudged to make the change first")
+                    elif (ctx.get("files_changed") and not _verify_nudged
+                            and not ctx.get("_run_code_verified")
+                            and not ctx.get("_run_code_env_blocked")):
+                        # Cluster H (ckpt-224): an EXPLICIT `finish` tool call used to set done
+                        # immediately, BYPASSING the one self-check pass that the stop-with-edits
+                        # path (above) enforces — so an explicit finish shipped UNVERIFIED. Route it
+                        # through the SAME verify-gate: nudge once, accept the next finish. (No more
+                        # "Task marked finished" while the harness was about to re-open it.)
+                        _verify_nudged = True
+                        result_str = _verify_nudge_msg().get("content", "Verify your edit, then finish.")
+                        status(f"  [native:{short}] round {rnd}: finish requested — "
+                               f"one self-check pass before accepting")
                     else:
                         done = True
                         final = out[1] or "done"
@@ -3596,7 +3655,8 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
             # Force ONE self-check pass before accepting finish, if the coder
             # made edits and hasn't verified yet. It may fix a detail bug, or
             # re-finish unchanged. (The native analog of the text SCENARIO TRACE.)
-            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
+            if (ctx.get("files_changed") and not _verify_nudged
+                    and not ctx.get("_run_code_verified") and not ctx.get("_run_code_env_blocked")):
                 _verify_nudged = True
                 done = False
                 # reset reason too: `finished` was set when the finish fired, but we're
@@ -3633,6 +3693,13 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
 # ══════════════════════════════════════════════════════════════════════════════
 _JSON_OPS_PROMPT = (
     "\n\n## ⚠ OUTPUT FORMAT — JSON OPS (this OVERRIDES the tool-calling convention above)\n"
+    "Three things from the toolkit above DO NOT apply in this mode — wherever they appear, read "
+    "them as:\n"
+    "  • NO `batch` / `batch(calls)` tool — emitting several flat ops (one per line) in ONE round "
+    "IS the batch; never write `batch(...)` and never wrap ops in an array.\n"
+    "  • edit_file takes FLAT STRING `old`/`new` (join multiple lines with \\n) — do NOT use the "
+    "`edits` LIST/array of {old,new} hunks the toolkit shows.\n"
+    "  • wherever it says `finish(summary)` / \"call finish\", emit the `done` op instead.\n"
     "You do NOT make function/tool calls. You RESPOND WITH OPERATIONS as a sequence of FLAT "
     "JSON objects, ONE PER LINE, nothing else — no prose, no markdown fences, no array wrapper. "
     "Each line is exactly:\n"
@@ -3661,9 +3728,8 @@ _JSON_OPS_PROMPT = (
     "file in the SAME round — the harness applies them together as one diff. (5) Ideal shape: "
     "round 1 = all your read/search ops together; round 2 = your edit_file op(s); round 3 = a "
     "run_code check; then a `done` op. (6) Emit ONLY the JSON lines — no commentary.\n"
-    "TWO THINGS THIS REPLACES from the toolkit above: there is NO `batch` tool here — emitting "
-    "several ops (one per line) in a round IS the batch, so never wrap them. And wherever the "
-    "instructions above say \"call finish\" / `finish(summary)`, you instead emit the `done` op."
+    "(Reminder: no `batch` tool, no `edits` array, `done` replaces `finish` — see the top of this "
+    "section.)"
 )
 _JSON_OPS_NUDGE = (
     "⚠ I couldn't find any valid JSON op in your reply. Respond with ONLY flat JSON ops, one per "
@@ -3702,11 +3768,20 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     # prompt — JARVIS_TRACE / JARVIS_EDIT_COT / JARVIS_BULLET_COT, plus the always-on
     # _INDENT_FORMAT_BLOCK — apply to the JSON-ops PRIMARY coder too (they were a silent no-op
     # here). THEN the JSON-ops protocol override LAST so it wins on HOW to emit (flat JSON lines).
-    system = finalize_coder_system(system or "") + _JSON_OPS_PROMPT
+    # Cluster B (ckpt-224): the SHARED native prompt prescribes `batch(calls)` as the step-0 GATHER
+    # mechanism — but JSON-OPS has NO batch tool (emitting several ops IS the batch). Neutralise the
+    # base's batch() call-to-actions so they don't contradict the override below (a weak coder that
+    # reads "Do it in ONE round with batch()" up top then "no batch tool" 60 lines later is confused).
+    # Token-level + no-op-if-absent, so a prompt edit can't silently break this.
+    _base = finalize_coder_system(system or "")
+    _base = _base.replace("batch(calls)", "(no batch tool in JSON-OPS — emit several ops in one round)")
+    _base = _base.replace("with batch()", "by emitting several ops in one round")
+    system = _base + _JSON_OPS_PROMPT
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user_content}]
     ctx.setdefault("files_changed", set())
     ctx["_run_code_verified"] = False   # #5: per-step — a green run_code lets the verify-gate accept the first done
+    ctx["_run_code_env_blocked"] = False  # Cluster C: per-step — an env-blocked run_code also credits the gate
     done = False
     final = ""
     reason = "budget-exhausted"
@@ -3732,7 +3807,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             round_trace({"phase": "json-coder", "step": ctx.get("step_num"), "round": 0,
                          "model": short, "event": "prompt",
                          "messages": [{"role": m.get("role"),
-                                       "content": (m.get("content") or "")[:60000]}
+                                       "content": clip_ht(m.get("content") or "")}
                                       for m in messages]})
         try:
             # NO stop_check: a bare "tool":"done" substring scan would truncate the
@@ -3765,17 +3840,32 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
         # hallucinates a fake harness reply. Detect the gap (raw visible vs raw full) and TELL it.
         _think_warn = ""
         try:
-            _vis_raw, _, _ = _scan_json_ops(re.sub(r'<think>.*?</think>', '', content or '', flags=re.S))
-            _full_raw, _, _ = _scan_json_ops(content or '')
-            if len(_full_raw) > len(_vis_raw):
-                _think_warn = (f"\n\n⚠ {len(_full_raw) - len(_vis_raw)} JSON op(s) you wrote INSIDE a "
-                               f"<think> block did NOT run — ops in your reasoning channel are ignored. "
-                               f"Emit EVERY op you want executed OUTSIDE <think>, one per line.")
+            # #15 (ckpt-221), made IDENTITY-based (ckpt-224, Cluster L): warn ONLY about ops that
+            # appear in <think> and were NOT re-emitted outside. The old COUNT-based check (len(full)
+            # > len(visible)) false-fired whenever the model DRAFTED an op in <think> then correctly
+            # re-emitted the SAME op outside — it ran, but full had 2 copies vs visible's 1, so the
+            # coder got a bogus "your op did NOT run" and chased a phantom. Compare by op signature.
+            _vis_ops, _, _ = _scan_json_ops(re.sub(r'<think>.*?</think>', '', content or '', flags=re.S))
+            _think_region = "\n".join(re.findall(r'<think>(.*?)</think>', content or '', flags=re.S))
+            _think_ops, _, _ = _scan_json_ops(_think_region)
+            _sig = lambda o: (o.get("tool"), json.dumps(o.get("args"), sort_keys=True, default=str))
+            _vis_sigs = {_sig(o) for o in _vis_ops}
+            _orphan = [o for o in _think_ops if _sig(o) not in _vis_sigs]
+            if _orphan:
+                _think_warn = (f"\n\n⚠ {len(_orphan)} JSON op(s) you wrote ONLY inside a <think> block "
+                               f"did NOT run — ops in your reasoning channel are ignored. Re-emit each "
+                               f"op you want executed OUTSIDE <think>, one per line.")
         except Exception:
             _think_warn = ""
         messages.append({"role": "assistant", "content": (content or "(no output)")[:24000]})
         if not ops and not want_done:
             _empty += 1
+            # Cluster G (ckpt-224): TRACE the empty/no-op round before continuing — otherwise the
+            # json-coder's own failure (the very thing that triggers a fallover) is INVISIBLE in the
+            # round trace, which skips straight from the last good round to the next model.
+            round_trace({"phase": "json-coder", "step": ctx.get("step_num"), "round": rnd,
+                         "model": short, "reasoning": (content or "")[:5000],
+                         "event": "no-ops", "note": f"no JSON ops parsed (empty {_empty}/2)", "io": []})
             if _empty <= 2:
                 messages.append({"role": "user", "content": _JSON_OPS_NUDGE + _think_warn})   # #15
                 status(f"  [json:{short}] round {rnd}: no JSON ops parsed — nudging ({_empty}/2)")
@@ -3857,7 +3947,8 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                 messages.append({"role": "user", "content": _JSON_OPS_NO_EDIT})
                 status(f"  [json:{short}] round {rnd}: done with ZERO edits — nudging to edit first")
                 continue
-            if ctx.get("files_changed") and not _verify_nudged and not ctx.get("_run_code_verified"):
+            if (ctx.get("files_changed") and not _verify_nudged
+                    and not ctx.get("_run_code_verified") and not ctx.get("_run_code_env_blocked")):
                 _verify_nudged = True
                 messages.append({"role": "user", "content": _JSON_OPS_VERIFY})
                 status(f"  [json:{short}] round {rnd}: done requested — one verify pass first")

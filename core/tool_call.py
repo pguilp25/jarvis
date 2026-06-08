@@ -13,7 +13,7 @@ import asyncio
 import os
 import re
 from core.retry import call_with_retry
-from core.cli import step, status, warn, round_trace
+from core.cli import step, status, warn, round_trace, clip_ht
 
 
 # In-flight locks: prevent duplicate lookups across parallel AI calls.
@@ -1000,6 +1000,47 @@ def _salvage_longcat_calls(text: str) -> str:
     out = _LONGCAT_CALL_RE.sub(_repl, text)
     out = re.sub(r'</?longcat[A-Za-z_]*>', '', out)   # drop any leftover bare tags
     return out
+
+
+# A weak model intermittently drops the LEADING `[` of the `[tool use]` wrapper.
+# Match a bare `tool use]` open that sits on its own line (followed by EOL) and is
+# NOT already part of `[tool use]` / `/tool use]`; and a bare `/tool use]` close not
+# already preceded by `[`. (Both anchored to avoid corrupting prose mentions.)
+_MALFORMED_TOOL_USE_OPEN  = re.compile(r'(?<![\[\w/])tool use\](?=\s*[\r\n])', re.IGNORECASE)
+_MALFORMED_TOOL_USE_CLOSE = re.compile(r'(?<!\[)/tool use\]', re.IGNORECASE)
+
+
+# Reasoning-channel CONTROL tokens that some models (gpt-oss harmony, LongCat) leak into their
+# visible text — never valid content or a bracket tag. Left in, they get echoed back verbatim in
+# [YOUR PAST THINKING] every round (context noise the weak model then imitates). (ckpt-224, Cluster L.)
+_LEAKED_CHANNEL_RE = re.compile(
+    r'<\|?/?(?:longcat_think|channel|message|start|end|return|constrain)\|?>',
+    re.IGNORECASE)
+
+
+def _strip_leaked_channel_tokens(text: str) -> str:
+    """Drop leaked harmony/LongCat channel-delimiter tokens (<|channel|>, </longcat_think>, …).
+    No-op when none present. Never raises."""
+    if not isinstance(text, str) or "<" not in text:
+        return text
+    return _LEAKED_CHANNEL_RE.sub('', text)
+
+
+def _repair_tool_use_wrapper(text: str) -> str:
+    """Normalise a `[tool use]` wrapper whose LEADING `[` the model dropped — owl-alpha (the a26
+    MERGER) emitted `tool use]` for the OPEN while the enclosed `[VIEW:]` tags and the `[/tool
+    use]` closer were correctly bracketed (a26 merger R2–R4). This matters for the MIXED case: if
+    even ONE well-formed `[tool use]…[/tool use]` block is present, `enforce_tool_use_blocks`
+    masking turns ON and masks every `[` OUTSIDE a recognised block — so a coexisting MALFORMED
+    block's tags are silently dropped. (When ALL opens are malformed there are zero blocks, so
+    enforcement stays off and bare-tag fallback already fires them — the repair is a no-op there,
+    but it also keeps `_describe_tool_mode` honest.) Restore the missing `[` so a malformed wrapper
+    is recognised like a well-formed one. No-op when absent. Never raises."""
+    if not isinstance(text, str) or "tool use]" not in text.lower():
+        return text
+    text = _MALFORMED_TOOL_USE_CLOSE.sub('[/tool use]', text)   # `/tool use]` → `[/tool use]`
+    text = _MALFORMED_TOOL_USE_OPEN.sub('[tool use]', text)     # bare `tool use]` → `[tool use]`
+    return text
 
 
 def extract_search_tags(text: str) -> list[str]:
@@ -3284,6 +3325,8 @@ async def call_with_tools(
         _pre_longcat = result
         result = _salvage_longcat_calls(result)
         result = _salvage_json_tool_calls(result)   # #10: native/JSON-ops tool-call objects → bracket
+        result = _repair_tool_use_wrapper(result)    # a26 merger: bare `tool use]` open → `[tool use]`
+        result = _strip_leaked_channel_tokens(result)  # Cluster L: drop leaked <|channel|>/</longcat_think>
         if result != _pre_longcat:
             status(f"  [{model.split('/')[-1]}] round {round_num}: salvaged a leaked native/LongCat "
                    f"tool call → bracket protocol")
@@ -3322,7 +3365,7 @@ async def call_with_tools(
         # tool results — the pair across rounds reconstructs the whole planner conversation.
         round_trace({"phase": "planner", "label": log_label, "round": round_num,
                      "model": model.split("/")[-1],
-                     "prompt": (current_prompt or "")[:60000],
+                     "prompt": clip_ht(current_prompt or ""),
                      "response": (result or "")[:12000]})
 
         # ── Cross-round signal detection ──────────────────────────────
@@ -5372,7 +5415,13 @@ async def call_with_tools(
         # degenerated into empty `[tool use]…[/tool use]` blocks. The
         # weaker prior wording let "commit" mean anything.
         budget_msg = ""
-        rounds_used = round_num
+        # Cluster F (ckpt-224): this block builds the NEXT round's prompt, so it must describe the
+        # round the model is ABOUT to take (round_num + 1), not the one just finished. The old
+        # `rounds_used = round_num` showed "Round N/max" on the model's (N+1)th turn (off-by-one) AND
+        # made the terminal "NO ROUNDS LEFT" push UNREACHABLE — it was computed on the last round
+        # (round_num == max_rounds) and appended to a prompt that never executes. Using the upcoming
+        # round number fixes the counter and delivers the final push on the model's actual last turn.
+        rounds_used = round_num + 1
         rounds_left = max_rounds - rounds_used
         # Role-aware budget nudge (bug-hunt #7): an edit-writing role (coder /
         # self-check / reviewer — they pass has_pending_edits) must be told to

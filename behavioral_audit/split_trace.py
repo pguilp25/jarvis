@@ -49,13 +49,37 @@ def main():
             planners.setdefault((r.get("label"), r.get("model")), []).append(r)
 
     for step, recs in sorted(coder_steps.items(), key=lambda x: (x[0] is None, x[0])):
-        recs.sort(key=lambda x: x.get("round", 0))
+        # PRESERVE chronological (append) order — do NOT re-sort by round. One step can hold
+        # SEVERAL coder invocations from the fallback chain (gpt-oss json → gpt-oss native → qwen
+        # → mistral), each resetting `round` to 1. Sorting by round interleaved them into a single
+        # stream with duplicate "ROUND 1" blocks under ONE (wrong) model label. Instead detect an
+        # invocation boundary — model/phase change OR a round number that does NOT increase — and
+        # emit a banner so each fallover is legibly separated. (ckpt-224, Cluster G.)
+        models = []
+        for r in recs:
+            mp = (r.get("model"), r.get("phase"))
+            if mp not in models:
+                models.append(mp)
         p = os.path.join(out, f"coder_step_{_safe(step)}.txt")
         with open(p, "w", encoding="utf-8") as fh:
-            fh.write(f"=== CODER STEP {step} — {len(recs)} rounds, model {recs[0].get('model')} ===\n")
+            _models_desc = ", ".join(f"{m}({ph})" for m, ph in models)
+            fh.write(f"=== CODER STEP {step} — {len(recs)} round-record(s) across "
+                     f"{len(models)} invocation(s): {_models_desc} ===\n")
+            _prev_model = _prev_phase = None
+            _prev_round = 0
+            _inv = 0
             for r in recs:
-                fh.write(f"\n========== ROUND {r.get('round')} ==========\n")
+                _rnd = r.get("round", 0)
+                _m, _ph = r.get("model"), r.get("phase")
+                if (_m, _ph) != (_prev_model, _prev_phase) or _rnd <= _prev_round:
+                    _inv += 1
+                    fh.write(f"\n{'#'*70}\n#### CODER INVOCATION {_inv}: model={_m} phase={_ph} "
+                             f"(fallover within step {step})\n{'#'*70}\n")
+                _prev_model, _prev_phase, _prev_round = _m, _ph, _rnd
+                fh.write(f"\n========== ROUND {_rnd} ==========\n")
                 fh.write(f"--- reasoning ---\n{r.get('reasoning','')}\n")
+                if r.get("event") == "no-ops" or r.get("note"):
+                    fh.write(f"--- harness note: {r.get('note') or r.get('event')} ---\n")
                 for i, io in enumerate(r.get("io", [])):
                     fh.write(f"\n--- tool call #{i+1}: {io.get('tool')} ---\n")
                     fh.write(f"args: {json.dumps(io.get('args'), default=str)[:1500]}\n")

@@ -52,6 +52,25 @@ def error(msg: str):
     status(f"✗ {msg}", "red")
 
 
+def clip_ht(s, limit: int = 120000) -> str:
+    """HEAD+TAIL clip for trace capture. A plain `s[:limit]` HEAD-slice drops the TAIL — and for
+    the planner/coder the freshly-injected TOOL RESULTS + manifest live at the END of the prompt.
+    A HEAD-only slice made an entire round-by-round audit conclude the merger's reads were a "black
+    hole" (the results were simply past the 60k cut). Keep 60% head + 40% tail with an elision
+    marker so BOTH the static system/instructions (head) and the live results (tail) survive.
+    (ckpt-224, Cluster G.) Never raises."""
+    try:
+        if not isinstance(s, str):
+            s = str(s)
+        if len(s) <= limit:
+            return s
+        head = int(limit * 0.6)
+        tail = limit - head
+        return f"{s[:head]}\n…[{len(s) - limit} chars elided — head+tail kept for trace]…\n{s[-tail:]}"
+    except Exception:
+        return s if isinstance(s, str) else ""
+
+
 def round_trace(record: dict):
     """Append ONE JSON record per coder/planner round to the file named by env JARVIS_ROUND_TRACE,
     for round-by-round debugging (thinking + the prompt the model saw + the tool results). No-op

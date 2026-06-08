@@ -173,6 +173,43 @@ def test_appears_annotation_strip_is_safe():
     assert ex(["4|" + real.lstrip()]) == [real]      # NOT truncated
 
 
+def test_structural_indent_slip_guard():
+    # ckpt-224 / Cluster D (f631 FAIL): a def/class/decorator declared with a NUMBER that disagrees
+    # with the TYPED leading spaces is a fat-fingered number — trust the typed spaces so a method
+    # doesn't get EJECTED to module scope (where it parses but is semantically dead).
+    from core.native_tools import _expand_indent_lines as ex
+    assert ex(["0|    def __bool__(self):"]) == ["    def __bool__(self):"]   # slip → stays nested
+    assert ex(["0|    @property"]) == ["    @property"]                       # decorator slip
+    assert ex(["0|        class Inner:"]) == ["        class Inner:"]          # class slip
+    # a REAL module-level def is typed with ZERO leading spaces → number wins, stays at col 0
+    assert ex(["0|def top_level():"]) == ["def top_level():"]
+    # a NON-structural intentional dedent stays number-authoritative (typed spaces ignored)
+    assert ex(["4|        x = 1"]) == ["    x = 1"]
+    # normal method form (no typed spaces) is unaffected
+    assert ex(["4|def bar(self):"]) == ["    def bar(self):"]
+
+
+def test_repair_tool_use_wrapper_recovers_dropped_open():
+    # ckpt-224 / Cluster A: a model that drops the leading `[` of `[tool use]` (owl-alpha merger)
+    # must still have its block recognised — esp. in the MIXED case where a well-formed block
+    # would otherwise turn enforce-masking ON and drop the malformed block's tags.
+    from core.tool_call import _repair_tool_use_wrapper as rp
+    fixed = rp("intro tool use]\n[VIEW: a.py 1-50]\n[/tool use]\n[STOP][CONFIRM_STOP]")
+    assert fixed.count("[tool use]") == 1 and fixed.count("[/tool use]") == 1
+    # well-formed input is untouched; a prose mention of "[tool use]" is not corrupted
+    wf = "[tool use]\n[VIEW: a.py 1-9]\n[/tool use]"
+    assert rp(wf) == wf
+    assert "[tool use]" in rp("see the [tool use] wrapper docs")  # prose stays well-formed, no dup
+
+
+def test_strip_leaked_channel_tokens():
+    # ckpt-224 / Cluster L: leaked harmony/LongCat control tokens are dropped, real <think> kept.
+    from core.tool_call import _strip_leaked_channel_tokens as s
+    assert s("a <channel|> b </longcat_think> c") == "a  b  c"
+    assert s("x <|channel|>y<|message|>z") == "x yz"
+    assert s("keep <think>real</think>") == "keep <think>real</think>"
+
+
 def test_read_file_range():
     ctx, rel, root = _mk_ctx()
     try:
