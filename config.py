@@ -75,6 +75,11 @@ MODELS = {
     "nvidia/nemotron-3-super-120b-a12b": {"window": 256_000, "tpm": None, "provider": "openrouter"},
     "openrouter/owl-alpha":              {"window": 128_000, "tpm": None, "provider": "openrouter"},
     "google/gemma-4-31b-it":             {"window": 128_000, "tpm": None, "provider": "openrouter"},
+    # ":paid" variants (ckpt-232) — the PAID fallback a free planner walks to on stall/429. Routed
+    # to the bare (paid) slug by clients/openrouter._resolve_and_pin. NOT for ultra (too expensive).
+    "google/gemma-4-31b-it:paid":            {"window": 128_000, "tpm": None, "provider": "openrouter"},
+    "nvidia/nemotron-3-super-120b-a12b:paid":{"window": 256_000, "tpm": None, "provider": "openrouter"},
+    "openrouter/owl-alpha:paid":             {"window": 128_000, "tpm": None, "provider": "openrouter"},
 }
 
 # ─── Groq Model ID Mapping (config name → API model string) ─────────────────
@@ -155,25 +160,24 @@ NVIDIA_FALLBACKS = {
     # ── ckpt-187 NON-FRONTIER planner pool (user 2026-06-06) — fallbacks stay WITHIN
     #    the open pool + mistral/medium; NEVER glm-5.1 / kimi (else a failover would
     #    silently reintroduce the frontier model the experiment removes). ──
+    # ── FREE→PAID-self fallback policy (user 2026-06-08): on a stall/429, each free planner falls to
+    #    ITS OWN paid variant first (reliable, cheap) — EXCEPT the expensive ultra, which goes to
+    #    owl-alpha (free→owl-alpha:paid), NEVER ultra-paid ($0.94/req). Deeper pool/mistral backstops. ──
     "nvidia/nemotron-3-ultra-550b-a55b": (
-        # 429/fail fallback for the EXPENSIVE ultra ($0.94/req): go to owl-alpha FIRST — owl-alpha is
-        # tried free, and (allow_fallbacks default-true, no free-only pin on it) escalates to its PAID
-        # provider if the free endpoint 429s. NEVER ultra-paid. (user 2026-06-08.) gemma/super/mistral
-        # remain as deeper backstops if owl-alpha fully fails.
-        "openrouter/owl-alpha", "google/gemma-4-31b-it",
-        "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
+        "openrouter/owl-alpha", "openrouter/owl-alpha:paid",   # ultra → owl-alpha (free→paid), never ultra-paid
+        "google/gemma-4-31b-it", "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
     ),
     "openrouter/owl-alpha": (
-        "google/gemma-4-31b-it", "nvidia/nemotron-3-super-120b-a12b",
-        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+        "openrouter/owl-alpha:paid",                           # owl-alpha free fail → owl-alpha paid
+        "google/gemma-4-31b-it", "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
     ),
     "google/gemma-4-31b-it": (
-        "openrouter/owl-alpha", "nvidia/nemotron-3-super-120b-a12b",
-        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+        "google/gemma-4-31b-it:paid",                          # gemma free fail → gemma paid
+        "openrouter/owl-alpha", "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
     ),
     "nvidia/nemotron-3-super-120b-a12b": (
-        "google/gemma-4-31b-it", "openrouter/owl-alpha",
-        "nvidia/nemotron-3-ultra-550b-a55b", "mistral/medium",
+        "nvidia/nemotron-3-super-120b-a12b:paid",              # super free fail → super paid
+        "google/gemma-4-31b-it", "openrouter/owl-alpha", "mistral/medium",
     ),
 
     # ── PLANNER lead (zai/glm-4.7-flash) — OR :free first → reliable → NIM last ──
@@ -297,7 +301,12 @@ NVIDIA_SLEEP_BETWEEN = 1.6  # seconds between sequential NVIDIA calls
 # front of their queue instead of us bailing after 30s and losing our place.
 # Generation can run past this; the watchdog only measures the gap BETWEEN
 # tokens (and the wait for the first one).
-STREAM_TTFT_TIMEOUT = 600.0
+STREAM_TTFT_TIMEOUT = 90.0   # ckpt-232 (user 2026-06-08): was 600s. Evidence: real responses are
+# ≤64s in every reproducible condition (1-at-a-time, 4-concurrent, 12-sequential, 40k-token, capped
+# AND uncapped — see probes). The run's intermittent free-tier silent-stalls (request opens, NO bytes
+# for the whole window — invisible on the OpenRouter dashboard because they never reach a provider)
+# burned a FULL 10 min each before failover. 90s = comfortably above the 64s worst real response, so a
+# genuinely-stalled connection fails over ~7× faster instead of bleeding the instance's time budget.
 
 # ─── Abort Signals ───────────────────────────────────────────────────────────
 

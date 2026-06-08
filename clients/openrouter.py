@@ -31,6 +31,15 @@ def _resolve_and_pin(model_id: str, payload: dict) -> str:
     the planners here get the SAME treatment: :free slugs, max_tokens capped to 4096 for :free,
     nemotron-3-ultra pinned allow_fallbacks=False (never billed), cheap planners allowed paid fallback.
     Never raises. (ckpt-227, 2026-06-08.)"""
+    # ":paid" variant (ckpt-232, user 2026-06-08): the PAID fallback for a free planner that just
+    # failed (stall/429). Strip the marker → use the BARE slug (no :free) so OpenRouter serves a PAID
+    # provider; allow_fallbacks stays default-true. Cheap planners (gemma ~$0.04, super ~$0.02) use
+    # this; nemotron-ultra never does (its fallback is owl-alpha, not ultra-paid).
+    if model_id.endswith(":paid"):
+        api_model = model_id[:-5]          # e.g. "google/gemma-4-31b-it:paid" → "google/gemma-4-31b-it"
+        payload["model"] = api_model
+        payload.pop("max_tokens", None)    # full context window, like the free path
+        return api_model
     base = model_id.split("/", 1)[-1]
     api_model = OPENROUTER_MODELS.get(model_id)
     if not api_model:
