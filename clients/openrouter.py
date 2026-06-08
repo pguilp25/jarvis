@@ -46,6 +46,11 @@ def _resolve_and_pin(model_id: str, payload: dict) -> str:
         _apply_gptoss_pin(payload, OPENROUTER_URL, api_model)
     except Exception:
         pass
+    # Every model routed through THIS client is a FREE planner (nemotron/gemma :free + owl-alpha
+    # free-alpha, incl. the MERGER). User directive: free models run at MAX context window — drop our
+    # output max_tokens so the provider grants max-available completion (a fixed cap reserves part of a
+    # small free window and truncates / 402s). Free = $0, so no reservation/billing concern. (ckpt-228.)
+    payload.pop("max_tokens", None)
     return api_model
 
 
