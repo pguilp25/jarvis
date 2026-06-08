@@ -144,6 +144,29 @@ PLAN_DONE_TAG = re.compile(
     r'\[PLAN\s+DONE\]\s*\[CONFIRM_PLAN_DONE\]', re.IGNORECASE,
 )
 
+
+def _truncate_after_closing_signal(text: str) -> "tuple[str, bool]":
+    """Fix #1 (ckpt-233, the planner-audit's top fix): a weak model frequently emits its closing
+    signal and then KEEPS GENERATING — fabricating the tool RESULTS that should come from the runtime
+    NEXT round (nemotron-ultra wrote ~28k chars of fake `=== Code: … (N lines) ===` banners this way).
+    Anything a model writes AFTER its own closing signal is fabrication by definition, so cut it.
+    Find the FIRST real (unmasked, so a signal merely DISCUSSED in [think]/prose is ignored) closing
+    signal and discard everything past its end. Returns (text, truncated?). Never raises."""
+    if not isinstance(text, str) or not text:
+        return text, False
+    try:
+        masked = _mask_for_signals(text)   # masks signals inside [think]/quoted prose → same indices
+        end = None
+        for rx in (STOP_TAG, DONE_TAG, PLAN_DONE_TAG, FORCE_DONE_TAG, CONTINUE_TAG):
+            m = rx.search(masked)
+            if m and (end is None or m.end() < end):
+                end = m.end()
+        if end is not None and end < len(text):
+            return text[:end], True
+    except Exception:
+        pass
+    return text, False
+
 # Both forms count as inline reasoning:
 #   <think>...</think>     — what the streaming clients wrap reasoning_content in
 #   [think]...[/think]     — a bracketed equivalent the model can emit directly
@@ -3327,6 +3350,12 @@ async def call_with_tools(
         result = _salvage_json_tool_calls(result)   # #10: native/JSON-ops tool-call objects → bracket
         result = _repair_tool_use_wrapper(result)    # a26 merger: bare `tool use]` open → `[tool use]`
         result = _strip_leaked_channel_tokens(result)  # Cluster L: drop leaked <|channel|>/</longcat_think>
+        # Fix #1 (ckpt-233): discard anything the model wrote AFTER its own closing signal — that's
+        # fabricated tool-result content (the dominant planner failure). Deterministic, model-agnostic.
+        result, _trunc = _truncate_after_closing_signal(result)
+        if _trunc:
+            status(f"  [{model.split('/')[-1]}] round {round_num}: truncated post-signal content "
+                   f"(fabricated tool results after the closing signal)")
         if result != _pre_longcat:
             status(f"  [{model.split('/')[-1]}] round {round_num}: salvaged a leaked native/LongCat "
                    f"tool call → bracket protocol")
