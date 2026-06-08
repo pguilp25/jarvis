@@ -156,7 +156,11 @@ NVIDIA_FALLBACKS = {
     #    the open pool + mistral/medium; NEVER glm-5.1 / kimi (else a failover would
     #    silently reintroduce the frontier model the experiment removes). ──
     "nvidia/nemotron-3-ultra-550b-a55b": (
-        "google/gemma-4-31b-it", "openrouter/owl-alpha",
+        # 429/fail fallback for the EXPENSIVE ultra ($0.94/req): go to owl-alpha FIRST — owl-alpha is
+        # tried free, and (allow_fallbacks default-true, no free-only pin on it) escalates to its PAID
+        # provider if the free endpoint 429s. NEVER ultra-paid. (user 2026-06-08.) gemma/super/mistral
+        # remain as deeper backstops if owl-alpha fully fails.
+        "openrouter/owl-alpha", "google/gemma-4-31b-it",
         "nvidia/nemotron-3-super-120b-a12b", "mistral/medium",
     ),
     "openrouter/owl-alpha": (
