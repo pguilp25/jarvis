@@ -91,6 +91,8 @@ def _apply_gptoss_pin(payload: dict, url: str, api_model: str) -> None:
     if api_model == "openai/gpt-oss-120b":
         payload["provider"] = {"order": ["DeepInfra"], "quantizations": ["bf16"],
                                "allow_fallbacks": False}
+        payload.pop("max_tokens", None)   # user directive 2026-06-08: NO output cap on the coder —
+        # let gpt-oss-120b run to its full context window (DeepInfra grants max-available completion).
     elif "nemotron-3-ultra" in api_model:
         # User directive (2026-06-08, refined): keep the EXPENSIVE planner free-only. Nemotron 3
         # Ultra bills up to $0.94/request ($3.95 burned on the first bad run) — a bare `:free` slug
