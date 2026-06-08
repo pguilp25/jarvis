@@ -20,6 +20,35 @@ OPENROUTER_MODELS = {
 }
 
 
+def _resolve_and_pin(model_id: str, payload: dict) -> str:
+    """Resolve the OpenRouter slug and apply the shared free-only / max_tokens pin.
+
+    The PLANNER models (nemotron-3-ultra/super, gemma-4) are provider="openrouter" in config.py, so
+    call_api_stream routes them HERE — NOT to clients/nvidia.py. This module's local OPENROUTER_MODELS
+    only knew qwen, so it sent the BARE base slug (e.g. `nemotron-3-ultra-550b-a55b`) with NO `:free`
+    suffix → OpenRouter served the PAID variant at 16384 max_tokens → the persistent HTTP 402
+    "requires more credits, or fewer max_tokens". Reuse the nvidia client's :free mapping + its pin so
+    the planners here get the SAME treatment: :free slugs, max_tokens capped to 4096 for :free,
+    nemotron-3-ultra pinned allow_fallbacks=False (never billed), cheap planners allowed paid fallback.
+    Never raises. (ckpt-227, 2026-06-08.)"""
+    base = model_id.split("/", 1)[-1]
+    api_model = OPENROUTER_MODELS.get(model_id)
+    if not api_model:
+        try:
+            from clients.nvidia import OPENROUTER_MODELS as _NV
+            api_model = _NV.get(base)
+        except Exception:
+            api_model = None
+    api_model = api_model or base
+    payload["model"] = api_model
+    try:
+        from clients.nvidia import _apply_gptoss_pin
+        _apply_gptoss_pin(payload, OPENROUTER_URL, api_model)
+    except Exception:
+        pass
+    return api_model
+
+
 def _get_key() -> str:
     # Share the round-robin key pool with clients/nvidia.py so both
     # OpenRouter accounts are used here too (doubles the :free budget and
@@ -58,6 +87,7 @@ async def call_openrouter(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    api_model = _resolve_and_pin(model_id, payload)   # :free slug + cap + free-only pin (ckpt-227)
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
@@ -102,6 +132,7 @@ async def call_openrouter_stream(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    api_model = _resolve_and_pin(model_id, payload)   # :free slug + cap + free-only pin (ckpt-227)
 
     headers = {
         "Authorization": f"Bearer {_get_key()}",
