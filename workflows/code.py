@@ -8833,7 +8833,7 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # ran (instance-1 of fresh12_ckpt234 timed out STILL planning). Once we hold
         # ≥1 usable plan, stop waiting past PLAN_RACE_MAX_S: the merger works fine with
         # 1-2 plans. With 0 usable we keep waiting (the merger needs ≥1 input).
-        PLAN_RACE_MAX_S = 300.0
+        PLAN_RACE_MAX_S = 400.0   # user 2026-06-09: 300→400s (more room for slow free planners before the race cuts off)
         _loop = asyncio.get_event_loop()
         _race_start = _loop.time()
         # The deadline is ALWAYS enforced (bughunt ckpt-238): the earlier
