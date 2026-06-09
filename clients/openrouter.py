@@ -112,8 +112,9 @@ async def call_openrouter(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
+    _key = _get_key()
     headers = {
-        "Authorization": f"Bearer {_get_key()}",
+        "Authorization": f"Bearer {_key}",
         "Content-Type": "application/json",
     }
 
@@ -121,6 +122,12 @@ async def call_openrouter(
         async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=http_timeout(OPENROUTER_URL, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                if resp.status == 402:
+                    try:
+                        from clients.nvidia import _mark_or_key_dead
+                        _mark_or_key_dead(_key, body)
+                    except Exception:
+                        pass
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
@@ -155,8 +162,9 @@ async def call_openrouter_stream(
     }
     api_model = _resolve_and_pin(model_id, payload)   # :free slug + cap + free-only pin (ckpt-227)
 
+    _key = _get_key()
     headers = {
-        "Authorization": f"Bearer {_get_key()}",
+        "Authorization": f"Bearer {_key}",
         "Content-Type": "application/json",
     }
 
@@ -169,6 +177,12 @@ async def call_openrouter_stream(
         async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=http_timeout(OPENROUTER_URL, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                if resp.status == 402:
+                    try:
+                        from clients.nvidia import _mark_or_key_dead
+                        _mark_or_key_dead(_key, body)
+                    except Exception:
+                        pass
                 raise RuntimeError(f"OpenRouter {resp.status}: {body[:300]}")
 
             buf = b""

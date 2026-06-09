@@ -181,6 +181,27 @@ OPENROUTER_FORCED = {
 # Keys come from OPENROUTER_API_KEYS (comma/space separated); falls back
 # to the single OPENROUTER_API_KEY. No paid usage — both keys hit :free.
 _OR_KEY_IDX = 0
+# Session-scoped blacklist of OpenRouter keys that returned HTTP 402 "requires
+# more credits" (the account is out of balance for a PAID model, e.g. gpt-oss-120b
+# on DeepInfra@bf16). Once a key 402s we stop round-robining onto it, so the funded
+# key serves every subsequent call — at most ONE 402 per dead key per session,
+# instead of ~half of all calls 402'ing forever. (ckpt-237, 2026-06-08.)
+_OR_DEAD_KEYS: "set[str]" = set()
+
+
+def _mark_or_key_dead(key: str, detail: str = "") -> None:
+    """Blacklist an OpenRouter key after a 402. Only OR-pool keys are markable
+    (a mistral/nvidia key passed here is ignored). Never raises."""
+    try:
+        if not key or key in _OR_DEAD_KEYS or key not in _openrouter_keys():
+            return
+        _OR_DEAD_KEYS.add(key)
+        import sys as _sys
+        print(f"⚠️  [openrouter] key …{key[-6:]} returned 402 (out of credits) — "
+              f"dropping it from the round-robin for this session. {str(detail)[:80]}",
+              file=_sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def _openrouter_keys() -> list[str]:
@@ -212,7 +233,11 @@ def _next_openrouter_key() -> str:
     keys = _openrouter_keys()
     if not keys:
         return ""
-    k = keys[_OR_KEY_IDX % len(keys)]
+    # Prefer keys not blacklisted this session (402'd out of credits). If ALL are
+    # dead, fall back to the full pool so we never return "" and break every call.
+    live = [k for k in keys if k not in _OR_DEAD_KEYS]
+    pool = live if live else keys
+    k = pool[_OR_KEY_IDX % len(pool)]
     _OR_KEY_IDX += 1
     return k
 
@@ -371,6 +396,8 @@ async def call_nvidia(
         async with session.post(url, json=payload, headers=headers, timeout=http_timeout(url, payload)) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                if resp.status == 402:
+                    _mark_or_key_dead(key, body)
                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
             data = await resp.json()
 
@@ -456,8 +483,12 @@ async def call_nvidia_tools(
                                                 timeout=http_timeout(url, payload)) as resp2:
                             raw = await resp2.text()
                             if resp2.status != 200:
+                                if resp2.status == 402:
+                                    _mark_or_key_dead(key, raw)
                                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp2.status}: {raw[:200]}")
                     else:
+                        if resp.status == 402:
+                            _mark_or_key_dead(key, raw)
                         raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {raw[:200]}")
     return _extract_tool_message(raw, api_model)
 
@@ -593,6 +624,8 @@ async def call_nvidia_stream(
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                if resp.status == 402:
+                    _mark_or_key_dead(key, body)
                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
 
             buf = b""
