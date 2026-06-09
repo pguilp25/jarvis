@@ -401,7 +401,11 @@ async def call_nvidia(
                 raise RuntimeError(f"NVIDIA {api_model} HTTP {resp.status}: {body[:200]}")
             data = await resp.json()
 
-    return data["choices"][0]["message"]["content"]
+    try:   # bughunt ckpt-248: a malformed 200 (empty choices / no message / null content) must
+        return data["choices"][0]["message"]["content"]   # become a clean retryable error, not a raw KeyError/IndexError
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(f"NVIDIA {api_model}: malformed 200 response "
+                           f"(no choices/message/content): {str(data)[:200]}")
 
 
 async def call_nvidia_tools(

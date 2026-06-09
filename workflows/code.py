@@ -13401,6 +13401,12 @@ async def code_agent(state: AgentState) -> AgentState:
     """
     step("═══ CODING AGENT ═══")
 
+    # bughunt ckpt-248: reset the module-global revert stack at the START of each instance.
+    # It was only ever cleared in tests, so across a multi-instance swe_bench run (one process,
+    # parallel=1) it ACCUMULATED — two instances editing the same relative path (e.g. lib/x.py)
+    # could let a [REVERT FILE] pop a STALE snapshot from a PRIOR instance. Per-instance reset.
+    _clear_revert_history()
+
     task = state.get("processed_input", state["raw_input"])
     _wlog.phase_event(
         "CODING AGENT START",

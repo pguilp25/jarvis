@@ -2531,6 +2531,38 @@ def _scan_json_ops(text):
     return ops, done, summary
 
 
+def _ends_with_truncated_op(text):
+    """True if `text` ends with an UNTERMINATED JSON object that looks like an op.
+    bughunt ckpt-248: gpt-oss intermittently gets cut off mid-op (degeneration guard,
+    stream stall, max_tokens). _scan_json_ops silently DROPS that final span (depth
+    never returns to 0), so the coder loses an edit with ZERO feedback and waits for a
+    diff that never comes. Detecting it lets the loop tell the coder to re-emit it."""
+    if not isinstance(text, str) or not text:
+        return False
+    vis = re.sub(r'<think>.*?</think>', '', text, flags=re.S)
+    depth, start, instr, esc = 0, -1, False, False
+    for i, c in enumerate(vis):
+        if esc:
+            esc = False; continue
+        if c == '\\':
+            esc = True; continue
+        if c == '"':
+            instr = not instr; continue
+        if instr:
+            continue
+        if c == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == '}':
+            if depth > 0:
+                depth -= 1
+    if depth > 0 and start >= 0:   # stream ended INSIDE an object
+        tail = vis[start:]
+        return any(k in tail for k in ('"tool"', '"path"', '"old"', '"new"', '"edits"', '"command"'))
+    return False
+
+
 def _coalesce_edit_ops(ops):
     """Merge multiple FLAT `edit_file` ops on the SAME path within one round into a single
     edit_file op carrying an `edits` list, so all hunks apply together — the dangling-ref /
@@ -3869,6 +3901,7 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             reason = "api-error"
             break
         ops, want_done, summary = _parse_json_ops(content)
+        _trunc = _ends_with_truncated_op(content)   # bughunt ckpt-248: final op cut off mid-stream?
         ops = _coalesce_edit_ops(ops)   # flat same-file edits → one edits batch (refactor coherence)
         # #1 (ckpt-219): drop BYTE-IDENTICAL ops within a round (a26 json R3 ran read_file 1450-1490
         # TWICE in one round → a duplicate full growing-view in the same RESULTS turn). Keep first.
@@ -3913,8 +3946,14 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                          "model": short, "reasoning": (content or "")[:5000],
                          "event": "no-ops", "note": f"no JSON ops parsed (empty {_empty}/2)", "io": []})
             if _empty <= 2:
-                messages.append({"role": "user", "content": _JSON_OPS_NUDGE + _think_warn})   # #15
-                status(f"  [json:{short}] round {rnd}: no JSON ops parsed — nudging ({_empty}/2)")
+                # bughunt ckpt-248: if the round's only content was a truncated op, say so
+                # explicitly (else the generic nudge doesn't tell the model WHY nothing ran).
+                _tw = ("\n\n⚠ Your op was CUT OFF mid-JSON (incomplete) and was NOT run — re-emit it "
+                       "COMPLETE, and keep each op small so it finishes (split a big multi-hunk "
+                       "edit_file into FEWER hunks per op)." if _trunc else "")
+                messages.append({"role": "user", "content": _JSON_OPS_NUDGE + _think_warn + _tw})   # #15
+                status(f"  [json:{short}] round {rnd}: no JSON ops parsed"
+                       + (" (last op TRUNCATED)" if _trunc else "") + f" — nudging ({_empty}/2)")
                 continue
             reason = "no-ops"
             status(f"  [json:{short}] round {rnd}: still no ops — stopping")
@@ -3946,6 +3985,10 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
         if len(ops) >= 24:        # parser caps a runaway op list — say so, don't drop silently (P1-5)
             results.append("⚠ NOTE: only the first 24 ops this round were run; "
                            "emit fewer ops per round (a focused LOOK, then EDIT).")
+        if _trunc:                # bughunt ckpt-248: final op cut off mid-stream + silently dropped
+            results.append("⚠ Your LAST op was CUT OFF mid-JSON (incomplete) and was NOT run. "
+                           "Re-emit that ONE op COMPLETE this round — keep it small so it finishes "
+                           "(for a big multi-site edit_file, use FEWER hunks per op).")
         # Only feed a RESULTS turn back when ops actually ran. A pure-`done` round
         # (or one whose only op was a finish, which we `continue` past) produces no
         # results — appending an empty "RESULTS of your ops" turn just before we

@@ -193,7 +193,11 @@ async def call_openai_compat(
                     f"{_provider_of(model_id)} {api_model} HTTP {resp.status}: {body[:200]}"
                 )
             data = await resp.json()
-            return _flatten_content(data["choices"][0]["message"].get("content"))
+            try:   # bughunt ckpt-248: malformed 200 -> clean retryable error, not a raw KeyError/IndexError
+                return _flatten_content(data["choices"][0]["message"].get("content"))
+            except (KeyError, IndexError, TypeError):
+                raise RuntimeError(f"{_provider_of(model_id)} {api_model}: malformed 200 response "
+                                   f"(no choices/message): {str(data)[:200]}")
 
 
 async def call_openai_compat_stream(

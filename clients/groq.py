@@ -67,7 +67,11 @@ async def call_groq(
                 raise RuntimeError(f"Groq {api_model} HTTP {resp.status}: {body[:200]}")
             data = await resp.json()
 
-    return data["choices"][0]["message"]["content"]
+    try:   # bughunt ckpt-248: malformed 200 -> clean retryable error, not a raw KeyError/IndexError
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(f"Groq {api_model}: malformed 200 response "
+                           f"(no choices/message/content): {str(data)[:200]}")
 
 
 async def call_groq_stream(
