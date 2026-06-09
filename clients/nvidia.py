@@ -184,8 +184,16 @@ _OR_KEY_IDX = 0
 
 
 def _openrouter_keys() -> list[str]:
+    # UNION both env vars — never let one shadow the other. The previous
+    # `KEYS or KEY` precedence silently DROPPED the funded key: a stale
+    # OPENROUTER_API_KEYS (one old/unfunded key) shadowed the funded
+    # OPENROUTER_API_KEY, so every OpenRouter call (incl. the PAID gpt-oss
+    # coder pinned to DeepInfra@bf16) hit only the unfunded account → a
+    # persistent HTTP 402 "requires more credits" while the funded balance
+    # sat untouched. Merging both (dedup, order-preserving) guarantees the
+    # funded key is always in the round-robin pool. (ckpt-235, 2026-06-08.)
     raw = (os.environ.get("OPENROUTER_API_KEYS", "").strip()
-           or os.environ.get("OPENROUTER_API_KEY", "").strip())
+           + " " + os.environ.get("OPENROUTER_API_KEY", "").strip())
     seen: set[str] = set()
     keys: list[str] = []
     for k in raw.replace(",", " ").split():

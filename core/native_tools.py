@@ -2918,7 +2918,15 @@ def _is_transient(e) -> bool:
         return False
     return (
         isinstance(e, asyncio.TimeoutError)
-        or any(c in s for c in ("429", "500", "502", "503", "504", "overloaded",
+        # HTTP 402 "requires more credits" is RETRYABLE on the multi-key pool, not
+        # permanent: when round-robin lands on an unfunded OpenRouter key it 402s,
+        # but the SAME call on the next key (a funded account) succeeds. Treating it
+        # as permanent made the coder give up on gpt-oss after one unfunded-key hit
+        # ("out of endpoints") → 0 edits, even though a funded key was in the pool.
+        # `http 402` is matched precisely (not bare "402") so a stray 402 in a line
+        # number / token count can't false-trigger. (ckpt-235, 2026-06-08.)
+        or any(c in s for c in ("http 402", "requires more credits", "insufficient credit",
+                                "429", "500", "502", "503", "504", "overloaded",
                                 "rate limit", "rate-limit", "timed out", "timeout",
                                 "connection", "temporarily", "capacity", "provider returned"))
         or any(c in tname for c in ("timeout", "clienterror", "connector",
