@@ -1230,9 +1230,9 @@ scope the user didn't ask for. First plan line:
 See SYSTEM RUNTIME / THINK INTERLEAVED above. Same operational
 rules: commit early, interleave, backtrack without apology.
 
-Write ALL of the above as VISIBLE output — NOT inside `<think>`/`[think]`
-(both are stripped by the runtime). End with these two lines, each on its
-own line:
+Open with `=== PLAN ===` on its own line, then write ALL of the above as
+VISIBLE output — NOT inside `<think>`/`[think]` (both are stripped by the
+runtime). End with these two lines, each on its own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
 If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,

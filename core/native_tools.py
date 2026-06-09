@@ -3071,7 +3071,7 @@ _NO_EDIT_FINISH_NUDGE = (
     "⚠ You called finish but have made ZERO edits this step — nothing changed. "
     "This step was handed to you because it is NOT done yet, so finishing now "
     "delivers an empty patch. Do the work first: read the target file if you "
-    "haven't, then make the edit the step requires with edit_file / replace_lines "
+    "haven't, then make the edit the step requires with edit_file "
     "/ create_file. Only call finish AFTER an edit has actually landed (you'll see "
     "a ✓ Applied diff). If — after looking — you are certain the step needs no code "
     "change, call finish again and say why in the summary."
@@ -3274,7 +3274,7 @@ def finalize_coder_system(system: str) -> str:
     if _EDIT_COT:
         system = system + (
             "\n\n## GROUND YOUR EDITS WHEN IT HELPS (optional, not enforced)\n"
-            "edit_file / replace_lines / create_file accept three OPTIONAL fields — fill them to "
+            "edit_file / create_file accept three OPTIONAL fields — fill them to "
             "keep yourself honest, but an edit is NEVER rejected for omitting or paraphrasing them:\n"
             "  • goal   — the spec behaviour this edit makes true (1 concrete sentence).\n"
             "  • traced — what the code does NOW at the edit site (quote the real line if handy).\n"
