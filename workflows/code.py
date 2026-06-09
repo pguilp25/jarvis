@@ -8822,12 +8822,25 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         for m in PLAN_MODELS
     ]
 
-    # Wait for 3 to complete, cancel the rest
-    done, pending = await asyncio.wait(
-        plan_tasks, return_when=asyncio.ALL_COMPLETED, timeout=None
-    ) if len(PLAN_MODELS) <= 3 else await asyncio.wait(
-        plan_tasks, return_when=asyncio.FIRST_COMPLETED
-    )
+    # Wait for 3 to complete, cancel the rest.
+    # bughunt ckpt-244: the >3-models FIRST_COMPLETED wait had NO timeout — if EVERY planner
+    # stalled before producing any output, it blocked until the 2700s instance cap (the race
+    # deadline loop below only engages AFTER this returns). Bound the FIRST wait by the same
+    # grace cap and stamp the race clock BEFORE it, so the whole Layer-1 race is bounded at
+    # ~PLAN_RACE_MAX_S×1.5 even in the all-stall case (→ 0 plans → merger/single-pass fallback,
+    # far better than a silent 45-min planning hang).
+    PLAN_RACE_MAX_S = 500.0   # user 2026-06-09: 500s (room for slow free planners before the race cuts off)
+    _loop = asyncio.get_event_loop()
+    _race_start = _loop.time()
+    if len(PLAN_MODELS) <= 3:
+        # ≤3 (dormant — PLAN_MODELS has 4): ALL_COMPLETED, no early-win loop and no pending
+        # cancellation below, so keep timeout=None (a timeout here would leak uncancelled tasks).
+        # The 2700s instance wait_for is the backstop for this dormant path.
+        done, pending = await asyncio.wait(
+            plan_tasks, return_when=asyncio.ALL_COMPLETED, timeout=None)
+    else:
+        done, pending = await asyncio.wait(
+            plan_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=PLAN_RACE_MAX_S * 1.5)
 
     # For >3 models: keep collecting until we have 3 USABLE plans, then cancel the rest.
     # bughunt #8 (ckpt-201): the old loop counted any FINISHED task toward the 3-win threshold —
@@ -8861,9 +8874,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # ran (instance-1 of fresh12_ckpt234 timed out STILL planning). Once we hold
         # ≥1 usable plan, stop waiting past PLAN_RACE_MAX_S: the merger works fine with
         # 1-2 plans. With 0 usable we keep waiting (the merger needs ≥1 input).
-        PLAN_RACE_MAX_S = 500.0   # user 2026-06-09: → 500s (more room for slow free planners before the race cuts off)
-        _loop = asyncio.get_event_loop()
-        _race_start = _loop.time()
+        # (PLAN_RACE_MAX_S / _loop / _race_start are now stamped BEFORE the first wait above —
+        # ckpt-244 — so the race clock spans the first wait too; do not re-stamp here.)
         # The deadline is ALWAYS enforced (bughunt ckpt-238): the earlier
         # `_timeout=None when 0 usable` waited UNBOUNDED for a first plan — if the
         # only pending models were slow stragglers it could re-introduce the very
@@ -9019,12 +9031,19 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     # #20 (ckpt-215): MERGE_PROMPT_TEMPLATE_V8 ALREADY begins with CORE_V8 (the "## JARVIS RUNTIME"
     # preamble), so prepending SYSTEM_KNOWLEDGE here injected the ~480-line preamble TWICE (verified
     # in the a26 merger prompt: "## JARVIS RUNTIME" at lines 6 AND 483). Drop the redundant prefix.
+    # #13: per-plan capped above; this overall backstop only bites at ~7+ winning plans (the
+    # race caps winners well below that). bughunt ckpt-244: when it DOES fire, cut at a line
+    # boundary and MARK it — the old bare [:48000] could split the last [INPUT PLAN] block
+    # mid-line, leaving an unterminated header the merger reads as garbage.
+    _all_plans = all_plans_text
+    if len(_all_plans) > 48000:
+        _all_plans = _all_plans[:48000].rsplit('\n', 1)[0] + "\n…(later INPUT PLANS truncated for length)…"
     merge_prompt = MERGE_PROMPT_TEMPLATE.format(
         n_plans=len(plans),
         task=task,
         context=context[:12000],
         verify_block=verify_block,
-        all_plans_text=all_plans_text[:48000],   # #13: per-plan capped above; overall backstop raised
+        all_plans_text=_all_plans,
         preloaded_research=preloaded_research,
     ) + _consensus_line
     # ckpt-188: merger → owl-alpha (was mistral/medium). mistral/medium frequently
@@ -9092,8 +9111,8 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             s = ln.strip()
             if re.match(r'^\[(KEEP|CODE|VIEW|RUN|REPLACE LINES|INSERT|DELETE|edit|'
                         r'/edit|STOP|DONE|CONFIRM|PURPOSE|SEMANTIC|DETAIL|REFS|'
-                        r'SEARCH|WEBSEARCH|DEPENDENCY|CONTINUE)', s, re.I):
-                continue
+                        r'SEARCH|WEBSEARCH|DEPENDENCY|CONTINUE|KNOWLEDGE|DISCARD)', s, re.I):
+                continue   # bughunt ckpt-244: added KNOWLEDGE/DISCARD (documented planner directives)
             if re.match(r'^===\s*(EDIT|END EDIT|FILE|END FILE)\b', s, re.I):
                 continue
             out.append(ln)
@@ -9223,7 +9242,18 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
     best_plan = _sanitize_plan(best_plan)
     PLAN_CHAR_CEILING = 12000   # a real STEP plan is < ~6K; beyond this is bloat
     if len(best_plan) > PLAN_CHAR_CEILING:
-        best_plan = (best_plan[:PLAN_CHAR_CEILING].rstrip()
+        # bughunt ckpt-244: cut at a STEP boundary so we never ship a HALF step (the old
+        # `[:CEILING].rstrip()` could slice mid-step-body or mid-line → the step-parser saw
+        # an incomplete final step). Prefer the last `### STEP` header within the ceiling
+        # (drops the would-be-incomplete tail step, keeps the rest WHOLE); else fall back to
+        # the last line break; else the hard ceiling.
+        _head = best_plan[:PLAN_CHAR_CEILING]
+        _cut = _head.rfind('\n### STEP')
+        if _cut < PLAN_CHAR_CEILING - 4000:   # no nearby step boundary → at least don't cut mid-line
+            _cut = _head.rfind('\n')
+        if _cut <= 0:
+            _cut = PLAN_CHAR_CEILING
+        best_plan = (best_plan[:_cut].rstrip()
                      + "\n\n[plan truncated — implement the STEPs above]")
     if len(best_plan) != _before:
         warn(f"  plan sanitized: {_before:,} → {len(best_plan):,} chars "
@@ -9653,7 +9683,11 @@ def _extract_impl_steps(plan: str) -> list[dict]:
 
     steps = []
     step_pattern = re.compile(
-        r'###\s*STEP\s*(\d+)\s*[:\-—]\s*(.+?)(?=\n)',
+        # (?=\n|$) (bughunt ckpt-244): match a final `### STEP N: name` at EOF with no
+        # trailing newline too. The old `(?=\n)` dropped the last step whenever the plan
+        # ended on a step header — e.g. after a mid-step PLAN_CHAR_CEILING truncation, or a
+        # merger whose final step has no newline — silently losing that whole step.
+        r'###\s*STEP\s*(\d+)\s*[:\-—]\s*(.+?)(?=\n|$)',
         re.IGNORECASE,
     )
     matches = list(step_pattern.finditer(scan_scoped))

@@ -6,7 +6,8 @@ Design principles (carried + sharpened):
   1. CAPS is rare. ~3 rule-CAPS per prompt; sections use ## (light).
   2. Investigation is iterative — each tool result legitimately opens
      new questions. The "open === PLAN === in round 1" rule is now
-     gated: open it when you can name file:line for ≥1 requirement.
+     gated: open it once you can name file:line for the unmet
+     requirements (scope-complete) — see "When to commit" below.
   3. Examples teach more than rules. One "Wrong / Right" per major
      rule, plus an end-to-end round example for the coder.
   4. Generic examples — works for bug-fix, new-feature, refactor,

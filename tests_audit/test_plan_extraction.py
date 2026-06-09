@@ -120,6 +120,18 @@ FILES: c.py
     assert [s["num"] for s in out] == [1, 2, 3]
 
 
+def test_steps__last_step_at_eof_no_trailing_newline():
+    # bughunt ckpt-244: the step regex used (?=\n) so a plan ending ON a step header
+    # (no trailing newline — e.g. after a mid-step PLAN_CHAR_CEILING truncation, or a
+    # merger whose final step has no newline) silently DROPPED that whole step. The
+    # lookahead is now (?=\n|$).
+    plan = "## STEPS\n### STEP 1: First\nbody A\n### STEP 2: Second at EOF no newline"
+    out = _extract_impl_steps(plan)
+    assert [s["num"] for s in out] == [1, 2]
+    # and a single step that IS the whole tail still parses
+    assert [s["num"] for s in _extract_impl_steps("## STEPS\n### STEP 1: only step no nl")] == [1]
+
+
 def test_steps__step_with_depends_on():
     plan = """
 ## IMPLEMENTATION STEPS
