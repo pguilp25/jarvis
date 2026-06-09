@@ -8823,11 +8823,31 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         completed: list = list(done)                       # all finished (usable or not) — kept for
         # result collection below, which re-filters; only USABLE ones gate the wait.
         pending_set = set(pending)
+        # WALL-CLOCK DEADLINE on the "wait for the 3rd usable plan" loop (ckpt-236).
+        # Without it, one slow straggler (e.g. nemotron-3-ultra under 90s-TTFT stalls +
+        # 429 fallback churn) held Layer-1 open ~550s while 2 plans were already in
+        # hand — the merger then ran out the 1800s instance budget and the CODER never
+        # ran (instance-1 of fresh12_ckpt234 timed out STILL planning). Once we hold
+        # ≥1 usable plan, stop waiting past PLAN_RACE_MAX_S: the merger works fine with
+        # 1-2 plans. With 0 usable we keep waiting (the merger needs ≥1 input).
+        PLAN_RACE_MAX_S = 300.0
+        _loop = asyncio.get_event_loop()
+        _race_deadline = _loop.time() + PLAN_RACE_MAX_S
         while sum(_usable(t) for t in completed) < 3 and pending_set:
+            _have = sum(_usable(t) for t in completed)
+            _timeout = max(0.0, _race_deadline - _loop.time()) if _have >= 1 else None
+            if _timeout is not None and _timeout <= 0:
+                status(f"Layer 1: race deadline ({PLAN_RACE_MAX_S:.0f}s) reached with "
+                       f"{_have} usable plan(s) — proceeding, not waiting on stragglers")
+                break
             more_done, pending_set = await asyncio.wait(
-                pending_set, return_when=asyncio.FIRST_COMPLETED
+                pending_set, return_when=asyncio.FIRST_COMPLETED, timeout=_timeout
             )
             completed.extend(more_done)
+            if _have >= 1 and not more_done:    # deadline elapsed with nothing new finishing
+                status(f"Layer 1: race deadline ({PLAN_RACE_MAX_S:.0f}s) reached "
+                       f"(idle) — proceeding with {_have} usable plan(s)")
+                break
         # Cancel any remaining (genuine stragglers — we have 3 usable, or none are left)
         for t in pending_set:
             t.cancel()
