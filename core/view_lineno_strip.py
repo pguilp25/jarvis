@@ -45,10 +45,11 @@ _WS_PREFIX_WS_RE = re.compile(r'^\d+\s*⇥')             # LINENO ⇥ gutter
 _WS_COLON_RE = re.compile(r'^\d+:')                   # LINE: gutter
 
 # v10 format: line# uses a ':' separator, indent uses '|'.
-_V10_FULL_PREFIX_RE = re.compile(r'^(\d+):(\d+\|)')   # LINE:INDENT|
+# ^\s* (bughunt ckpt-242): tolerate a model that indents the whole line/gutter.
+_V10_FULL_PREFIX_RE = re.compile(r'^\s*(\d+):(\d+\|)')   # LINE:INDENT|
 
 # v9 format: front-positioned prefixes, both '|' (disambiguated by count)
-_V9_FULL_PREFIX_RE = re.compile(r'^(\d+)\|(\d+)\|')   # LINE|INDENT|
+_V9_FULL_PREFIX_RE = re.compile(r'^\s*(\d+)\|(\d+)\|')   # LINE|INDENT| (^\s*: tolerate indented copy, ckpt-242)
 _V9_INDENT_PREFIX_RE = re.compile(r'^(\d+)\|')        # INDENT|
 
 # v8 legacy format (kept for back-compat parsing)

@@ -191,15 +191,32 @@ class Sandbox:
     def apply(self) -> list[str]:
         """Apply all sandbox changes to the actual project. Returns list of modified files."""
         applied = []
+        _root = self.project_root.resolve()
+
+        def _contained(rel_path):
+            # bughunt ckpt-242: an ABSOLUTE rel_path ('/etc/passwd') or a '../'-escape would write
+            # OUTSIDE the repo — Path's `/` lets an absolute RHS replace the LHS. Refuse anything
+            # that doesn't resolve under project_root (keeps junk/escaping paths out of the patch).
+            try:
+                dest = (self.project_root / rel_path).resolve()
+                dest.relative_to(_root)
+                return dest
+            except Exception:
+                warn(f"  ⚠ sandbox.apply: refusing out-of-repo path {rel_path!r} — skipped")
+                return None
 
         for rel_path, content in self.modified_files.items():
-            dest = self.project_root / rel_path
+            dest = _contained(rel_path)
+            if dest is None:
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             applied.append(f"Modified: {rel_path}")
 
         for rel_path, content in self.new_files.items():
-            dest = self.project_root / rel_path
+            dest = _contained(rel_path)
+            if dest is None:
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             applied.append(f"Created: {rel_path}")

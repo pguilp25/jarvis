@@ -279,10 +279,12 @@ CODER_TOOLS = [
             "hunk: `old` = the exact CONTIGUOUS lines THAT ONE hunk changes — copy the view "
             "line(s) VERBATIM, keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def "
             "setvalue`); the harness anchors on BOTH the line number AND the content (a stale "
-            "number self-corrects). Bracket each hunk with ~1-2 UNCHANGED lines above and below "
-            "— copy them verbatim into BOTH `old` and `new`: it makes the match UNIQUE (no "
-            "'appears N times' / 'not found' rejects) and the real surrounding lines SHOW you "
-            "the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
+            "number self-corrects). Bracket each hunk with ~1-2 UNCHANGED lines above and below — "
+            "in `old` copy them VERBATIM (the full `LINENO ⇥INDENT|` prefix); in `new` re-write "
+            "those SAME unchanged lines as `INDENT|code` (drop the line number, like every `new` "
+            "line — a `new` line that keeps the `LINENO ⇥` prefix is REJECTED). Bracketing makes "
+            "the match UNIQUE (no 'appears N times' / 'not found' rejects) and the real surrounding "
+            "lines SHOW you the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
             "Nearby hunks may share those context lines — that's fine, they're merged; the only "
             "thing to avoid is two hunks CHANGING the same line. "
             "`new` = the replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a "
@@ -1371,6 +1373,7 @@ def _do_replace(args: dict, ctx: dict) -> str:
         return (f"✗ replace_lines: invalid range — start_line ({s_i}) must be ≤ "
                 f"end_line ({e_i}). Put the smaller line number first (use the "
                 f"numbers from your most recent read_file).")
+    ctx.setdefault("file_contents", {})   # bughunt ckpt-242: defensive — match _do_edit/_do_read
     before = ctx["file_contents"].get(path)
     _cot_reject = _check_edit_cot(args, before or "", is_insert=False)
     if _cot_reject:
@@ -2822,6 +2825,10 @@ def _debug_edit_trace(tool: str, args: dict, result: str) -> None:
 
 
 async def _dispatch(name: str, args: dict, ctx: dict):
+    if not isinstance(args, dict):
+        args = {}   # STABILITY INVARIANT (bughunt ckpt-242): a non-dict/None payload must never
+                    # AttributeError downstream (e.g. finish's args.get) — coerce to {} so every
+                    # handler sees a dict and returns a clean ✗, never raises.
     # #17 (ckpt-213): a read_file call that carries an edit-only payload (`edits`/`hunks`/
     # `old`/`new`) is unambiguously a mis-named edit_file — the model built the whole edit and
     # just put the wrong tool name on it (a26 step 6: read_file{path, edits:[…]} → no-op re-read,

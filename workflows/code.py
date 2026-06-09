@@ -10032,6 +10032,13 @@ def _apply_extracted_code(
     # post-edit (possibly broken) content and silently pass a syntax-breaking
     # edit through as ✓ APPLIED.
     _pre_apply_contents = dict(file_contents)
+    # bughunt ckpt-242: snapshot the revert-stack DEPTH per file too. The apply loop
+    # below pushes one revert state PER edit block (a file edited by N hunks in one call
+    # pushes N). When a gate (parse / undefined-name) rejects and reverts file_contents
+    # to its pre-apply state, those N pushed states are now ORPHANED — a later
+    # [REVERT FILE] would pop them (no-ops, or worse, reapply a partial edit) instead of
+    # undoing the genuine prior edit. On revert we pop the stack back DOWN to this depth.
+    _pre_apply_revert_depth = {fp: len(_REVERT_STACK.get(fp, [])) for fp in file_contents}
 
     def _suffix_with_sep(longer: str, shorter: str) -> bool:
         """Path-bounded suffix match. ``foo/bar.py`` is a suffix of
@@ -10505,6 +10512,13 @@ def _apply_extracted_code(
             file_contents[fp] = _pre_apply_contents[fp]
         else:
             file_contents.pop(fp, None)
+        # bughunt ckpt-242: pop the revert state(s) this apply pushed for fp back down to
+        # the pre-apply depth, so a later [REVERT FILE] undoes the GENUINE prior edit, not
+        # this rejected-and-reverted one. Pop one extra for a NEW file (depth 0 → the push
+        # leaves one orphan even though pre-apply had none tracked).
+        _target_depth = _pre_apply_revert_depth.get(fp, 0)
+        while len(_REVERT_STACK.get(fp, [])) > _target_depth:
+            _pop_revert_state(fp)
         # Drop the now-contradictory "✓ … APPLIED … {fp}" skip(s) for this file.
         # Match the CURRENT format ("✓ edit:N APPLIED — {fp} (…)") — the older
         # "✓ … on {fp} … APPLIED" check missed it after the message reformat,
@@ -10534,7 +10548,7 @@ def _apply_extracted_code(
                 except (SyntaxError, ValueError):
                     continue  # pre-existing breakage — not this edit's fault
             del result[fp]
-            _revert_fp_apply(fp)
+            _revert_fp_apply(fp)   # bughunt ckpt-242: also pops the orphaned revert state(s) — see _revert_fp_apply
             total_matched = max(0, total_matched - 1)
             lineno = getattr(parse_err, 'lineno', None) or 0
             emsg = getattr(parse_err, 'msg', None) or str(parse_err)
@@ -10594,7 +10608,7 @@ def _apply_extracted_code(
             new_undef = _undefined_names_introduced(original, new_content)
             if new_undef:
                 del result[fp]
-                _revert_fp_apply(fp)
+                _revert_fp_apply(fp)   # bughunt ckpt-242: also pops the orphaned revert state(s)
                 total_matched = max(0, total_matched - 1)
                 names = ", ".join(sorted(new_undef))
                 _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"

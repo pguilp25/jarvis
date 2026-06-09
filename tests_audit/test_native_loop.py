@@ -321,8 +321,12 @@ def test_verify_nudge_fires_once_before_finish():
         assert res["done"] is True
         assert model.calls == 3   # the nudge forced the extra round
         flat = [m for conv in model.seen_messages for m in conv]
+        # ckpt-224 Cluster H routes an EXPLICIT `finish` tool call through the same
+        # verify gate; the nudge is then delivered as the TOOL result answering that
+        # finish call (API-correct — a tool_call must be answered), not a free `user`
+        # message. Accept it in either role. (bughunt ckpt-242: test was stale.)
         assert any("SELF-CHECK before you finish" in str(m.get("content"))
-                   for m in flat if m.get("role") == "user")
+                   for m in flat if m.get("role") in ("user", "tool"))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

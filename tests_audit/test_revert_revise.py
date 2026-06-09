@@ -192,6 +192,44 @@ def test_revert__clear_all():
     assert _pop_revert_state("b.py") is None
 
 
+def test_revert__gate_reject_pops_orphaned_state(tmp_path):
+    """bughunt ckpt-242: when the parse-gate rejects an edit and reverts the
+    file, the revert state the apply PUSHED must be popped back to its pre-apply
+    depth — otherwise a later [REVERT FILE] pops that orphan (a no-op) instead of
+    undoing the genuine prior edit."""
+    import workflows.code as wc
+    from tools.sandbox import Sandbox
+
+    _clear_revert_history()
+    # a.py with a valid prior edit already on the revert stack (depth = 1).
+    src = "def f():\n    return 1\n"
+    (tmp_path / "a.py").write_text(src)
+    sb = Sandbox(str(tmp_path))
+    sb.setup()
+    file_contents = {"a.py": src}
+    wc._push_revert_state("a.py", "PRIOR_GENUINE_STATE")   # pre-apply depth 1
+    assert len(wc._REVERT_STACK.get("a.py", [])) == 1
+
+    # An edit whose REPLACE breaks Python syntax → parse-gate rejects + reverts.
+    response = (
+        "=== EDIT: a.py ===\n"
+        "[SEARCH]\n    return 1\n[/SEARCH]\n"
+        "[REPLACE]\n    return (\n[/REPLACE]\n"
+    )
+    extracted = wc._extract_code_blocks(response)
+    result, matched, total, skips = wc._apply_extracted_code(
+        extracted, file_contents, sb)
+
+    # The broken edit was reverted (not in result, file_contents unchanged)…
+    assert "a.py" not in result
+    assert file_contents["a.py"] == src
+    # …and the orphaned revert state was popped back to pre-apply depth 1, so the
+    # NEXT pop returns the GENUINE prior state, not the orphan.
+    assert len(wc._REVERT_STACK.get("a.py", [])) == 1
+    assert wc._pop_revert_state("a.py") == "PRIOR_GENUINE_STATE"
+    _clear_revert_history()
+
+
 def test_revert__clear_single_file():
     _clear_revert_history()
     _push_revert_state("a.py", "x")
