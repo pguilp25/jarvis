@@ -13,6 +13,36 @@ Contracts:
 """
 import pytest
 from workflows.code import _extract_code_blocks, _apply_revise_edits
+from core.edit_block import apply_edit_block
+
+
+def test_apply_edit_block__out_of_order_hunks_sorted_not_rejected():
+    # bughunt ckpt-245: hunk ORDER is the harness's job, not the model's. A coder
+    # that emits hunks scrambled (ansible-395e5e20: 36 hunks out of order → 3×
+    # identical "out of order" rejects → reject-thrash → coder-chain exhaustion)
+    # must just work. apply_edit_block now stable-sorts ops by located position.
+    src = "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n"
+    out_of_order = ("=== EDIT: x.py ===\n[edit]\n"
+                    "4:-    c = 3\n+    c = 30\n"      # line 4 BEFORE line 2 (scrambled)
+                    "2:-    a = 1\n+    a = 10\n"
+                    "[/edit]\n=== END EDIT ===")
+    in_order = ("=== EDIT: x.py ===\n[edit]\n"
+                "2:-    a = 1\n+    a = 10\n"
+                "4:-    c = 3\n+    c = 30\n"
+                "[/edit]\n=== END EDIT ===")
+    new_ooo, info, _ = apply_edit_block(src, out_of_order)
+    new_ord, _, _ = apply_edit_block(src, in_order)
+    assert new_ooo is not None, f"out-of-order was rejected: {info}"
+    assert "a = 10" in new_ooo and "c = 30" in new_ooo and "    b = 2" in new_ooo
+    assert new_ooo == new_ord, "out-of-order result must equal in-order result"
+
+
+def test_apply_edit_block__genuine_same_line_dup_still_rejected():
+    # The sort must NOT mask a real conflict: keeping AND deleting the same line.
+    src = "x = 1\ny = 2\nz = 3\n"
+    block = ("=== EDIT: x.py ===\n[edit]\n2:y = 2\n2:-y = 2\n+y = 20\n[/edit]\n=== END EDIT ===")
+    new, info, _ = apply_edit_block(src, block)
+    assert new is None, "a same-line keep+delete conflict must still be rejected"
 
 
 # ───────────────────── BASIC SEARCH/REPLACE ─────────────────────

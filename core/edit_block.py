@@ -290,6 +290,33 @@ def apply_edit_block(src, block_text):
         return (None, f"edit line numbers {fp + 1}-{lp + 1} fall outside the file "
                 f"(1-{len(lines)}). Re-read and use the current line numbers.", [])
 
+    # ── 2b. SORT ops into ascending file order (bughunt ckpt-245) ────────────
+    # The reconstruction below walks `cursor` top-to-bottom, so it REJECTS any
+    # anchor behind the cursor ("edit lines are out of order"). Hunk ORDERING is
+    # global bookkeeping the harness should own, NOT the model (this project's
+    # "harness computes global, model acts local" principle): a weak coder
+    # emitting many hunks scrambled — then resending the SAME scrambled call and
+    # reject-thrashing (a26/ansible-395e5e20: 36 hunks, scrambled, 3× identical
+    # rejects) — should just work. Group each keep/del/bulk anchor with the add(s)
+    # that FOLLOW it, then STABLE-sort the groups by the anchor's RESOLVED
+    # (content-located) position. Stable + located-position means: in-order input
+    # is a no-op (existing behavior unchanged), and an anchor whose NUMBER was
+    # stale still sorts by where its CONTENT actually matched. Genuine conflicts
+    # (same-line dup, overlapping bulk) are still caught by the checks below.
+    _lead = []                                   # add(s) before any anchor → emit at region start
+    _segs = []                                   # [[sort_pos, [(op,res),...]], ...]
+    for _o, _r in zip(ops, resolved):
+        if _o[0] in ("keep", "del"):
+            _segs.append([_r, [(_o, _r)]])
+        elif _o[0] == "bulk":
+            _segs.append([_r[0], [(_o, _r)]])    # bulk's start position
+        else:                                    # add → attaches to the preceding anchor
+            (_segs[-1][1] if _segs else _lead).append((_o, _r))
+    _segs.sort(key=lambda s: s[0])               # stable: equal positions keep input order
+    _flat = _lead + [pair for _, items in _segs for pair in items]
+    ops = [p[0] for p in _flat]
+    resolved = [p[1] for p in _flat]
+
     # ── 3. reconstruct [fp..lp], preserving unmentioned original lines ───────
     out = []
     cursor = fp
