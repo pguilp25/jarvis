@@ -654,7 +654,8 @@ PLAN IN TWO PASSES — zoom out, THEN zoom in:
 Your plan describes WHAT in plain English. The coder reads the
 file directly. Don't put code fences, function bodies, imports,
 decorators, or before/after snippets in the plan. Cite by
-file:line, not by pasting code.
+file + SYMBOL (function/class) — not by pasting code, and not by line
+number (it shifts as steps edit the file; the symbol is stable).
 
 Why: plans with code blocks are rejected by the merger; the
 planner above wins by default.
@@ -979,8 +980,9 @@ specific line, ALWAYS locate the symbol with `[REFS:]` or
 guess a line range from the file's size — your `[VIEW: path L-R]`
 should be anchored on a real line number you just looked up.
 
-Cite code as `func() at file.py:N`. Never paraphrase line numbers
-from memory.
+Cite code in the PLAN by SYMBOL — `func()` in file.py — NOT by line number:
+line numbers shift as earlier steps edit the file, so a number goes stale by the
+time the coder reaches a later step; a symbol never does. Never paraphrase from memory.
 
 
 ## The plan — format
@@ -1008,7 +1010,7 @@ Below is the SHAPE; `<<…>>` markers are placeholders you fill in:
     ## STEPS
     ### STEP 1: <<imperative verb>> <<object>>
     FILES: path/to/file.py
-    <<plain English: what changes, why, file:line citations>>
+    <<plain English: what changes, why, cited by SYMBOL (function/class) — NOT line numbers>>
 
     ### STEP 2: ...
     FILES: ...
@@ -1047,7 +1049,7 @@ Below is the SHAPE; `<<…>>` markers are placeholders you fill in:
     ## CONFIDENCE
     CORRECTNESS / PRECISION / RISK, each 1-10. If any < 6, name the gap in one line.
       CORRECTNESS = does the plan actually satisfy the contract? (drop on ambiguity, untraced edges, unverified third-party behavior)
-      PRECISION = are your file:line citations grounded in a tool result THIS run? (drop on memory/paraphrase)
+      PRECISION = are your SYMBOL citations grounded in a tool result THIS run? (drop on memory/paraphrase)
       RISK = blast radius if wrong? (drop on high |appears N, deleting a top-level symbol, edits in a depended-on module you couldn't enumerate)
 
     Honest scoring with a flagged gap beats overconfident scoring that hides one: a CORRECTNESS=7 with a documented EDGE CASES alternative is preferred over a CORRECTNESS=9 that ignored the same ambiguity.
@@ -1512,7 +1514,8 @@ PART D — Completeness meta-check:
 
     - One STEP per file unless tightly coupled.
     - Each STEP: imperative title, a `FILES:` line (literal token — the runtime
-      parses it), then a plain-English body with file:line citations.
+      parses it), then a plain-English body citing locations by SYMBOL
+      (function/class), NOT line numbers (they shift as steps edit the file).
     - INDEPENDENT-CHANGE RULE: STEPs are independently failable — and each must
       leave the code in a WORKING state on its own.
     - REPLACEMENT = ONE STEP (critical). When the change REPLACES something —

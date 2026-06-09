@@ -443,7 +443,8 @@ in mind while you investigate:
   the user SEES.
 
 Two absolute rules — violating either rejects the plan:
-  ✗ NO CODE in step bodies. Plain English + file:line citations only.
+  ✗ NO CODE in step bodies. Plain English + SYMBOL citations (file + function/
+    class name, NEVER line numbers — they shift as steps edit the file).
   ✗ NO re-reading a file already in CONTEXT MANIFEST.
 
 (Tool tags ARE allowed mid-plan — see PAUSE MID-PLAN below.)
@@ -1239,13 +1240,17 @@ real leading spaces (so you SEE the nesting), then the code. Example:
     11 ⇥4|    def add(self, role):
     12 ⇥8|        entry = {"role": role}
 
-Reference code in your plan as: "add() at memory.py:11".
-The coder uses these line-number anchors to find the exact lines to edit.
+Reference code in your plan by SYMBOL — the file plus the function / method /
+class (and, when it helps, the specific construct inside it). E.g. "Memory.add()
+in memory.py", or "the `if 'general' in self:` branch in StateConfig.__init__".
+Do NOT cite line numbers or line ranges in the plan: earlier steps edit the file,
+so line numbers SHIFT and go stale by the time the coder reaches a later step — a
+symbol name never does. The coder locates the symbol in its own live view.
 
 When you describe a change, do NOT write code blocks or snippets —
 describe the change in plain English. The coder reads the file directly.
-Example: "At line 11, add a second parameter `role: str` to add()" NOT
-a CURRENTLY/CHANGE block. Plain English with a line number is enough.
+Example: "In Memory.add(), add a second parameter `role: str`" NOT
+"at line 11" and NOT a CURRENTLY/CHANGE block.
 
 ══════════════════════════════════════════════════════════════════════
 PLANNER-SPECIFIC TOOL USAGE — extends WHEN TO USE TOOLS from SYSTEM
@@ -1263,8 +1268,9 @@ mechanics:
     you which file.
   • [CODE: path N-M] is FORBIDDEN. Read the full file, then [KEEP:]
     or [VIEW:] to zoom.
-  • Cite line numbers from tool results in your plan ("modify aM()
-    at index.html:414") — never paraphrase from memory.
+  • Cite the SYMBOL from tool results in your plan ("modify aM() in
+    index.html") — never paraphrase from memory, and never a line number
+    (it shifts as earlier steps edit the file; the symbol is stable).
 
 ⚠ [SEARCH: pattern] is the TEXT SEARCH tool (ripgrep), NOT the
 edit-block `[SEARCH]/[REPLACE]` syntax. The two are unrelated.
@@ -1408,15 +1414,16 @@ flag anything that fails one of these:
     layer (UI render, output formatting, etc.) — the plan doesn't
     end at "data is stored."
   • No step says "wire up X" or "handle the new mode" without
-    naming the exact file:line and the exact change.
+    naming the exact file + symbol (function/class) and the exact change
+    (a symbol, never a line number — line numbers shift as steps edit).
 
 If none of those flag, ship it. Don't write the scan out as prose
 — a fast mental pass is the point.
 
 OUTPUT DISCIPLINE:
   ✓ Plan body (inside `=== PLAN === ... === END PLAN ===`) is CLEAN:
-    concrete file:line citations, specific actions, no "alternatives
-    considered" / "we chose X because Y" filler.
+    concrete file + SYMBOL citations (function/class, NOT line numbers — they
+    shift), specific actions, no "alternatives considered" / "we chose X" filler.
   ✓ Reasoning lives in thinking tokens — invisible to the plan reader,
     informs every line of the plan body without bloating it.
   ✗ NEVER paste a "## REASONING" or "## ALTERNATIVES CONSIDERED"
@@ -1542,9 +1549,9 @@ unless the task is genuinely complex.
     failure mode). Mark each MET or UNMET after investigation.
 
   ▸ INVESTIGATION — for each UNMET, prove it from real code.
-    Use tools. Every finding cites file:line — not "I think X" but
-    "function aM() at index.html:414 takes (role, text), no thinking
-    param." Watch for the common silent traps: input normalization
+    Use tools. Every finding cites the SYMBOL + what you saw (grounded in a
+    tool result this run) — not "I think X" but "function aM() in index.html
+    takes (role, text), no thinking param." (Don't cite line numbers — they shift.) Watch for the common silent traps: input normalization
     (.replace, .strip) destroying data; "chain exists but produces
     empty values" — find the assignment AND read what it actually
     extracts; the feature is already implemented (search before
@@ -1600,7 +1607,7 @@ FORBIDDEN in every step body:
 ALLOWED:
   ✓ Function/symbol names in `backticks`
   ✓ Single-line signatures in SHARED INTERFACES
-  ✓ File:line citations: "modify aM() at index.html:414"
+  ✓ Symbol citations: "modify aM() in index.html" (NOT line numbers — they shift)
   ✓ Plain-English description of every change
 
 BAD step body (rejected):
@@ -1650,7 +1657,7 @@ STEP WRITING GUIDE — what "precise enough" means:
 
   THE CODER CANNOT ASK YOU QUESTIONS. If your step says "update the
   rendering" the coder guesses HOW. If your step says "modify aM()
-  at index.html:414 to accept a third parameter thinkingTrace, and
+  in index.html to accept a third parameter thinkingTrace, and
   when thinkingTrace is non-empty, create a div with class 'think-block'
   containing the trace text, inserted before the assistant message div"
   — the coder knows exactly what to write.
@@ -2152,7 +2159,7 @@ coder AI can implement it without asking questions.
 
 The coder AI CANNOT think or search — it ONLY translates your plan
 into code. If your plan says "update the rendering", the coder guesses
-how. If your plan says "modify aM() at index.html:414 to accept a
+how. If your plan says "modify aM() in index.html to accept a
 third parameter thinkingTrace", the coder knows exactly what to do.
 
 YOU DO:    Investigate code with tools. Design solutions. Write plans.
@@ -2243,7 +2250,8 @@ Add #label to name results. [DISCARD: #label] to remove irrelevant ones.
     • External library docs?                        → [WEBSEARCH: query]
     • Hot symbol marked `|appears N (#tag)` — who calls it?
                                                     → [DEPENDENCY: #tag]
-  Every claim about code must cite a line number from a tool result.
+  Every claim about code must be grounded in a tool result THIS run — cite the
+  SYMBOL you saw (never paraphrase from memory; don't cite line numbers, they shift).
 
 ╔══════════════════════════════════════════════════════════════════════╗
 ║         ═══════ END OF SYSTEM FRAMING (the JARVIS preamble) ═══════   ║
@@ -4254,7 +4262,7 @@ the exact location, and the precise description — NOT retyping code.
 ✓ ALLOWED references:
   • Function/variable names in `backticks`
   • Single-line signatures in SHARED INTERFACES: `foo(x: int) -> bool`
-  • File:line citations: "edit aM() at index.html:414"
+  • Symbol citations: "edit aM() in index.html" (NOT line numbers — they shift)
   • Plain-English description of what the new code does
 
 BAD (what kills plans):
@@ -4325,11 +4333,11 @@ For each plan, evaluate against the user's GOAL:
      the plan is incomplete — no matter how good the backend work is.
 
   2. PRECISION: Can the coder implement each step without guessing?
-     Does each step cite file, function, line number? Or does it say
-     vague things like "update the module"?
+     Does each step cite file + function/class (SYMBOL — not a line number,
+     which shifts)? Or does it say vague things like "update the module"?
 
-  3. EVIDENCE: Did the planner verify code claims with tools? Plans
-     that cite line numbers from [CODE:] reads are more reliable.
+  3. EVIDENCE: Did the planner verify code claims with tools? Plans whose
+     claims are grounded in [CODE:] reads (cited by symbol) are more reliable.
 
   4. COMPLETENESS: Edge cases covered? All callers updated?
 
@@ -4982,7 +4990,7 @@ the actual file and writes the code. The plan must NEVER contain:
 
   ✓ Backticked names: `process_batch`, `WORKER_POOL_SIZE`
   ✓ Single-line signatures in SHARED INTERFACES
-  ✓ File:line citations: "modify aM() at index.html:414"
+  ✓ Symbol citations: "modify aM() in index.html" (NOT line numbers — they shift)
   ✓ Plain-English description of every change
 
 BAD plan step (REJECTED — too much code):
