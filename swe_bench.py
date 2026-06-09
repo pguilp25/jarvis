@@ -401,10 +401,14 @@ async def run_one_instance(
     inst_dir: Path | None = None
     patch_text = ""
     error_msg = ""
-    t0 = time.time()
+    t0 = time.time()   # placeholder; re-stamped after the semaphore so `elapsed` is TRUE per-instance
 
     try:
         async with sem:
+            # bughunt ckpt-243: with asyncio.gather + parallel=1, ALL coroutines run up to here
+            # and queue on `sem`; stamping t0 before this gate made `elapsed` measure time since
+            # RUN start (cumulative) for every queued instance. Re-stamp now that real work begins.
+            t0 = time.time()
             summary_log(f"START  {iid}  ({instance['repo']})")
             try:
                 cache_path = await ensure_repo_cached(instance["repo"], instance["base_commit"])
