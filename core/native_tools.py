@@ -3109,7 +3109,12 @@ _INDENT_FORMAT_BLOCK = (
     "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
     "method indent (look at another `def` in that class, e.g. `4|`); a body line is "
     "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
-    "class/function — that ejects it (the dedent bug). A blank line is `0|`.")
+    "class/function — that ejects it (the dedent bug). A blank line is `0|`.\n"
+    "  • BODY OF A COMPOUND STATEMENT → header's INDENT + 4, on EVERY body line. This is "
+    "for ANY line ending in `:` — `if`/`elif`/`else`/`for`/`while`/`try`/`except`/`with`, "
+    "not just `def`/`class`. e.g. a new `8|if cond:` → its body is `12|a = 1` then "
+    "`12|b = 2` (every body line at 12, NOT 8). A body line at the SAME number as its "
+    "header is the `expected an indented block` IndentationError that rejects the whole edit.")
 
 # Bullet-CoT (ckpt-185, flag JARVIS_BULLET_COT — read at CALL time so tests can toggle).
 # A SOFT reasoning-style nudge: same moves, terser wording. The goal is COST (gpt-oss is
