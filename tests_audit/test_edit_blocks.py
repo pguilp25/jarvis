@@ -546,6 +546,18 @@ def test_bughunt_strip_line_numbers_v9_no_double_indent():
     assert "⇥" not in _strip_line_numbers("286|4|⇥def foo")[0]
 
 
+def test_bughunt_strip_line_numbers_colon_substituted_gutter():
+    # bughunt ckpt-243: a weak model that cannot type the ⇥ glyph substitutes a colon,
+    # emitting `LINENO:INDENT|content`. It must strip to real source (indent re-expanded)
+    # with the line# returned as the fuzzy-match hint — same as the ⇥ form — else the
+    # `42:4|` prefix ships verbatim and never matches → stale-anchor reject loop.
+    from workflows.code import _strip_line_numbers
+    clean, hint = _strip_line_numbers("42:4|def foo():")
+    assert clean == "    def foo():" and hint == 42
+    # a real line with a space after the colon (YAML `key: val`) is NOT a gutter — untouched.
+    assert _strip_line_numbers("42: value")[0] == "42: value"
+
+
 def test_bughunt_strip_line_numbers_prefix_ws_leading_space():
     # ws_prefix_format now tolerates leading whitespace (^\s*), symmetric w/ REPLACE
     from workflows.code import _strip_line_numbers

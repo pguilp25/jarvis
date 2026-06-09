@@ -7737,6 +7737,12 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
     # expand to real source spaces (the count is authoritative; the typed
     # spaces that follow agree with it and are dropped via lstrip).
     ws_prefix_format = re.compile(r'^\s*(\d+)\s*⇥(\d+)\|(.*)$')  # LINENO ⇥INDENT|content (^\s* mirrors v10_full_re)
+    # bughunt ckpt-243: colon variant of the prefix_ws gutter. A weak model that cannot
+    # reproduce the `⇥` glyph substitutes a colon, emitting `LINENO:INDENT|content`. Without
+    # this branch the line falls through every matcher, ships verbatim with the `42:4|`
+    # prefix intact, and never matches the file → stale-anchor reject loop. (The native-side
+    # view_lineno_strip already tolerates the colon gutter; this mirrors it for the text path.)
+    colon_prefix_format = re.compile(r'^\s*(\d+):(\d+)\|(.*)$')   # LINENO:INDENT|content
     # v9 formats — line# at FRONT, no trailing-integer ambiguity.
     v9_full_format = re.compile(r'^(\d+)\|(\d+)\|(.*)$')   # LINE|INDENT|content
     v9_indent_only = re.compile(r'^(\d+)\|(.*)$')           # INDENT|content
@@ -7757,6 +7763,20 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
             # valid source — mirrors native_tools._expand_indent_lines so a leaked
             # marker can't ship as a literal `⇥` → SyntaxError).
             code = mpw.group(3).replace("⇥", "").lstrip(' ')
+            if first_num is None:
+                first_num = lineno
+            stripped.append(' ' * indent + code)
+            continue
+
+        # prefix_ws priority 0b (bughunt ckpt-243): colon-substituted gutter
+        # `LINENO:INDENT|content` — same handling as the ⇥ form. Distinct from v9
+        # `LINE|INDENT|` (pipe separator), so no overlap.
+        mcp = colon_prefix_format.match(line)
+        if mcp:
+            has_numbers = True
+            lineno = int(mcp.group(1))
+            indent = int(mcp.group(2))
+            code = mcp.group(3).replace("⇥", "").lstrip(' ')
             if first_num is None:
                 first_num = lineno
             stripped.append(' ' * indent + code)
@@ -10514,8 +10534,9 @@ def _apply_extracted_code(
             file_contents.pop(fp, None)
         # bughunt ckpt-242: pop the revert state(s) this apply pushed for fp back down to
         # the pre-apply depth, so a later [REVERT FILE] undoes the GENUINE prior edit, not
-        # this rejected-and-reverted one. Pop one extra for a NEW file (depth 0 → the push
-        # leaves one orphan even though pre-apply had none tracked).
+        # this rejected-and-reverted one. (A NEW file is never pushed to the stack — text/line
+        # edits reject non-existent targets and `=== FILE:` never pushes — so for a new fp the
+        # pre-apply depth is 0 and the loop is a no-op; the pop matters for EXISTING files.)
         _target_depth = _pre_apply_revert_depth.get(fp, 0)
         while len(_REVERT_STACK.get(fp, [])) > _target_depth:
             _pop_revert_state(fp)

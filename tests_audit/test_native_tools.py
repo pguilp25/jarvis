@@ -1370,6 +1370,15 @@ def test_salvage_parses_leaked_tool_call_from_reasoning():
     assert sal('We should think about whether the function returns True here.', 4) is None
     # only real CODER_TOOLS tools are salvaged
     assert sal('{"name":"rm_rf","arguments":{"x":1}}', 5) is None
+    # bughunt ckpt-243: an explicit but UNRECOGNIZED `name` must NOT be inferred from its
+    # incidental keys. {"name":"error_handler","summary":..} used to infer "finish" (summary
+    # key) -> a spurious premature finish on stray reasoning prose. Now skipped.
+    assert sal('note {"name":"error_handler","summary":"handled it"} note', 6) is None
+    # but a VALID tool name with INLINE args (no `arguments` wrapper) must STILL salvage
+    iv = sal('{"name":"edit_file","old":["x"],"new":["y"],"path":"a.py"}', 7)
+    assert iv and iv["function"]["name"] == "edit_file"
+    # and a bare {summary} with NO name is still a legit leaked finish
+    assert sal('{"summary":"all done"}', 8)["function"]["name"] == "finish"
 
 
 def test_edit_anchors_on_copied_view_line_number():

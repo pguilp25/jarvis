@@ -1679,7 +1679,11 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
             # — it caused an endless `SyntaxError: invalid character '⇥'` reject-loop (c580 via
             # mistral). Strip it BEFORE lstrip so the spaces it shielded aren't kept as indent.
             code = m.group(2).replace("⇥", "")
-            ind = int(m.group(1))
+            # bughunt ckpt-243: clamp the declared indent. `' ' * ind` raises OverflowError
+            # for ind >= ~2^63 and balloons memory for merely-huge values — a malformed
+            # `999999999999|code` line would otherwise crash the never-raise applier. No real
+            # source indents past a few hundred spaces, so 1024 is generous and never corrupts.
+            ind = min(int(m.group(1)), 1024)
             typed = len(code) - len(code.lstrip(' '))
             if typed > 0 and typed != ind:
                 _cs = code.lstrip(' ')
@@ -1742,6 +1746,7 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 "copied verbatim from your read) and `new` (the replacement; to DELETE a line keep "
                 "the context lines in `new` and omit the removed one — `new=[]` deletes ALL of `old`).")
 
+    ctx.setdefault("file_contents", {})   # bughunt ckpt-243: defensive — match _do_replace/_do_read (never KeyError on a ctx without file_contents)
     cur = ctx["file_contents"].get(path)
     if cur is None:
         sb0 = ctx.get("sandbox")
@@ -2189,6 +2194,7 @@ def _do_create(args: dict, ctx: dict) -> str:
     _cot_reject = _check_edit_cot(args, "", is_insert=True)
     if _cot_reject:
         return _cot_reject
+    ctx.setdefault("file_contents", {})   # bughunt ckpt-243: defensive — match _do_replace/_do_read/_do_edit
     existing = ctx["file_contents"].get(path)
     if existing is None and ctx.get("sandbox") is not None:
         existing = ctx["sandbox"].load_file(path)
@@ -3203,10 +3209,23 @@ def _salvage_inline_tool_call(text: str, ctr: int):
         if not isinstance(d, dict) or not d:
             continue
         nm, ar = d.get("name"), d.get("arguments")
-        if isinstance(nm, str) and nm in _SALVAGE_TOOL_NAMES and ar is not None:
-            a = ar if isinstance(ar, str) else json.dumps(ar)
+        if isinstance(nm, str) and nm in _SALVAGE_TOOL_NAMES:
+            # A VALID tool name. Use the `arguments` wrapper if present; else treat the
+            # object's OTHER keys as the inline args (a leak that dropped the wrapper).
+            if ar is not None:
+                a = ar if isinstance(ar, str) else json.dumps(ar)
+            else:
+                a = json.dumps({k: v for k, v in d.items()
+                                if k not in ("name", "arguments")})
             return {"id": f"salvage_{ctr}", "type": "function",
                     "function": {"name": nm, "arguments": a}}
+        # bughunt ckpt-243: only INFER a tool from a BARE args object (no explicit `name`).
+        # An object carrying an explicit but UNRECOGNIZED `name` is NOT a bare-args leak —
+        # inferring from its incidental keys mis-fires (e.g. {"name":"error_handler","summary":..}
+        # has a `summary` key → _infer_tool_from_args returns "finish" → a spurious premature
+        # finish on stray reasoning prose). Skip inference when a (non-tool) name was given.
+        if isinstance(nm, str) and nm:
+            continue
         nm2 = _infer_tool_from_args(d)
         if nm2:
             return {"id": f"salvage_{ctr}", "type": "function",
