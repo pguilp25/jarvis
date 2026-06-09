@@ -1660,7 +1660,14 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
         # A def line in the view may carry a ` |appears N (#tag)` blast-radius annotation
         # (the harness's own marker, `(#hex)`-guarded); strip it so copying that line matches.
         ln = _APPEARS_TAIL_RE.sub('', ln)
-        m = _INDENT_LINE_RE.match(ln) or _VIEW_LINE_RE.match(ln)
+        # lstrip a stray leading space before matching (bughunt ckpt-238): the
+        # documented add form `+ <code>` arrives as ` INDENT|code` (a space after the
+        # marker), which neither regex matches (both anchor on a digit at ^) → the
+        # line was emitted VERBATIM (a literal ` 4|code` → SyntaxError). Stripping
+        # leading spaces is a no-op for a correct `INDENT|`/`LINENO ⇥INDENT|` line
+        # (no leading space) and only rescues the stray-space case. Mirrors
+        # core/edit_block.py:_expand_indent. The `else` branch keeps the ORIGINAL ln.
+        m = _INDENT_LINE_RE.match(ln.lstrip(' ')) or _VIEW_LINE_RE.match(ln.lstrip(' '))
         if m:                                    # INDENT|code or LINENO:INDENT|code
             # STRIP a stray `⇥`/U+21E5 from the CODE part (ckpt-178): a weak coder copying the
             # view's `LINENO ⇥INDENT|` gutter sloppily can leave a ⇥ inside the code (e.g.

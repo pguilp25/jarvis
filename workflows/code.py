@@ -7728,7 +7728,7 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
     # `LINENO ⇥INDENT|<real spaces>content`. Strip the line# + ⇥ gutter and
     # expand to real source spaces (the count is authoritative; the typed
     # spaces that follow agree with it and are dropped via lstrip).
-    ws_prefix_format = re.compile(r'^(\d+)\s*⇥(\d+)\|(.*)$')  # LINENO ⇥INDENT|content
+    ws_prefix_format = re.compile(r'^\s*(\d+)\s*⇥(\d+)\|(.*)$')  # LINENO ⇥INDENT|content (^\s* mirrors v10_full_re)
     # v9 formats — line# at FRONT, no trailing-integer ambiguity.
     v9_full_format = re.compile(r'^(\d+)\|(\d+)\|(.*)$')   # LINE|INDENT|content
     v9_indent_only = re.compile(r'^(\d+)\|(.*)$')           # INDENT|content
@@ -7760,7 +7760,10 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
             has_numbers = True
             lineno = int(m9f.group(1))
             indent = int(m9f.group(2))
-            code = m9f.group(3)
+            # lstrip + ⇥-strip (bughunt ckpt-238): the count is authoritative; keeping
+            # the content's real spaces would DOUBLE the indent (`286|4|    def` → 8
+            # spaces), and a leaked ⇥ would ship as a literal. Mirrors _restore_line.
+            code = m9f.group(3).replace("⇥", "").lstrip(' ')
             if first_num is None:
                 first_num = lineno
             stripped.append(' ' * indent + code)
@@ -7773,7 +7776,7 @@ def _strip_line_numbers(text: str) -> tuple[str, int | None]:
         if m9i:
             has_numbers = True
             indent = int(m9i.group(1))
-            code = m9i.group(2)
+            code = m9i.group(2).replace("⇥", "").lstrip(' ')   # count authoritative (bughunt ckpt-238)
             stripped.append(' ' * indent + code)
             continue
 
@@ -8832,20 +8835,29 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # 1-2 plans. With 0 usable we keep waiting (the merger needs ≥1 input).
         PLAN_RACE_MAX_S = 300.0
         _loop = asyncio.get_event_loop()
-        _race_deadline = _loop.time() + PLAN_RACE_MAX_S
+        _race_start = _loop.time()
+        # The deadline is ALWAYS enforced (bughunt ckpt-238): the earlier
+        # `_timeout=None when 0 usable` waited UNBOUNDED for a first plan — if the
+        # only pending models were slow stragglers it could re-introduce the very
+        # instance-timeout this guards. Now we bound either way: with ≥1 usable plan
+        # in hand, proceed at PLAN_RACE_MAX_S; with 0 usable, grant a bounded grace
+        # (×1.5) to try for the merger's first input, then proceed regardless (0
+        # plans falls through to the merger/single-pass fallback — far better than
+        # burning the whole 1800s budget in planning).
         while sum(_usable(t) for t in completed) < 3 and pending_set:
             _have = sum(_usable(t) for t in completed)
-            _timeout = max(0.0, _race_deadline - _loop.time()) if _have >= 1 else None
-            if _timeout is not None and _timeout <= 0:
-                status(f"Layer 1: race deadline ({PLAN_RACE_MAX_S:.0f}s) reached with "
+            _cap = PLAN_RACE_MAX_S if _have >= 1 else PLAN_RACE_MAX_S * 1.5
+            _timeout = max(0.0, (_race_start + _cap) - _loop.time())
+            if _timeout <= 0:
+                status(f"Layer 1: race deadline ({_cap:.0f}s) reached with "
                        f"{_have} usable plan(s) — proceeding, not waiting on stragglers")
                 break
             more_done, pending_set = await asyncio.wait(
                 pending_set, return_when=asyncio.FIRST_COMPLETED, timeout=_timeout
             )
             completed.extend(more_done)
-            if _have >= 1 and not more_done:    # deadline elapsed with nothing new finishing
-                status(f"Layer 1: race deadline ({PLAN_RACE_MAX_S:.0f}s) reached "
+            if not more_done:    # deadline elapsed with nothing new finishing
+                status(f"Layer 1: race deadline ({_cap:.0f}s) reached "
                        f"(idle) — proceeding with {_have} usable plan(s)")
                 break
         # Cancel any remaining (genuine stragglers — we have 3 usable, or none are left)
@@ -9593,7 +9605,7 @@ def _extract_impl_steps(plan: str) -> list[dict]:
     # STEP 1 over the corrected final one, and the trailing `## TESTS`/`## CONFIDENCE` bled
     # into the last step's body. (audit pass-3 fix: ## STEPS header mismatch.)
     header_pat = re.compile(
-        r'##\s*(?:IMPLEMENTATION\s+)?STEPS\s*\n',
+        r'##\s*(?:IMPLEMENTATION\s+)?STEPS\s*\n?',   # \n? (bughunt ckpt-238): match a `## STEPS` header at EOF too
         re.IGNORECASE,
     )
     # FENCE-AWARE scanning: a step body often QUOTES `## STEPS` / `### STEP N` / `## TESTS`
@@ -13497,12 +13509,24 @@ async def code_agent(state: AgentState) -> AgentState:
             os.path.join(_plan_cache_dir, os.path.basename(project_root.rstrip("/")) + ".plan")
             if _plan_cache_dir else ""
         )
+        _cached_plan = ""
         if _plan_cache_file and os.path.exists(_plan_cache_file):
-            plan = open(_plan_cache_file, encoding="utf-8").read()
+            try:
+                with open(_plan_cache_file, encoding="utf-8") as _pf:   # bughunt ckpt-238: was open() w/o close
+                    _cached_plan = _pf.read()
+            except Exception:
+                _cached_plan = ""
+        # bughunt ckpt-238: don't feed an EMPTY/corrupt cache to the coder — a
+        # truncated/blank .plan would skip Phase 2 and hand the coder nothing.
+        if _cached_plan and len(_cached_plan.strip()) >= 200:
+            plan = _cached_plan
             research_cache = {}
             success(f"♻ REUSING CACHED PLAN ({len(plan)} chars) — skipping Phase 2 "
                     f"[{_plan_cache_file}]")
         else:
+            if _plan_cache_file and os.path.exists(_plan_cache_file):
+                warn(f"  cached plan {_plan_cache_file} empty/too-short "
+                     f"({len(_cached_plan)} chars) — re-planning instead")
             plan, research_cache = await phase_plan(
                 task, context, complexity, project_root, "", detailed_map,
                 purpose_map=purpose_map, is_new_project=is_new_project,

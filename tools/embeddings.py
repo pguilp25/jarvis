@@ -328,6 +328,7 @@ async def build_embeddings(
     if _build_wholly_failed(chunks):
         warn("    Embedding build wholly failed (endpoint down) — NOT caching poisoned index.")
         return chunks  # caller detects all-zero and reports unavailable
+    maps_dir.mkdir(parents=True, exist_ok=True)   # bughunt ckpt-238: mirror build_code_embeddings (else FileNotFoundError on first build)
     save_embed_cache(maps_dir, file_hash, chunks)
     return chunks
 

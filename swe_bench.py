@@ -534,7 +534,8 @@ def _load_swe_bench_dataset():
 async def main_async(args) -> None:
     if args.instances_json:
         import json as _json
-        ds = _json.load(open(args.instances_json))
+        with open(args.instances_json) as _ijf:   # bughunt ckpt-238: was open() w/o close
+            ds = _json.load(_ijf)
         print(f"Loaded {len(ds)} instances from {args.instances_json} (offline)",
               file=_orig_stderr)
     else:

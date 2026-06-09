@@ -532,3 +532,28 @@ def test_prefix_ws__space_after_arrow_before_marker():
            "2:+ 4|def m(self, x):\n3 ⇥8|        return 1\n[/edit]")
     new, info, warn = apply_edit_block(src, blk)
     assert new == "class C:\n    def m(self, x):\n        return 1\n", new
+
+
+# ───── ckpt-238 bug-hunt fixes: parser lstrip/⇥ parity across SEARCH + native ─────
+
+def test_bughunt_strip_line_numbers_v9_no_double_indent():
+    # v9 LINE|INDENT|content + INDENT|content: the count is authoritative; the
+    # content's real spaces must be dropped (else 286|4|'    def' → 8 spaces).
+    from workflows.code import _strip_line_numbers
+    assert _strip_line_numbers("286|4|    def foo")[0] == "    def foo"
+    assert _strip_line_numbers("4|    def foo")[0] == "    def foo"
+    # stray ⇥ in the content is dropped (never valid source)
+    assert "⇥" not in _strip_line_numbers("286|4|⇥def foo")[0]
+
+
+def test_bughunt_strip_line_numbers_prefix_ws_leading_space():
+    # ws_prefix_format now tolerates leading whitespace (^\s*), symmetric w/ REPLACE
+    from workflows.code import _strip_line_numbers
+    assert _strip_line_numbers("   286 ⇥4|    def foo")[0] == "    def foo"
+
+
+def test_bughunt_native_expand_tolerates_space_after_marker():
+    # `+ <code>` → ` INDENT|code`; native expander must still expand (not ship verbatim)
+    from core.native_tools import _expand_indent_lines
+    assert _expand_indent_lines([" 4|return 2"]) == ["    return 2"]
+    assert _expand_indent_lines(["8|raise X"]) == ["        raise X"]
