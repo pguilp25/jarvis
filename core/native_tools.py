@@ -3146,7 +3146,11 @@ _INDENT_FORMAT_BLOCK = (
     "for ANY line ending in `:` — `if`/`elif`/`else`/`for`/`while`/`try`/`except`/`with`, "
     "not just `def`/`class`. e.g. a new `8|if cond:` → its body is `12|a = 1` then "
     "`12|b = 2` (every body line at 12, NOT 8). A body line at the SAME number as its "
-    "header is the `expected an indented block` IndentationError that rejects the whole edit.")
+    "header is the `expected an indented block` IndentationError that rejects the whole edit.\n"
+    "  • BRACKET EACH EDIT → include ~1-2 UNCHANGED lines just above and below the change: in "
+    "`old` copy them VERBATIM (full `LINENO ⇥INDENT|` prefix); in `new` re-write those SAME lines "
+    "UNCHANGED as `INDENT|code`. This makes the match UNIQUE (no 'appears N times' / 'not found' "
+    "reject) and SHOWS you the exact indent to reuse for the lines between them.")
 
 # Bullet-CoT (ckpt-185, flag JARVIS_BULLET_COT — read at CALL time so tests can toggle).
 # A SOFT reasoning-style nudge: same moves, terser wording. The goal is COST (gpt-oss is
@@ -3778,6 +3782,10 @@ _JSON_OPS_PROMPT = (
     "  • edit_file takes FLAT STRING `old`/`new` (join multiple lines with \\n) — do NOT use the "
     "`edits` LIST/array of {old,new} hunks the toolkit shows.\n"
     "  • wherever it says `finish(summary)` / \"call finish\", emit the `done` op instead.\n"
+    "  • wherever the toolkit says ALL changes to a file in ONE call / the SAME `edit_file` call / "
+    "\"or it's REJECTED\" for a multi-site refactor (remove a def AND fix its callers), read it as the "
+    "SAME ROUND: emit SEVERAL flat `edit_file` ops for that file THIS round — the harness MERGES them "
+    "into ONE diff (one accept/reject). You CANNOT pack them into one op here, and you don't need to.\n"
     "You do NOT make function/tool calls. You RESPOND WITH OPERATIONS as a sequence of FLAT "
     "JSON objects, ONE PER LINE, nothing else — no prose, no markdown fences, no array wrapper. "
     "Each line is exactly:\n"
@@ -3799,7 +3807,9 @@ _JSON_OPS_PROMPT = (
     "string — e.g. \"new\":\"4|def foo():\\n8|return 1\" (NO leading spaces after the pipe — the "
     "harness re-emits the indent from the number). `old`/`new` use the "
     "`LINENO ⇥INDENT|code` / `INDENT|code` format from the INDENTATION section. Do NOT use an "
-    "`edits` array and do NOT nest `[...]` — that is the one structure you keep mis-closing. "
+    "`edits` array and do NOT nest arrays inside `edit_file`'s args — that is the one structure you "
+    "keep mis-closing. (The `keep` op's `ranges`:[[start,end],…] DOES use a nested array — that one "
+    "is required; copy the shape shown for keep above.) "
     "(3) Do NOT read_file and edit_file the SAME file in one round — you must SEE it (this round) "
     "before you edit it (next round). (4) ONE edit_file op = ONE change. To change a file in "
     "SEVERAL places (e.g. remove a def AND fix its callers), emit SEVERAL edit_file ops for that "

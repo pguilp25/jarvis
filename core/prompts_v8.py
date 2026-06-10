@@ -893,7 +893,7 @@ it. Use [REFS: name] first.
 
 ## When to commit
 
-SCOPE-COMPLETENESS CHECK (reason this through BEFORE you open `=== PLAN ===` — do NOT wrap this long list in a bracket `[think]`; an unclosed `[think]` here swallows your whole plan): list every thing the requirements/interface NAME — each code SYMBOL (function/method/class/attribute), each CONFIG OPTION/KEY/SETTING (often declared in a config/data file, NOT a .py — e.g. a key in configdata.yml, a route in urls.py — the easiest file to forget), and each FILE named directly. For EACH, name the file it lives in (`[REFS:]` if unsure) and confirm a `### STEP` touches that file. A named symbol/option whose file has no STEP is the #1 plan miss — add the step now, before you commit.
+SCOPE-COMPLETENESS CHECK (write this as PLAIN VISIBLE TEXT just BEFORE you open `=== PLAN ===` — text before the plan fence stays OUT of the plan body, so it costs the plan nothing; do NOT wrap it in a `[think]` bracket: an unclosed `[think]` here swallows your whole plan): list every thing the requirements/interface NAME — each code SYMBOL (function/method/class/attribute), each CONFIG OPTION/KEY/SETTING (often declared in a config/data file, NOT a .py — e.g. a key in configdata.yml, a route in urls.py — the easiest file to forget), and each FILE named directly. For EACH, name the file it lives in (`[REFS:]` if unsure) and confirm a `### STEP` touches that file. A named symbol/option whose file has no STEP is the #1 plan miss — add the step now, before you commit.
 
 Open `=== PLAN ===` once you can name file:line for every unmet requirement and your VERIFICATION trace runs without gaps. If round 1 found nothing, investigate first and open the plan in round 2 — never ship hollow placeholders.
 
@@ -1230,9 +1230,10 @@ scope the user didn't ask for. First plan line:
 See SYSTEM RUNTIME / THINK INTERLEAVED above. Same operational
 rules: commit early, interleave, backtrack without apology.
 
-Open with `=== PLAN ===` on its own line, then write ALL of the above as
-VISIBLE output — NOT inside `<think>`/`[think]` (both are stripped by the
-runtime). End with these two lines, each on its own line:
+Write the `## DEEP THINK` preamble first as VISIBLE output, THEN open
+`=== PLAN ===` on its own line and write the Plan-structure sections inside it
+— none of it inside `<think>`/`[think]` (both are stripped by the runtime).
+End with these two lines, each on its own line:
     === END PLAN ===
     [PLAN DONE][CONFIRM_PLAN_DONE]
 If you emit `[PLAN DONE]` without a visible `=== PLAN ===` block above it,
@@ -1351,9 +1352,11 @@ Do all of this in ONE pass:
      Then for EACH of those, ask: does a `### STEP` touch its file? Any "no" is a
      scope hole — ADD a step (modify it, or create the symbol in the right file). A
      named symbol/option whose file has no step is the classic miss; close it HERE,
-     not in the coder. Put the (symbol/option/file → file → covered? Y/N) list in
-     [think] (it's stripped from the plan); the plan that comes out must have a step
-     for every "N".
+     not in the coder. Write the (symbol/option/file → file → covered? Y/N) list as
+     VISIBLE text in your ## DEEP THINK preamble — everything before `=== PLAN ===`
+     stays out of the plan body, so it costs the plan nothing; never put this list in
+     `[think]` (an unclosed `[think]` swallows the whole plan). The plan that comes out
+     must have a step for every "N".
   4. WRITE the final plan as a visible `=== PLAN === … === END PLAN ===` block, sections in the Output-format order below. No code bodies. At least one `### STEP`.
 
 
