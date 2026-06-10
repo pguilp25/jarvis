@@ -1307,36 +1307,22 @@ def _post_edit_syntax_gate(path: str, new_content: str, before, *,
                     f"adjacent code — {where} repeats the statement right before it "
                     f"(the file is unchanged). You likely re-emitted an anchor block "
                     f"AND your new copy. Keep ONE; {resend}.")
-        # Duplicate TOP-LEVEL def/class (ckpt-178): the adjacent check above misses two defs of
-        # the SAME name FAR APART — c580 added `def widened_hostnames` at line 77 AND line 546,
-        # the 2nd silently shadowing the 1st so half the logic was dead. Flag a module-level
-        # name this edit made appear 2+ times when it didn't before (pre-existing dups pass).
-        import ast as _ast
-        def _toplevel_dupes(src):
-            try:
-                _t = _ast.parse(src)
-            except Exception:
-                return {}
-            _seen = {}
-            for _node in _t.body:
-                if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                    # Skip decorator-driven redefinitions (@typing.overload stub chains,
-                    # functools.singledispatch `@fn.register / def _`) and the throwaway name `_`
-                    # — these LEGITIMATELY repeat a top-level name and are NOT dead-code shadows
-                    # (bughunt #7). Only undecorated, real-name redefinitions count as a dupe.
-                    if getattr(_node, "decorator_list", None) or _node.name == "_":
-                        continue
-                    _seen[_node.name] = _seen.get(_node.name, 0) + 1
-            return {k: c for k, c in _seen.items() if c > 1}
-        _new_dd = _toplevel_dupes(new_content)
-        _old_dd = _toplevel_dupes(before) if before else {}
+        # Duplicate def/class IN ONE SCOPE (ckpt-178 → ckpt-254): the adjacent check above misses
+        # two defs of the SAME name FAR APART — c580 added `def widened_hostnames` at line 77 AND
+        # line 546, the 2nd silently shadowing the 1st so half the logic was dead. ckpt-254 widened
+        # this from MODULE-only to also cover CLASS-body methods (f631 re-added `def
+        # _set_changed_attributes` a 2nd time inside `class StateConfig` after a reject → the dup
+        # shipped and shadowed). Flag a name this edit made a sibling-dup when it wasn't before.
+        from workflows.code import _dup_defs_by_scope
+        _new_dd = _dup_defs_by_scope(new_content)
+        _old_dd = _dup_defs_by_scope(before) if before else {}
         _newly = [k for k, c in _new_dd.items() if c > _old_dd.get(k, 0)]
         if _newly:
             _nm = _newly[0]
             return (f"✗ {tool} NOT applied to {path}: your edit defines `{_nm}` {_new_dd[_nm]}× "
-                    f"at the top level of {path} — a SECOND `def {_nm}`/`class {_nm}` silently "
-                    f"shadows the first, so half your logic is dead code. Keep ONE definition "
-                    f"(edit the existing one in place, don't add a new copy); {resend}.")
+                    f"as siblings in ONE scope (module or class body) of {path} — the 2nd "
+                    f"definition silently shadows the 1st, so its logic is dead code. Keep ONE "
+                    f"definition (edit the existing one IN PLACE, don't add a new copy); {resend}.")
     return None
 
 

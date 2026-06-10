@@ -372,3 +372,19 @@ def test_apply_extracted_preexisting_dup_passes():
     ext = _mk_extracted(text_edits={"m.py": [("z = 0", "z = 99")]})
     result, m, t, skips = _apply_extracted_code(ext, fc, None)
     assert "m.py" in result and "z = 99" in result["m.py"]   # legit edit applies
+
+
+def test_apply_extracted_rejects_dup_method_inside_class():
+    # ckpt-254: f631 shipped `def _set_changed_attributes` TWICE inside one class
+    # (the module-only dup gate missed it). The scope-aware gate must reject a NEW
+    # duplicate METHOD inside a class body, file left unchanged.
+    from workflows.code import _apply_extracted_code
+    orig = ("class StateConfig:\n    def _set_changed_attributes(self):\n        return 1\n\n    def other(self):\n        return 2\n")
+    fc = {"m.py": orig}
+    ext = {"edits": {}, "text_edits": {"m.py": [(
+        "    def other(self):\n        return 2",
+        "    def other(self):\n        return 2\n\n    def _set_changed_attributes(self):\n        return 3")]},
+        "new_files": {}, "reverts": [], "block_edits": {}, "undo_edits": [], "malformed_edits": []}
+    result, m, t, skips = _apply_extracted_code(ext, fc, None)
+    assert "m.py" not in result and fc["m.py"] == orig
+    assert any("_set_changed_attributes" in s and "shadows" in s for s in skips)

@@ -6463,6 +6463,43 @@ def _duplicate_adjacent_stmts(src: str) -> dict:
     return bad
 
 
+def _dup_defs_by_scope(src: str) -> dict:
+    """Names defined 2+ times AS DIRECT SIBLINGS in the SAME scope — the module
+    body OR any class body. A re-added top-level def/class OR a re-added METHOD
+    inside a class silently shadows the first (the 2nd wins), so half the intended
+    logic becomes dead code. (ckpt-254: the module-only check missed f631, whose
+    coder re-added `def _set_changed_attributes` a 2nd time inside `class
+    StateConfig` after a reject — the dup shipped and the method shadowed.)
+    Returns {qualified_name: count} (class-qualified for methods, bare for
+    module-level). Decorated defs and the throwaway `_` are skipped — @property /
+    @x.setter, @typing.overload, @singledispatch LEGITIMATELY repeat a name.
+    DIRECT siblings only: a def under `if TYPE_CHECKING:` lives in an If node, not
+    the class/module body, so it never false-positives. Empty on unparseable input."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except (SyntaxError, ValueError):
+        return {}
+    bad: dict = {}
+
+    def _scan(body, scope):
+        seen: dict = {}
+        for n in body:
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                if getattr(n, "decorator_list", None) or n.name == "_":
+                    continue
+                seen[n.name] = seen.get(n.name, 0) + 1
+        for k, c in seen.items():
+            if c > 1:
+                bad[f"{scope}.{k}" if scope else k] = c
+
+    _scan(tree.body, "")
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ClassDef):
+            _scan(node.body, node.name)
+    return bad
+
+
 async def _call(model: str, prompt: str, max_tokens: int = 16384, log_label: str = "") -> dict:
     result = await call_with_retry(model, prompt, max_tokens=max_tokens, log_label=log_label)
     return {"model": model, "answer": result}
@@ -10712,23 +10749,8 @@ def _apply_extracted_code(
         if dup_block_gate and fp in result and original is not None:
             _new_adj = _duplicate_adjacent_stmts(new_content)
             _old_adj = _duplicate_adjacent_stmts(original)
-            def _toplevel_dupes(_src):
-                try:
-                    _t = _ast.parse(_src)
-                except Exception:
-                    return {}
-                _seen = {}
-                for _node in _t.body:
-                    if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                        # Skip decorator-driven / `_` redefinitions (overload chains,
-                        # singledispatch) — they legitimately repeat a name (mirrors the
-                        # native gate's _toplevel_dupes).
-                        if getattr(_node, "decorator_list", None) or _node.name == "_":
-                            continue
-                        _seen[_node.name] = _seen.get(_node.name, 0) + 1
-                return {k: c for k, c in _seen.items() if c > 1}
-            _new_tl = _toplevel_dupes(new_content)
-            _old_tl = _toplevel_dupes(original)
+            _new_tl = _dup_defs_by_scope(new_content)   # ckpt-254: module AND class-body scopes
+            _old_tl = _dup_defs_by_scope(original)
             _newly_tl = [k for k, c in _new_tl.items() if c > _old_tl.get(k, 0)]
             if len(_new_adj) > len(_old_adj) or _newly_tl:
                 del result[fp]
@@ -10737,9 +10759,10 @@ def _apply_extracted_code(
                 _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
                 if _newly_tl:
                     _nm = _newly_tl[0]
-                    _why = (f"defines `{_nm}` {_new_tl[_nm]}× at the top level — a SECOND "
-                            f"`def {_nm}`/`class {_nm}` silently shadows the first, so half "
-                            f"the logic is dead code")
+                    _why = (f"defines `{_nm}` {_new_tl[_nm]}× as siblings in ONE scope (module "
+                            f"or class body) — the 2nd definition silently shadows the 1st, so "
+                            f"its logic is dead code. Edit the existing one IN PLACE; don't add "
+                            f"a second copy")
                 else:
                     _w = "; ".join(f"line {ln}: `{txt}`"
                                    for ln, txt in sorted(_new_adj.items())[:3])
