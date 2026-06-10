@@ -3878,6 +3878,8 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
     _verify_nudged = False
     _no_edit_nudged = False
     _total_rejects = 0       # EDIT-op rejects only (the real stuck signal)
+    _reads_no_edit = 0       # A1 (ckpt-251): read/lookup ops since the last edit while NO edit has landed
+    _read_spin_nudged = False  # bounds the pre-edit read-storm on the PRIMARY json-ops coder (parity w/ native)
     for rnd in range(1, max_rounds + 1):
         # A2 wall-clock backstop (ckpt-217): stop cleanly with whatever landed rather than getting
         # hard-killed mid-stream by the instance timeout (parity with the native loop).
@@ -3988,6 +3990,15 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
             if (isinstance(r, str) and r.startswith("✗")
                     and tname in ("edit_file", "replace_lines", "create_file")):
                 _total_rejects += 1
+            # A1 (ckpt-251): bound the pre-edit read-storm on the PRIMARY json-ops coder,
+            # mirroring the native loop (lines ~3630). A landed edit RESETS the counter;
+            # any read/lookup op while NO edit has landed yet ticks it up.
+            if (tname in ("edit_file", "replace_lines", "create_file")
+                    and isinstance(r, str) and r.startswith("✓")):
+                _reads_no_edit = 0
+            elif tname in ("read_file", "search_text", "find_refs", "find_callers",
+                           "file_purpose", "semantic_search", "depends_on", "list_dir"):
+                _reads_no_edit += 1
             _lbl = targs.get("path") or targs.get("symbol") or targs.get("pattern") or targs.get("query") or ""
             results.append(f"── op[{k}] {tname}({str(_lbl)[:70]}) ──\n{r}")
             _trace_io.append({"tool": tname, "args": targs,
@@ -4032,6 +4043,25 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
         round_trace({"phase": "json-coder", "step": ctx.get("step_num"), "round": rnd,
                      "model": short, "reasoning": (content or "")[:5000],
                      "want_done": bool(want_done), "io": _trace_io})
+        # A1 read-spin backstop (ckpt-251): parity with the native loop (lines ~3714). Only while
+        # NO edit has landed — a productive multi-edit step is never touched. Soft nudge at 12
+        # reads-with-no-edit, hard stop at 20 (stuck exploring the PRIMARY json-ops path).
+        if not ctx.get("files_changed"):
+            if _reads_no_edit >= 20:
+                reason = "read-budget"
+                warn(f"  [json:{short}] {_reads_no_edit} reads/lookups with ZERO edits — "
+                     f"stuck exploring; stopping for fallover.")
+                break
+            if _reads_no_edit >= 12 and not _read_spin_nudged:
+                _read_spin_nudged = True
+                messages.append({"role": "user", "content":
+                    f"⚠ You've made {_reads_no_edit} reads/lookups but NOT ONE edit yet. You have "
+                    f"enough to act — STOP exploring and emit an edit_file op from the view you hold "
+                    f"(copy `old` verbatim with its `LINENO ⇥INDENT|`). If a region you need is in a "
+                    f"`⋯ not read ⋯` gap, read ONLY that one range, then edit. Don't re-read what "
+                    f"you already have."})
+                status(f"  [json:{short}] round {rnd}: {_reads_no_edit} reads, 0 edits — nudging to edit")
+                continue
         if _total_rejects >= 12:
             warn(f"  [json:{short}] {_total_rejects} rejected ops — stuck; stopping for fallover")
             reason = "stuck-repeating"
