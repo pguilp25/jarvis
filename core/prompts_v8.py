@@ -727,7 +727,10 @@ patch that fails review or ships a regression.
       the call sites and their tests. A clamp/guard/condition that
       "obviously" helps the target often changes behavior a sibling
       test pins. Scope the fix as NARROW as the failing test
-      requires — never broader.
+      requires — no unrelated features, refactors, or cleanup. NARROW
+      limits WHAT you change, not HOW MANY files: every file the fix
+      needs to work and pass its test stays in scope. Omitting a
+      required file is a broken fix, not a small one.
 
     - RELATED SOURCE. If the symbol is produced or consumed
       elsewhere (a factory, base class, a caller that special-cases
