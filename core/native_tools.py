@@ -280,14 +280,17 @@ CODER_TOOLS = [
             "line(s) VERBATIM, keeping the whole `LINENO ⇥INDENT|` prefix (e.g. `286 ⇥4|    def "
             "setvalue`); the harness anchors on BOTH the line number AND the content (a stale "
             "number self-corrects). Bracket each hunk with ~1-2 UNCHANGED lines above and below — "
-            "in `old` copy them VERBATIM (the full `LINENO ⇥INDENT|` prefix); in `new` re-write "
-            "those SAME unchanged lines as `INDENT|code` (drop the line number, like every `new` "
-            "line — a `new` line that keeps the `LINENO ⇥` prefix is REJECTED). Bracketing makes "
+            "in `old` copy them VERBATIM (the full `LINENO ⇥INDENT|` prefix); in `new` the EASIEST "
+            "way is to COPY those SAME lines verbatim too (keep the `LINENO ⇥INDENT|` prefix) and "
+            "edit only the code after `|` — the harness STRIPS the `LINENO ⇥INDENT|` gutter and "
+            "re-applies the indent, so copy-paste just works. (You may instead write `INDENT|code`; "
+            "both forms are accepted.) Bracketing makes "
             "the match UNIQUE (no 'appears N times' / 'not found' rejects) and the real surrounding "
             "lines SHOW you the exact indent to reuse (read the `⇥INDENT` of the line your code belongs under). "
             "Nearby hunks may share those context lines — that's fine, they're merged; the only "
             "thing to avoid is two hunks CHANGING the same line. "
-            "`new` = the replacement as `INDENT|code` — the indent NUMBER (the `⇥` value), a "
+            "`new` = the replacement. For a CHANGED line, COPY its view line verbatim and edit the "
+            "code; for a brand-NEW line, write `INDENT|code` — the indent NUMBER (the `⇥` value), a "
             "pipe, then code with NO leading spaces (e.g. `4|def f():`, `8|return x`; the harness "
             "re-emits the spaces FROM THE NUMBER, so put indent in the NUMBER, never as spaces in "
             "the code — `0|    x` is WRONG, it means indent 0). To INSERT, add your new lines "
@@ -307,7 +310,7 @@ CODER_TOOLS = [
             "old": {"type": "array", "items": {"type": "string"},
                     "description": "single-edit shorthand: the EXACT existing lines, copied VERBATIM from your read (keep the `LINENO ⇥INDENT|` prefix). Include ~2 UNCHANGED lines above and below the change so the match is unique and the surrounding indent is visible. Use `edits` to batch several changes."},
             "new": {"type": "array", "items": {"type": "string"},
-                    "description": "single-edit shorthand: the replacement as `INDENT|code` (indent in the NUMBER, code with no leading spaces; no line number) — re-include the same ~2 bracketing context lines unchanged. To DELETE a line, keep the context lines in `new` and just OMIT the removed line; `new=[]` deletes EVERY line in `old` (context included) — use it ONLY when `old` has no context lines"},
+                    "description": "single-edit shorthand: the replacement. EASIEST — COPY the view line(s) verbatim (keep the `LINENO ⇥INDENT|` prefix) and edit the code after `|`; or write `INDENT|code` (indent in the NUMBER, code with no leading spaces). BOTH accepted — the harness strips any `LINENO ⇥INDENT|` gutter and re-applies the indent. Re-include the same ~2 bracketing context lines unchanged. To DELETE a line, keep the context lines in `new` and just OMIT the removed line; `new=[]` deletes EVERY line in `old` (context included) — use it ONLY when `old` has no context lines"},
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
@@ -1556,8 +1559,9 @@ def _old_not_found_msg(i: int, path: str, ctx: dict, old_raw=None,
                 f"(it starts with `LINENO:+ ` / `LINENO:- `). A diff row is not editable "
                 f"input. For `old`, copy the line from the read VIEW of {path} VERBATIM — it "
                 f"shows `LINENO ⇥INDENT|code` (e.g. `286 ⇥4|    def foo`); keep that whole "
-                f"prefix. Write `new` lines as `INDENT|code` (the indent NUMBER, a pipe, then "
-                f"the code — e.g. `8|return x`); the harness applies the indent from the number.")
+                f"prefix. For `new`, COPY that same view line and edit the code after `|` (keep "
+                f"the prefix — the harness strips it), or write `INDENT|code` (e.g. `8|return x`); "
+                f"both work, the harness applies the indent from the number.")
     if path in ctx.get("files_changed", set()):
         _when = ctx.get("view_at", {}).get(path, "your last edit")
         return (f"✗ edit_file hunk #{i}: those `old` line(s) aren't in {path} as it is NOW. "
@@ -1596,6 +1600,12 @@ _INDENT_LINE_RE = re.compile(r'^(\d+)\|(.*)$')          # INDENT|code           
 # (the ⇥ tab-glyph marks the indent); we still accept the old `LINENO:INDENT|`
 # colon form so a stale paste never silently fails to match.
 _VIEW_LINE_RE   = re.compile(r'^\d+\s*[:⇥](\d+)\|(.*)$')  # LINENO ⇥INDENT|code  (copied view line)
+# HALF-STRIPPED view gutter (ckpt-255): `LINENO |code` — the model copied the view line but
+# DROPPED the `⇥INDENT` part, keeping the line number (e.g. `12 |from x` instead of `0|from x`
+# or `12 ⇥0|from x`). Matches NEITHER form above, so it lands literally → `12 |from x` →
+# SyntaxError (this caused the b748edea json→native failover). Recovered ONLY in the parse-fail
+# retry (trust_spaces): never touches a passing edit, so a legit `42 | x` that parses is safe.
+_MANGLED_GUTTER_RE = re.compile(r'^(\d+)[ \t]+\|(.*)$')
 # ckpt-144: a copied view line carries its LINENO up front. We pull it out to ANCHOR
 # the edit by BOTH line number AND content — the number locates (and disambiguates
 # when the `old` text repeats), the content-verified applier still self-corrects if
@@ -1623,7 +1633,7 @@ _APPEARS_TAIL_RE = re.compile(r'\s*\|appears \d+ \(#[0-9a-fA-F][^)]*\)\s*$')
 _LOOKS_COPIED_GUTTER_RE = re.compile(r'^\s*\d+:[+\-] ')
 
 
-def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
+def _expand_indent_lines(lines: list, trust_spaces: bool = False, recover_mangled: bool = False) -> list:
     """Resolve every old/new/content line to its real source form. The model declares indent
     by NUMBER (`INDENT|code`) — or copies a view line verbatim (`LINENO:INDENT|code`) — and the
     harness applies the spaces, so the coder never types (and never drops) leading spaces (the
@@ -1689,7 +1699,15 @@ def _expand_indent_lines(lines: list, trust_spaces: bool = False) -> list:
                     ind = typed
             out.append(' ' * ind + code.lstrip(' '))
         else:
-            out.append(ln.replace("⇥", ""))      # literal — drop a leaked marker, else verbatim
+            mg = _MANGLED_GUTTER_RE.match(ln.lstrip(' ')) if recover_mangled else None
+            if mg:
+                # PARSE-FAIL RECOVERY (ckpt-255): half-stripped view gutter `LINENO |code` —
+                # strip the leading line number and keep the code with its OWN typed leading
+                # spaces as the indent (0 for a top-level import, the b748edea case). Only runs
+                # in the trust_spaces retry, so a passing edit is never altered.
+                out.append(mg.group(2).replace("⇥", ""))
+            else:
+                out.append(ln.replace("⇥", ""))  # literal — drop a leaked marker, else verbatim
     return out
 
 
@@ -1908,10 +1926,10 @@ def _do_edit(args: dict, ctx: dict) -> str:
     before = ctx["file_contents"].get(path)
     _before_all = dict(ctx["file_contents"])
 
-    def _build_and_apply(trust_spaces: bool):
+    def _build_and_apply(trust_spaces: bool, recover_mangled: bool = False):
         edit_lines = []
         for sl, old_list, new_raw in resolved:
-            new_list = _expand_indent_lines(new_raw, trust_spaces=trust_spaces)
+            new_list = _expand_indent_lines(new_raw, trust_spaces=trust_spaces, recover_mangled=recover_mangled)
             for j, o in enumerate(old_list):
                 edit_lines.append(f"{sl + j}:-{o}")
             for nw in new_list:
@@ -1965,10 +1983,26 @@ def _do_edit(args: dict, ctx: dict) -> str:
                     if typed > 0 and typed != int(m.group(1)):
                         return True
         return False
+    def _has_mangled_gutter():
+        # ckpt-255: a `new` line shaped `LINENO |code` (half-stripped view gutter, ⇥INDENT dropped).
+        for _sl, _ol, new_raw in resolved:
+            for ln in new_raw:
+                if _MANGLED_GUTTER_RE.match(str(ln).lstrip(' ')):
+                    return True
+        return False
+    # STAGE 2 (ckpt-155): trust the TYPED spaces — fixes the `0|    x` dual-channel slip.
     if not _result_is_good(result) and _has_indent_disagreement():
         _r2, _s2 = _build_and_apply(True)
         if _result_is_good(_r2):             # retry now parses (tokenize+compile)
             result, skips, _indent_autofixed = _r2, _s2, True
+    # STAGE 3 (ckpt-255): ALSO strip a half-stripped `LINENO |code` gutter — but ONLY if stage 2
+    # still didn't produce a good result. Staged so a legit raw `1 | 4,` continuation line in a
+    # SIBLING hunk is never mangled when stage 2 already recovered the batch (review: the per-batch
+    # corruption guard — stripping in stage 2 turned a valid `1 | 4,` into ` 4,` and shipped it).
+    if not _result_is_good(result) and _has_mangled_gutter():
+        _r3, _s3 = _build_and_apply(True, recover_mangled=True)
+        if _result_is_good(_r3):
+            result, skips, _indent_autofixed = _r3, _s3, True
 
     # Reconcile ctx["file_contents"] with the CHOSEN `result`. A failed retry leaves the
     # dict holding the retry's content while `result` may be the first attempt — and an
@@ -2066,7 +2100,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
                 f"NOT in the diff is UNCHANGED. TRUST that — your view is NOT stale (your `old` was "
                 f"anchored on its line number AND content, so a shifted view self-corrects). For "
                 f"your next change here, COPY the relevant line from your VIEW VERBATIM as `old` "
-                f"(keep its `LINENO ⇥INDENT|` so it anchors); write `new` as `INDENT|code`. The diff "
+                f"(keep its `LINENO ⇥INDENT|` so it anchors); for `new`, copy that same line and "
+                f"edit the code (keep the prefix — the harness strips it) or write `INDENT|code`. The diff "
                 f"below is in `LINENO:+/- ` format — read it to SEE what changed, but do NOT copy an "
                 f"`old` from it (that's not the editable form). You do NOT need to read_file again — your "
                 f"start-state + this diff IS {path}'s current state (read a range only for a region "
@@ -3121,12 +3156,17 @@ _INDENT_FORMAT_BLOCK = (
     "number (so a repeated line lands on the RIGHT one) AND the content (so a stale "
     "number self-corrects), and re-applies the indent from the number. You do NOT strip "
     "anything — just copy what you see.\n"
-    "FOR `new` (new code, no line number yet): write each line as `INDENT|code` — the "
-    "indent NUMBER (the one after the `⇥` in the view), a pipe, then the code WITHOUT "
-    "leading spaces. The harness re-emits INDENT spaces for you, so you NEVER type or "
-    "count leading spaces and can never drop them.\n"
-    "  • CHANGED line → its `new` reuses the SAME `INDENT` the view shows for the line "
-    "it replaces (`286 ⇥4|...` → your new line is `4|...`).\n"
+    "FOR `new`, there are TWO cases — and the easy one is COPY-PASTE:\n"
+    "  • CHANGED line (you're editing a line that EXISTS in the view) → COPY that view line "
+    "into `new` VERBATIM — keep its whole `LINENO ⇥INDENT|` prefix, exactly like `old` — and "
+    "edit ONLY the code AFTER the `|`. The harness strips the `LINENO ⇥INDENT|` and re-applies "
+    "that indent for you. So you do NOT reformat `286 ⇥4|    def setvalue` into `4|...`; you "
+    "COPY `286 ⇥4|    def setvalue` and change the code part. Copy-paste, never re-type the "
+    "gutter — dropping or swapping the two numbers (writing `286 |…` instead of `4|…`) is the "
+    "#1 edit error and it breaks the file.\n"
+    "  • BRAND-NEW line (you're INSERTING a line that has no view line to copy) → write it as "
+    "`INDENT|code` — the indent NUMBER (from the `⇥` of a nearby view line), a pipe, then the "
+    "code WITHOUT leading spaces. The harness re-emits the spaces, so you never type or drop them.\n"
     "  • NEW nested line → use a SIBLING's `INDENT`: a method `def` takes its class's "
     "method indent (look at another `def` in that class, e.g. `4|`); a body line is "
     "its header's INDENT + 4. NEVER write `0|` for something that lives inside a "
@@ -3136,10 +3176,13 @@ _INDENT_FORMAT_BLOCK = (
     "not just `def`/`class`. e.g. a new `8|if cond:` → its body is `12|a = 1` then "
     "`12|b = 2` (every body line at 12, NOT 8). A body line at the SAME number as its "
     "header is the `expected an indented block` IndentationError that rejects the whole edit.\n"
+    "  • RE-INDENTED line (the indent itself CHANGES — you're wrapping a line in `if`/`try`, or "
+    "dedenting it out of a block) → do NOT copy it verbatim (that keeps the OLD indent); write it "
+    "as `INDENT|code` with the NEW indent number. Copy-paste is for when the indent stays the same.\n"
     "  • BRACKET EACH EDIT → include ~1-2 UNCHANGED lines just above and below the change: in "
-    "`old` copy them VERBATIM (full `LINENO ⇥INDENT|` prefix); in `new` re-write those SAME lines "
-    "UNCHANGED as `INDENT|code`. This makes the match UNIQUE (no 'appears N times' / 'not found' "
-    "reject) and SHOWS you the exact indent to reuse for the lines between them.")
+    "`old` copy them VERBATIM (full `LINENO ⇥INDENT|` prefix); in `new` copy those SAME lines "
+    "VERBATIM again (keep the prefix), unchanged. This makes the match UNIQUE (no 'appears N times' "
+    "/ 'not found' reject) and SHOWS you the exact indent to reuse for the lines between them.")
 
 # Bullet-CoT (ckpt-185, flag JARVIS_BULLET_COT — read at CALL time so tests can toggle).
 # A SOFT reasoning-style nudge: same moves, terser wording. The goal is COST (gpt-oss is

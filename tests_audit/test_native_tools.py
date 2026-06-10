@@ -2078,3 +2078,45 @@ def test_growing_view_marks_requested_range_and_collapses_header():
     # but if the focus IS the header, it is rendered (not collapsed)
     v2 = _accumulated_view(ctx, "big.py", big, focus=(1, 60))
     assert "line30 = 30" in v2 and "◀ REQUESTED" in v2
+
+
+def test_mangled_gutter_new_line_recovers():
+    # ckpt-255: model wrote `new` as the half-stripped `LINENO |code` (kept lineno, dropped ⇥INDENT).
+    # That literal `3 |` would land in the code -> SyntaxError (the b748edea json->native failover).
+    # The parse-fail stage-3 retry must STRIP it and apply the edit.
+    root = tempfile.mkdtemp(prefix="mangle_")
+    rel = "m.py"
+    open(os.path.join(root, rel), "w").write("import os\n\nfrom a import B\n\nx = 1\n")
+    sb = Sandbox(root); sb.setup(); sb.load_file(rel)
+    ctx = {"file_contents": {rel: "import os\n\nfrom a import B\n\nx = 1\n"}, "sandbox": sb,
+           "project_root": root, "viewed_versions": {}, "purpose_map": "", "detailed_map": "", "files_changed": set()}
+    try:
+        out = _disp("edit_file", {"path": rel, "edits": [
+            {"old": ["3 ⇥0|from a import B"], "new": ["3 |from a import B, C"]}]}, ctx)
+        assert out.startswith("✓"), out
+        disk = sb.load_file(rel)
+        assert "from a import B, C" in disk and "3 |" not in disk
+    finally:
+        _cleanup(root)
+
+
+def test_mangle_recovery_does_not_corrupt_legit_pipe_line_in_batch():
+    # ckpt-255 review guard: a LEGIT raw `1 | 4,` continuation line (a bitwise-or in a tuple) in one
+    # hunk must NOT be mangled to ` 4,` just because a SIBLING hunk's dual-channel slip triggers the
+    # parse-fail retry. Staging (stage 2 = trust-spaces only; stage 3 = +mangle) keeps it intact.
+    src = "X = (\n    1 | 4,\n)\ndef f():\n    return 1\n"
+    root = tempfile.mkdtemp(prefix="nocorrupt_")
+    rel = "m.py"
+    open(os.path.join(root, rel), "w").write(src)
+    sb = Sandbox(root); sb.setup(); sb.load_file(rel)
+    ctx = {"file_contents": {rel: src}, "sandbox": sb, "project_root": root,
+           "viewed_versions": {}, "purpose_map": "", "detailed_map": "", "files_changed": set()}
+    try:
+        out = _disp("edit_file", {"path": rel, "edits": [
+            {"old": ["1 ⇥0|X = (", "2 ⇥4|    1 | 4,", "3 ⇥0|)"], "new": ["X = (", "    1 | 4,", ")"]},
+            {"old": ["5 ⇥4|    return 1"], "new": ["0|    return 2"]}]}, ctx)
+        disk = sb.load_file(rel)
+        assert "    1 | 4," in disk, f"legit pipe line corrupted: {disk!r}"
+        assert "return 2" in disk
+    finally:
+        _cleanup(root)
