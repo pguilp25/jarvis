@@ -2120,3 +2120,20 @@ def test_mangle_recovery_does_not_corrupt_legit_pipe_line_in_batch():
         assert "return 2" in disk
     finally:
         _cleanup(root)
+
+
+def test_native_salvage_recovers_leaked_flat_edit_op():
+    # ckpt-256: gpt-oss on a degraded provider leaks its tool call as TEXT. The narrow
+    # _salvage_inline_tool_call MISSES a flat json-ops object with nested arrays
+    # ({"tool":"edit_file","args":{"edits":[{old,new}]}}); _parse_json_ops recovers it.
+    # The native loop now falls back to _parse_json_ops so the (paid) gpt-oss op isn't
+    # thrown away → no needless cascade to free 429 models (the 8a5a63af tail).
+    from core.native_tools import _salvage_inline_tool_call, _parse_json_ops, _SALVAGE_TOOL_NAMES
+    leaked = ('reasoning... need to output as tool call.'
+              '{"tool":"edit_file","args":{"path":"m.py",'
+              '"edits":[{"old":["8 ⇥0|from x import a"],"new":["8|from x import a, b"]}]}}')
+    assert _salvage_inline_tool_call(leaked, 0) is None      # the narrow salvage misses it
+    ops, _d, _s = _parse_json_ops(leaked)
+    ops = [o for o in ops if o.get("tool") in _SALVAGE_TOOL_NAMES]
+    assert ops and ops[0]["tool"] == "edit_file"             # the strong parser recovers it
+    assert "edits" in (ops[0].get("args") or {})

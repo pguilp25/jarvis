@@ -3501,7 +3501,34 @@ async def call_with_native_tools(model_id: str, system: str, user_content: str,
         # it ourselves — "do the native ourselves" — so we recover the step on the cheap
         # provider with no extra API call, instead of retrying or dying. Cap to avoid loops.
         if not tcs and _salvage_count < 4:
-            _sal = _salvage_inline_tool_call((_reason or "") + "\n" + (_vis or ""), _salvage_count)
+            _stext = (_reason or "") + "\n" + (_vis or "")
+            _sal = _salvage_inline_tool_call(_stext, _salvage_count)
+            if not _sal:
+                # STRONGER salvage (ckpt-256): _salvage_inline_tool_call handles {name,arguments}
+                # and bare-args leaks, but MISSES a leaked FLAT json-ops object
+                # {"tool":..,"args":{..nested arrays..}} — e.g. edit_file's edits=[{old,new}].
+                # The json-ops balanced-brace scanner DOES recover those. Real tail-degradation
+                # cause (8a5a63af step3 r11): the native fallover threw away a clean, parseable
+                # `edit_file` op that `_parse_json_ops` recovers → empty turn → cascade to free
+                # 429 models. Reuse the strong parser; take the FIRST real CODER-tool op.
+                try:
+                    _ops, _d, _ = _parse_json_ops(_stext)
+                    # isinstance guard (Fable review): a garbage op with an unhashable `tool`
+                    # (e.g. a list) would raise inside `in` and the except would lose a VALID
+                    # sibling op. Prefer the first NON-finish op: gpt-oss often NARRATES a future
+                    # `{"tool":"finish"}` before the real edit it leaked — taking finish first
+                    # ends the step early and throws the edit away (review-demonstrated).
+                    _ops = [o for o in _ops
+                            if isinstance(o.get("tool"), str) and o["tool"] in _SALVAGE_TOOL_NAMES]
+                    _nf = [o for o in _ops if o["tool"] != "finish"]
+                    _ops = _nf or _ops
+                    if _ops:
+                        _o0 = _ops[0]
+                        _sal = {"id": f"salvage_{_salvage_count}", "type": "function",
+                                "function": {"name": _o0["tool"],
+                                             "arguments": json.dumps(_o0.get("args") or {})}}
+                except Exception:
+                    _sal = None
             if _sal:
                 _salvage_count += 1
                 tcs = [_sal]
