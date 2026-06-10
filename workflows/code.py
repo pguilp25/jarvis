@@ -10066,6 +10066,7 @@ def _indent_feedback(old_src: str, new_src: str, fp: str) -> list[str]:
 def _apply_extracted_code(
     extracted: dict, file_contents: dict[str, str], sandbox: Sandbox,
     viewed_versions: "dict[str, str] | None" = None,
+    dup_block_gate: bool = True,
 ) -> tuple[dict[str, str], int, int, list[str]]:
     """Apply extracted edits and new files.
 
@@ -10693,6 +10694,62 @@ def _apply_extracted_code(
                     f"the replacement the step routes through; or (b) you still need it → "
                     f"restore its def / add the import. Send ALL the hunks in this one call."
                 )
+
+        # Check 2.5 — DUPLICATE block (ckpt-252). A parseable result that REPEATS a
+        # statement, or a top-level def/class the original had only once. This is the
+        # text-protocol coder's cross-round duplicate-insert footgun: a weak fallover
+        # re-emits the SAME insert each [STOP], and because the anchor line shifts as the
+        # file grows, the (start,end,code) dedup key changes every round → the block is
+        # applied 2,3,…6× and the result still PARSES (legal redefinition), so neither the
+        # parse nor undefined-name gate caught it. It shipped a 6×-bloated, broken
+        # play_iterator.py for ansible-395e5e20 (regressed a baseline PASS). The native
+        # path catches this via _post_edit_syntax_gate; mirror it HERE in the SHARED
+        # applier so the text + json-ops paths are covered too. Only NEW dups (count rose
+        # vs the original) are flagged — pre-existing repeats pass untouched.
+        # `dup_block_gate` is OFF for the native callers (_do_edit/_do_create/_do_replace):
+        # they run _post_edit_syntax_gate themselves (same checks, with the indent-retry
+        # interplay), so re-running it here would mask their more-precise message.
+        if dup_block_gate and fp in result and original is not None:
+            _new_adj = _duplicate_adjacent_stmts(new_content)
+            _old_adj = _duplicate_adjacent_stmts(original)
+            def _toplevel_dupes(_src):
+                try:
+                    _t = _ast.parse(_src)
+                except Exception:
+                    return {}
+                _seen = {}
+                for _node in _t.body:
+                    if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                        # Skip decorator-driven / `_` redefinitions (overload chains,
+                        # singledispatch) — they legitimately repeat a name (mirrors the
+                        # native gate's _toplevel_dupes).
+                        if getattr(_node, "decorator_list", None) or _node.name == "_":
+                            continue
+                        _seen[_node.name] = _seen.get(_node.name, 0) + 1
+                return {k: c for k, c in _seen.items() if c > 1}
+            _new_tl = _toplevel_dupes(new_content)
+            _old_tl = _toplevel_dupes(original)
+            _newly_tl = [k for k, c in _new_tl.items() if c > _old_tl.get(k, 0)]
+            if len(_new_adj) > len(_old_adj) or _newly_tl:
+                del result[fp]
+                _revert_fp_apply(fp)
+                total_matched = max(0, total_matched - 1)
+                _en = ", ".join(f"edit:{l}" for l in _labels_by_fp.get(fp, [])) or "edit"
+                if _newly_tl:
+                    _nm = _newly_tl[0]
+                    _why = (f"defines `{_nm}` {_new_tl[_nm]}× at the top level — a SECOND "
+                            f"`def {_nm}`/`class {_nm}` silently shadows the first, so half "
+                            f"the logic is dead code")
+                else:
+                    _w = "; ".join(f"line {ln}: `{txt}`"
+                                   for ln, txt in sorted(_new_adj.items())[:3])
+                    _why = (f"creates DUPLICATE adjacent code — {_w} repeats the statement "
+                            f"right before it (you likely re-emitted an anchor block AND your "
+                            f"new copy)")
+                all_ambiguous_skips.append(
+                    f"- ✗ {_en} REJECTED — {fp}: your edit {_why}. File left UNCHANGED, so "
+                    f"your view is STILL CURRENT — keep ONE copy and re-issue.")
+                continue
 
         # Check 3 — INDENT verification (advisory; the parse gate already
         # rejects indent slips that break compilation). Catches edits that

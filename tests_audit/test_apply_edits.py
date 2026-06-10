@@ -315,3 +315,60 @@ def test_sandbox_rejects_path_escape():
         with _pt.raises(ValueError):
             sb.write_file(bad, "leaked")
     sb.write_file("sub/ok.py", "fine")   # legit inside path still works
+
+
+# ── ckpt-252: shared-applier duplicate-block gate (text/json-ops paths) ────────
+def _mk_extracted(**kw):
+    d = {"edits": {}, "text_edits": {}, "new_files": {}, "reverts": [],
+         "block_edits": {}, "undo_edits": [], "malformed_edits": []}
+    d.update(kw)
+    return d
+
+
+def test_apply_extracted_rejects_new_toplevel_dup_class():
+    # The text-protocol coder's cross-round duplicate-insert footgun: re-inserting an
+    # existing top-level class/def. The result PARSES (legal redefinition) so the parse
+    # gate misses it; the SHARED applier's dup gate (default ON) must reject + leave the
+    # file UNCHANGED. (Root cause of the 6×-bloated ansible-395e5e20 play_iterator.py.)
+    from workflows.code import _apply_extracted_code
+    orig = "import os\n\nclass Foo:\n    x = 1\n\ny = 2\n"
+    fc = {"m.py": orig}
+    ext = _mk_extracted(text_edits={"m.py": [("y = 2", "class Foo:\n    x = 1\n\ny = 2")]})
+    result, m, t, skips = _apply_extracted_code(ext, fc, None)
+    assert "m.py" not in result                       # not applied
+    assert fc["m.py"] == orig                          # file UNCHANGED
+    assert any("shadows" in s and "Foo" in s for s in skips)
+
+
+def test_apply_extracted_rejects_new_adjacent_dup():
+    from workflows.code import _apply_extracted_code
+    orig = "def f():\n    val = compute_with_a_sufficiently_long_name(1, 2, 3)\n    return val\n"
+    fc = {"p.py": orig}
+    ext = _mk_extracted(text_edits={"p.py": [(
+        "    return val",
+        "    val = compute_with_a_sufficiently_long_name(1, 2, 3)\n    return val")]})
+    result, m, t, skips = _apply_extracted_code(ext, fc, None)
+    assert "p.py" not in result and fc["p.py"] == orig
+    assert any("DUPLICATE adjacent" in s for s in skips)
+
+
+def test_apply_extracted_dup_gate_off_lets_native_path_handle():
+    # The native callers opt out (dup_block_gate=False) — they run their own
+    # _post_edit_syntax_gate. With the gate OFF the applier applies the dup (the native
+    # gate downstream rejects it), so the applier must NOT pre-empt that path.
+    from workflows.code import _apply_extracted_code
+    orig = "import os\n\nclass Foo:\n    x = 1\n\ny = 2\n"
+    fc = {"m.py": orig}
+    ext = _mk_extracted(text_edits={"m.py": [("y = 2", "class Foo:\n    x = 1\n\ny = 2")]})
+    result, m, t, skips = _apply_extracted_code(ext, fc, None, dup_block_gate=False)
+    assert "m.py" in result                            # applied (native gate handles it)
+
+
+def test_apply_extracted_preexisting_dup_passes():
+    # A file that ALREADY had two `class Foo` defs is not blamed on an unrelated edit.
+    from workflows.code import _apply_extracted_code
+    orig = "class Foo:\n    x = 1\n\nclass Foo:\n    x = 2\n\nz = 0\n"
+    fc = {"m.py": orig}
+    ext = _mk_extracted(text_edits={"m.py": [("z = 0", "z = 99")]})
+    result, m, t, skips = _apply_extracted_code(ext, fc, None)
+    assert "m.py" in result and "z = 99" in result["m.py"]   # legit edit applies

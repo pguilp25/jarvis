@@ -1384,7 +1384,8 @@ def _do_replace(args: dict, ctx: dict) -> str:
     ext = _extract_code_blocks(block)
     result, matched, attempted, skips = _apply_extracted_code(
         ext, ctx["file_contents"], ctx.get("sandbox"),
-        viewed_versions=ctx.get("viewed_versions"))
+        viewed_versions=ctx.get("viewed_versions"),
+        dup_block_gate=False)   # native path uses _post_edit_syntax_gate (ckpt-252)
     # malformed-range messages live on the extracted dict. The same message can
     # appear in BOTH malformed_edits and skips (e.g. an inverted range) — merge
     # while preserving order and dropping exact duplicates so the coder sees the
@@ -1937,7 +1938,8 @@ def _do_edit(args: dict, ctx: dict) -> str:
         _ext = _extract_code_blocks(block)
         _res, _m, _a, _sk = _apply_extracted_code(
             _ext, ctx["file_contents"], ctx.get("sandbox"),
-            viewed_versions=ctx.get("viewed_versions"))
+            viewed_versions=ctx.get("viewed_versions"),
+            dup_block_gate=False)   # native path uses _post_edit_syntax_gate (ckpt-252)
         return _res, list(_ext.get("malformed_edits", [])) + list(_sk)
 
     result, skips = _build_and_apply(False)
@@ -2206,7 +2208,8 @@ def _do_create(args: dict, ctx: dict) -> str:
     ext = _extract_code_blocks(block)
     result, matched, attempted, skips = _apply_extracted_code(
         ext, ctx["file_contents"], ctx.get("sandbox"),
-        viewed_versions=ctx.get("viewed_versions"))
+        viewed_versions=ctx.get("viewed_versions"),
+        dup_block_gate=False)   # native path uses _post_edit_syntax_gate (ckpt-252)
     produced = result.get(path) if path in result else ext.get("new_files", {}).get(path)
     if produced is not None:
         # SYNTAX GATE — a new .py module that doesn't parse would ImportError the
