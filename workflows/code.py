@@ -9025,8 +9025,10 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         _consensus_line = (
             "\n\nCONSENSUS FILES — ≥2 of the candidate plans independently said these "
             "need changing:\n  " + ", ".join(_consensus[:12]) +
-            "\nYour merged plan MUST cover each of these (one STEP each) UNLESS you can "
-            "say in one line why it's wrong — do not silently drop a file the drafts agreed on.")
+            "\nYour merged plan MUST cover each of these (one STEP each — on a literal `FILES:` "
+            "line, NOT merely named in GOAL/REQUIREMENTS prose: the per-step coder only opens "
+            "files a STEP names) UNLESS you can say in one line why it's wrong — do not silently "
+            "drop a file the drafts agreed on.")
 
     # #20 (ckpt-215): MERGE_PROMPT_TEMPLATE_V8 ALREADY begins with CORE_V8 (the "## JARVIS RUNTIME"
     # preamble), so prepending SYSTEM_KNOWLEDGE here injected the ~480-line preamble TWICE (verified
@@ -9546,28 +9548,35 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             warn(f"  Plan scope check: flagged {len(_gaps)} file(s) multiple "
                  f"sources agree on but the plan omitted (coder will confirm)")
             _wlog.phase_warn("plan scope gaps flagged", n=len(_gaps))
-        # COVERAGE ENFORCEMENT (planner-audit fix): the checks above key on scope
-        # MEMBERSHIP — a ≥2-draft consensus file the merger NAMES in prose counts as
-        # "in scope" (so _add_req skips it), yet it can carry NO `### STEP`, and the
-        # per-step coder iterates STEPS, so it's silently never edited
-        # (ansible-395e5e20: strategy/__init__.py + linear.py named but unstepped →
-        # missed sites → fail; the run that DID step them passed — it was variance the
-        # merger occasionally drops). Synthesize a real STEP for each consensus file
-        # with no step so the coder actually covers it (gated ≥2-draft + real file +
-        # non-test + capped; each step has a read-and-decline escape hatch).
-        _stepped = {f for s in _extract_impl_steps(best_plan) for f in (s.get("files") or [])}
-        _cov_text, _cov_added = coverage_steps(
-            best_plan, majority_files(_scope_votes, len(plans)),
-            _stepped, _proj_files, _scope_votes)
-        if _cov_text:
-            best_plan += _cov_text
-            warn(f"  coverage enforcement: +{len(_cov_added)} STEP(s) for ≥2-consensus "
-                 f"file(s) the merge left unstepped: {', '.join(_cov_added)}")
-            _wlog.phase_warn("coverage steps added", files=",".join(_cov_added))
+        # (COVERAGE ENFORCEMENT moved OUT of this gate → now UNCONDITIONAL below, ckpt-250.)
     except _ScopeBackstopOff:
         pass   # disabled by default (ckpt-195) — plan reaches the coder as the merger wrote it
     except Exception as _sce:
         warn(f"  plan-scope backstop skipped: {str(_sce)[:120]}")
+
+    # COVERAGE ENFORCEMENT — UNCONDITIONAL (ckpt-250, overnight root-cause + Fable synthesis).
+    # Un-gated from JARVIS_SCOPE_BACKSTOP. This keys on step COVERAGE — distinct from the
+    # MEMBERSHIP machinery above (gap notes/lint), which STAYS gated per ckpt-195's "show the
+    # planner's TRUE scope" intent. The failure it catches: a ≥2-draft CONSENSUS file the merger
+    # NAMED in prose but put on NO `### STEP` is silently never edited (the per-step coder
+    # iterates STEPS) → the #1 under-scope FAIL (f631: 3-file feature shipped as 1; ansible-
+    # 395e5e20: named-but-unstepped → missed sites → fail; the run that DID step them PASSED —
+    # pure merger variance). coverage_steps is creep-proof (≥2 consensus + real non-test file +
+    # capped; each synthesized STEP carries a read-and-decline escape hatch), so the worst case
+    # is a wasted read, NOT scope-creep. Fully guarded → can NEVER break planning.
+    try:
+        from core.plan_scope import coverage_steps as _cov_fn, majority_files as _maj_fn
+        _stepped_u = {f for s in _extract_impl_steps(best_plan) for f in (s.get("files") or [])}
+        _cov_text_u, _cov_added_u = _cov_fn(
+            best_plan, _maj_fn(_scope_votes, len(plans)),
+            _stepped_u, list(files or []), _scope_votes)
+        if _cov_text_u:
+            best_plan += _cov_text_u
+            warn(f"  coverage enforcement (always-on): +{len(_cov_added_u)} STEP(s) for "
+                 f"≥2-consensus file(s) the merge left unstepped: {', '.join(_cov_added_u)}")
+            _wlog.phase_warn("coverage steps added (unconditional)", files=",".join(_cov_added_u))
+    except Exception as _sce2:
+        warn(f"  coverage enforcement skipped: {str(_sce2)[:120]}")
 
     status(f"Phase 2: final plan = {len(best_plan)} chars")
     success(f"Phase 2 complete ({mode_label}, {len(research_cache)} cached lookups)")
@@ -12706,7 +12715,7 @@ async def phase_implement(
 
     # Collect all target files
     files_to_create = _extract_new_files_from_plan(plan)
-    all_files = list(set(files_to_modify + files_to_create))
+    all_files = list(dict.fromkeys(files_to_modify + files_to_create))   # bughunt ckpt-250: preserve order (set() was non-deterministic)
 
     # Parse plan steps
     impl_steps = _extract_impl_steps(plan)
@@ -12803,7 +12812,7 @@ async def phase_implement(
                     f"## Files produced\n{step_summary}\n\n"
                     f"## Files declared in step\n"
                     f"{', '.join(step_info.get('files', [])) or '(none)'}\n\n"
-                    f"## Step body\n{step_info.get('body', '')}\n"
+                    f"## Step body\n{step_info.get('details', '')}\n"   # bughunt ckpt-250: key is 'details' not 'body' (log lost every step body)
                 ),
                 extra={"files_produced": len(step_result)},
             )
