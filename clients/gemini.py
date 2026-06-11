@@ -80,8 +80,11 @@ async def call_gemini(
     key = _next_key()
     url = f"{GEMINI_API_BASE}/{api_model}:generateContent?key={key}"
 
+    # system-only support (user 2026-06-11): Gemini REQUIRES non-empty `contents`, so when there's
+    # no user prompt the system text carries the whole request IN contents (and we skip the duplicate
+    # systemInstruction). With a user prompt, behaviour is unchanged (prompt in contents, system aside).
     body: dict = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": [{"text": prompt or system or " "}]}],
         "generationConfig": {
             "temperature": temperature,
             "thinkingConfig": {
@@ -90,7 +93,7 @@ async def call_gemini(
         },
     }
 
-    if system:
+    if system and prompt:
         body["systemInstruction"] = {"parts": [{"text": system}]}
 
     async with aiohttp.ClientSession() as session:

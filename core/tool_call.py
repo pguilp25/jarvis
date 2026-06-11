@@ -3094,6 +3094,16 @@ def _past_thinking_keep_from(round_texts: list, cap_tokens: int, count_fn) -> in
     return keep_from
 
 
+# ALL-SYSTEM PROMPTING (user 2026-06-11): every role (planner / merger / text-coder /
+# reviewer / understand) sends its FULL assembled prompt as the `system` message — TRUE
+# system-only, no user turn — so the model treats the whole thing as authoritative system
+# content, with the embedded user task fenced by `[USER REQUEST] … [END OF USER REQUEST]`
+# inside it. Verified safe by direct probe (2026-06-11): every active OpenRouter model
+# (gpt-oss-120b coder, owl-alpha merger, nemotron + gemma planners) returns HTTP 200 and
+# OBEYS an instruction placed only in `system`, across repeats and large payloads. The
+# OpenAI-compat builder (clients/nvidia.py) skips the user turn when `prompt` is empty.
+
+
 async def call_with_tools(
     model: str,
     prompt: str,
@@ -3361,7 +3371,7 @@ async def call_with_tools(
             pass  # diagnostic-only — never break the model loop on log failures
 
         result = await call_with_retry(
-            model, current_prompt, max_tokens=max_tokens,
+            model, "", system=current_prompt, max_tokens=max_tokens,
             stop_check=_stop_check,
             log_label=f"{log_label} — R{round_num}" if log_label else f"R{round_num}",
             no_fallback=no_fallback,
@@ -4824,7 +4834,7 @@ async def call_with_tools(
             # Force one final round with no tool processing
             try:
                 final_result = await call_with_retry(
-                    model, current_prompt, max_tokens=max_tokens,
+                    model, "", system=current_prompt, max_tokens=max_tokens,
                     stop_check=None,  # no early stop — let it write everything
                     log_label=log_label + " (commit)",
                     no_fallback=no_fallback,

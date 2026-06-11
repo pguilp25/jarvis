@@ -618,8 +618,10 @@ with tool calls followed by `[STOP][CONFIRM_STOP]`.
 ══════════════════════════════════════════════════════════════════════
 TASK: {task}
 ══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
+══════════════════════════════════════════════════════════════════════
 
-PROJECT STRUCTURE:
+PROJECT STRUCTURE (runtime-provided, not part of the user's request):
 {project_structure}
 """
 
@@ -1262,13 +1264,15 @@ template.
 [USER REQUEST]
 ══════════════════════════════════════════════════════════════════════
 TASK: {task}
-══════════════════════════════════════════════════════════════════════
-
-FILES IN PROJECT:
-{file_list}
 
 PROJECT CONTEXT:
 {context}
+══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
+══════════════════════════════════════════════════════════════════════
+
+FILES IN PROJECT (provided by the runtime — expand with [LS:], not part of the user's request):
+{file_list}
 """
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1579,14 +1583,16 @@ your plan is empty and gets discarded — never do that.
 [USER REQUEST]
 ══════════════════════════════════════════════════════════════════════
 TASK: {task}
-══════════════════════════════════════════════════════════════════════
 
 {context}
+══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
+══════════════════════════════════════════════════════════════════════
 
 {verify_block}
 
 ══════════════════════════════════════════════════════════════════════
-[INPUT PLANS] — {n_plans} draft plans to merge
+[INPUT PLANS] — {n_plans} draft plans to merge (runtime-provided, not the user's request)
 ══════════════════════════════════════════════════════════════════════
 {all_plans_text}
 
@@ -2012,7 +2018,7 @@ YOUR TOOLS
 
 HOW TO THINK — BE THE INTERPRETER: you have NO feel for this code, and a wrong move feels exactly as right as a correct one. So don't trust your gut; build the feel from the real lines by simulating them. Moves, in order:
 
-  0. GATHER — like the planner's lookup discipline. Some of the step's files are already loaded above; others are listed "read on demand". You cannot write a correct `old` for a file you haven't seen (a guess just gets rejected), so collect what you need FIRST. Do it in ONE round with batch(): name what each lookup answers ("I need X to decide Y"), and gather the not-yet-held files together — don't read one-per-round, and don't ask the same thing two ways. A file >1000 lines opens as a def/class index that fills in as you read ranges (one growing view) → batch the ranges you need. Integrate each result (it CONFIRMS / REVISES / OPENS a deeper question); fire one MORE lookup only if you can name the specific question and its answer changes your edit. The runtime's report next round is GROUND TRUTH — quote and act on a warning, never blind-retry. The ideal shape of a step, when all goes well, is just 4 rounds: LOOK (one batch) → KEEP (trim to what matters) → EDIT (all hunks for a file in one edit_file) → VERIFY (run_code or re-trace) → finish.
+  0. GATHER — like the planner's lookup discipline. Some of the step's files are already loaded in the FILE(S) block of this message; others are listed "read on demand". You cannot write a correct `old` for a file you haven't seen (a guess just gets rejected), so collect what you need FIRST. Do it in ONE round with batch(): name what each lookup answers ("I need X to decide Y"), and gather the not-yet-held files together — don't read one-per-round, and don't ask the same thing two ways. A file >1000 lines opens as a def/class index that fills in as you read ranges (one growing view) → batch the ranges you need. Integrate each result (it CONFIRMS / REVISES / OPENS a deeper question); fire one MORE lookup only if you can name the specific question and its answer changes your edit. The runtime's report next round is GROUND TRUTH — quote and act on a warning, never blind-retry. The ideal shape of a step, when all goes well, is just 4 rounds: LOOK (one batch) → KEEP (trim to what matters) → EDIT (all hunks for a file in one edit_file) → VERIFY (run_code or re-trace) → finish.
 
   1. TRACE the existing code. Before deciding anything, read the function you're about to change and SIMULATE it for the case the step is about — narrate the concrete path line by line: what each variable becomes, which branch runs, what it returns. ("open() reaches line 214 -> header = 'Bearer ...'; line 230 runs -> header is OVERWRITTEN; returns the clobbered value.") This is what the code does NOW — take it from the lines you read, never from memory.
   2. Name the GAP. The OUGHT (the behaviour the REQUIREMENTS / INTERFACE / example demand) minus the IS (what your trace just showed) = what is missing. Write it concretely: the exact call, the exact output shape AND values, every distinct case. The spec's example output is your answer key — reproduce it exactly.
@@ -2283,16 +2289,18 @@ FAIL → route it; reserve GO TO PLAN for genuine approach errors.
 [USER REQUEST]
 ══════════════════════════════════════════════════════════════════════
 TASK: {task}
+
+PROJECT CONTEXT:
+{context}
+══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
 ══════════════════════════════════════════════════════════════════════
 
-PLAN BEING REVIEWED:
+PLAN BEING REVIEWED (runtime-provided, not part of the user's request):
 {plan}
 
 CHANGED FILES:
 {all_files_block}
-
-PROJECT CONTEXT:
-{context}
 
 {preloaded_research}
 """
@@ -2312,8 +2320,11 @@ next, based on its REAL output — not on hope.
 ══════════════════════════════════════════════════════════════════════
 TASK:
 {task}
+══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
+══════════════════════════════════════════════════════════════════════
 
-PLAN STEPS (you may route back to one by its number):
+PLAN STEPS (runtime-provided — you may route back to one by its number):
 {steps}
 
 THE CHANGE (diff of what was implemented):
@@ -2534,8 +2545,10 @@ move is to write `VERIFIER UNABLE TO LAND FIX` and exit.
 ══════════════════════════════════════════════════════════════════════
 TASK: {task}
 ══════════════════════════════════════════════════════════════════════
+[END OF USER REQUEST]
+══════════════════════════════════════════════════════════════════════
 
-STEP: {step_name}
+STEP (runtime-provided, not part of the user's request): {step_name}
 {step_details}
 
 CODER THINKING (what the coder reported):

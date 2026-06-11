@@ -170,7 +170,10 @@ async def call_openai_compat(
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    # system-only support (user 2026-06-11): skip the user turn when prompt is empty and a system
+    # message exists; `not messages` guards the degenerate empty case (avoids an empty messages array).
+    if prompt or not messages:
+        messages.append({"role": "user", "content": prompt})
 
     payload = {
         "model": api_model,
@@ -219,7 +222,10 @@ async def call_openai_compat_stream(
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    # system-only support (user 2026-06-11): skip the user turn when prompt is empty and a system
+    # message exists; `not messages` guards the degenerate empty case (avoids an empty messages array).
+    if prompt or not messages:
+        messages.append({"role": "user", "content": prompt})
 
     payload = {
         "model": api_model,

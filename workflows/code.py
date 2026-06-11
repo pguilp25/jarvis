@@ -11360,10 +11360,6 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
               "def-index (names + line numbers); each range you read FILLS IN that ONE growing view "
               "(gaps stay labelled), so read the ranges around your edit sites, edit from them, and "
               "`keep` the ranges that matter to trim context.)\n")
-    nat_system = (
-        IMPLEMENT_NATIVE_PROMPT
-        + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
-    )
     create_note = (
         f"\nFiles to CREATE (they do NOT exist yet — use create_file, not "
         f"edit_file): {', '.join(to_create)}\n" if to_create else ""
@@ -11378,16 +11374,25 @@ def build_implement_native_prompt(step_instructions, iface_block, nat_targets,
     # EXIST — emitting it on a single-fully-loaded-file step was stale junk referencing a nonexistent
     # list. Gate it on `overflow`.
     _rod_clause = "Read the 'read on demand' files only when you reach them. " if overflow else ""
-    nat_user = (
-        f"{step_instructions}\n{iface_block}\n{create_note}"
-        f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code (already loaded) ===\n{file_block}\n{overflow_note}\n"
-        f"The files in the FILE(S) block above are already loaded — edit THOSE directly (no need to "
-        f"read_file them first). {_overflow_clause}"
-        f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
-        f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
-        f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
-        f"hold). {_rod_clause}When done and verified, finish the step."
+    # ALL-SYSTEM (user 2026-06-11): the interfaces, the file VIEW, and the edit-protocol trailer are
+    # runtime-provided scaffolding ("file in project") — NOT the user's request. They live in the
+    # SYSTEM half, OUTSIDE the [USER REQUEST] fence, exactly like FILES IN PROJECT in the planner
+    # prompt. The fence (added by build_json_ops_system) wraps ONLY the step task → `nat_user`.
+    nat_system = (
+        IMPLEMENT_NATIVE_PROMPT
+        + ("\n\nGuidance from the step:\n" + error_feedback if error_feedback else "")
+        + f"\n{iface_block}\n{create_note}"
+        + f"=== FILE(S) — current content as LINENO ⇥INDENT|<real spaces>code "
+          f"(runtime-provided project files, already loaded — not part of the user's request) ===\n"
+          f"{file_block}\n{overflow_note}\n"
+        + (f"The files in the FILE(S) block above are already loaded — edit THOSE directly (no need to "
+           f"read_file them first). {_overflow_clause}"
+           f"For `old`, copy the view line VERBATIM with its `LINENO ⇥INDENT|`; edit_file anchors on "
+           f"BOTH the line number AND the content, so a shifted view self-corrects. After each edit "
+           f"you get a diff = the file's new live state; keep editing from it (don't re-read what you "
+           f"hold). {_rod_clause}When done and verified, finish the step.")
     )
+    nat_user = step_instructions
     return nat_system, nat_user, injected, overflow
 
 
@@ -12763,27 +12768,21 @@ async def _implement_one_step(
             status(f"  [json:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("json coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
             return _p
-        # EXACT coder chain: gpt-oss(OR,native) PRIMARY -> qwen -> mistral
-        #   -> gpt-oss(NIM,native) -> glm-5.1. First link that produces edits wins.
-        #   (Reverted from the qwen-primary experiment: both free qwen routes failed as
-        #   primary — qwen3-480b 429-saturated, pollinations-qwen 0-edits. gpt-oss native
-        #   is the only reliable edit-producer; now reasons about indent-by-scope first.)
-        #   gpt-oss-nim stays NEAR THE END deliberately: it doesn't fail fast — it hangs
-        #   ~5 min then 504s, so it's only an acceptable LAST-RESORT, never early.
-        # ckpt-187: dropped the frontier glm-5.1 text link; added owl-alpha + gemma-4
-        # (OR :free, non-frontier) as text coders before the slow gpt-oss-nim last-resort.
-        # ckpt-217: gpt-oss-120b PRIMARY now runs in JSON-OPS TEXT mode (flat JSON-line ops), with
-        # NATIVE gpt-oss as the FIRST fallback. RATIONALE: native structured tool-calling triggers
-        # the harmony analysis→commentary `finish_reason=stop` empty-turn (a26 burned ~15 rounds of
-        # empty-turns → wall-clock timeout). TEXT mode has no commentary channel to stall at, so the
-        # empty-turn class structurally disappears; native stays as the immediate fallback because
-        # gpt-oss is still the strongest edit-producer. All shared tool fixes (read-refusal, growing
-        # view, search scope, etc.) apply to BOTH modes (same _dispatch/_do_*). Escape hatch:
-        # JARVIS_NATIVE_CODER=1 reverts to the old native-primary chain for A/B comparison.
-        _CODER_CHAIN = [("nvidia/gpt-oss-120b","json"), ("nvidia/gpt-oss-120b","native"),
-                        ("nvidia/qwen3-coder","text"), ("mistral/medium","native"),
-                        ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
-                        ("nvidia/gpt-oss-nim","native")]
+        # EXACT coder chain (user 2026-06-11): gpt-oss-120b JSON-OPS PRIMARY -> qwen3-coder (text)
+        #   -> owl-alpha (text) -> gemma-4 (text). First link that produces edits wins.
+        # gpt-oss-120b runs in JSON-OPS TEXT mode (flat JSON-line ops): native structured tool-calling
+        # triggered the harmony analysis→commentary `finish_reason=stop` empty-turn (a26 burned ~15
+        # rounds → wall-clock timeout); TEXT mode has no commentary channel to stall at, so that
+        # empty-turn class structurally disappears. All shared tool fixes (read-refusal, growing view,
+        # search scope, etc.) apply via the same _dispatch/_do_*.
+        # NO NATIVE FALLBACK (user 2026-06-11): native function-calling is WORSE than
+        # json-ops for this coder, so we never fall over to it. Primary = gpt-oss json-ops;
+        # fallbacks are all TEXT-protocol coders. Dropped: gpt-oss "native", mistral/medium
+        # "native" (only ever ran as native), and gpt-oss-nim "native" (last-resort hanger).
+        _CODER_CHAIN = [("nvidia/gpt-oss-120b","json"),
+                        ("nvidia/qwen3-coder","text"),
+                        ("openrouter/owl-alpha","text"),
+                        ("google/gemma-4-31b-it","text")]
         if os.environ.get("JARVIS_NATIVE_CODER", "0") == "1":
             _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
                             ("mistral/medium","native"),

@@ -12,18 +12,37 @@ from core.native_tools import finalize_coder_system, _INDENT_FORMAT_BLOCK, CODER
 
 def test_assembled_system_is_live_prompt_plus_indent_block():
     art = assemble("STEP 1: do X.", "(none)", {"a/b.py": "x = 1\n"})
-    # the system the model sees = the LIVE coder prompt + the always-on indent block
-    assert IMPLEMENT_NATIVE_PROMPT in art["system"]
+    # the system the model sees = the LIVE json-ops coder prompt + the always-on indent block +
+    # the JSON-OPS protocol override. The IMPLEMENT prompt is present but with batch() neutralised
+    # for json-ops, so assert its distinctive opening rather than the raw constant verbatim.
+    assert IMPLEMENT_NATIVE_PROMPT[:80] in art["system"]          # live coder prompt, opening intact
+    assert "no batch tool in JSON-OPS" in art["system"]           # batch() neutralised for json-ops
     assert _INDENT_FORMAT_BLOCK in art["system"]
-    assert art["tools"] is CODER_TOOLS and len(art["tools"]) >= 10
+    assert art["tools"] == []   # json-ops PRIMARY coder is TEXT mode — no tools array sent
 
 
-def test_user_turn_carries_step_and_injected_file():
+def test_all_system_no_user_turn_and_fenced():
+    # ALL-SYSTEM (user 2026-06-11): the coder sends ONE system message and NO user turn; the
+    # per-step task is wrapped in the [USER REQUEST] … [END OF USER REQUEST] fence.
     art = assemble("STEP 1: rename foo.", "IFACE LINE", {"a/b.py": "def foo():\n    return 1\n"})
-    assert "STEP 1: rename foo." in art["user"]
-    assert "IFACE LINE" in art["user"]
-    assert "a/b.py" in art["user"] and "def foo" in art["user"]   # injected in full
+    assert art["user"] == ""                                       # no user turn
+    assert "[USER REQUEST]" in art["system"] and "[END OF USER REQUEST]" in art["system"]
+    assert "STEP 1: rename foo." in art["system"]
+    assert "IFACE LINE" in art["system"]
+    assert "a/b.py" in art["system"] and "def foo" in art["system"]   # injected in full
     assert art["injected"] == ["a/b.py"] and art["overflow"] == []
+
+
+def test_batch_neutralisation_does_not_corrupt_file_content():
+    # BLOCKER caught in adversarial review (2026-06-11): the json-ops batch() neutralisation must
+    # rewrite ONLY the IMPLEMENT prompt instructions, NEVER injected file content (the file view now
+    # lives in the system message). A project file mentioning batch(calls)/with batch() must render
+    # verbatim, or the coder copies a corrupted `old` and reject-thrashes.
+    src = "async def go():\n    async with batch() as b:\n        b.add(batch(calls))\n"
+    art = assemble("STEP: edit it", "(none)", {"a/q.py": src})
+    assert "async with batch() as b" in art["system"]   # file content NOT rewritten
+    assert "b.add(batch(calls))" in art["system"]        # file content NOT rewritten
+    assert "no batch tool in JSON-OPS" in art["system"]  # but the IMPLEMENT prompt's own CTA IS neutralised
 
 
 def test_small_files_inject_huge_file_overflows():
@@ -31,7 +50,7 @@ def test_small_files_inject_huge_file_overflows():
     art = assemble("STEP", "(none)", {"a/small.py": "y = 1\n", "a/huge.py": big})
     assert "a/small.py" in art["injected"]
     assert "a/huge.py" in art["overflow"]                          # too big to preload
-    assert "TOO LARGE TO PRELOAD" in art["user"]
+    assert "TOO LARGE TO PRELOAD" in art["system"]
 
 
 def test_big_target_file_routes_to_growing_view_not_full_inject():
@@ -43,14 +62,14 @@ def test_big_target_file_routes_to_growing_view_not_full_inject():
     art = assemble("STEP: edit big.py", "(none)", {"pkg/big.py": big})
     assert art["injected"] == []                                   # NOT dumped in full
     assert art["overflow"] == ["pkg/big.py"]                       # routed to the growing view
-    assert "TOO LARGE TO PRELOAD" in art["user"]
-    assert len(art["user"]) < 4000                                 # tiny turn, not a 9k-token wall
+    assert "TOO LARGE TO PRELOAD" in art["system"]
+    assert "return x + 699" not in art["system"]                   # big-file BODY not inlined
 
 
-def test_error_feedback_appears_in_user_turn():
+def test_error_feedback_appears_in_system():
     art = assemble("STEP", "(none)", {"a/b.py": "x = 1\n"},
                    error_feedback="Your last edit was REJECTED.")
-    assert "Your last edit was REJECTED." in art["user"] or "REJECTED" in art["system"]
+    assert "REJECTED" in art["system"]
 
 
 def test_finalize_is_idempotent_in_structure():

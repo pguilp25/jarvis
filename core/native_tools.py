@@ -3065,7 +3065,12 @@ def _trim_history(messages: list, max_chars: int, model_id: str) -> list:
     the request stays API-valid."""
     if _est_chars(messages) <= max_chars or len(messages) <= 4:
         return messages
-    head, rest = messages[:2], messages[2:]
+    # Pin the immovable head. With all-system prompting (user 2026-06-11) the json-ops coder sends
+    # NO user turn, so messages[1] is the round-1 ASSISTANT reply, not a user task — pinning [:2]
+    # would freeze that reply forever while letting its paired RESULTS turn be evicted (orphaned ops).
+    # Pin just the system unless messages[1] is genuinely a user turn (the native [system,user] split).
+    _head_n = 2 if (len(messages) > 1 and messages[1].get("role") == "user") else 1
+    head, rest = messages[:_head_n], messages[_head_n:]
     groups, i = [], 0
     while i < len(rest):
         grp = [rest[i]]
@@ -3304,6 +3309,21 @@ def _salvage_inline_tool_call(text: str, ctr: int):
             return {"id": f"salvage_{ctr}", "type": "function",
                     "function": {"name": nm2, "arguments": json.dumps(d)}}
     return None
+
+
+_REQUEST_RULE = "═" * 70
+
+
+def _fence_user_request(content: str) -> str:
+    """Wrap the embedded user task in an explicit [USER REQUEST] … [END OF USER REQUEST]
+    fence (user 2026-06-11). With all-system prompting the model would otherwise have no
+    signal for where JARVIS's instructions end and the user's actual request begins; the
+    closing fence makes it unambiguous that what follows is back to system instruction."""
+    return (
+        f"\n\n{_REQUEST_RULE}\n[USER REQUEST]\n{_REQUEST_RULE}\n"
+        f"{content}\n"
+        f"{_REQUEST_RULE}\n[END OF USER REQUEST]\n{_REQUEST_RULE}\n"
+    )
 
 
 def finalize_coder_system(system: str) -> str:
@@ -3898,6 +3918,31 @@ _JSON_OPS_NO_EDIT = (
 )
 
 
+def build_json_ops_system(system: str, user_content: str) -> str:
+    """Assemble the FULL system message the JSON-ops coder sends (all-system, no user turn).
+    SHARED by the live coder (call_with_json_ops) and the render harness (render_prompt.py) so the
+    audited artifact can never drift from the live one (CLAUDE.md doctrine). Layers, in order:
+      1. finalize_coder_system(system) — the IMPLEMENT prompt + always-on _INDENT_FORMAT_BLOCK and
+         the env-gated TRACE/COT blocks (so they apply to the PRIMARY json-ops coder too).
+      2. batch() neutralisation — the shared native prompt prescribes batch(calls) as the step-0
+         GATHER tool, but JSON-OPS has NO batch tool (emitting several ops IS the batch); rewrite
+         those call-to-actions so a weak coder isn't told two contradictory things. Token-level,
+         no-op-if-absent, so a prompt edit can't silently break it.
+      3. _JSON_OPS_PROMPT — the protocol override LAST so it wins on HOW to emit (flat JSON lines).
+      4. the per-step task fenced by [USER REQUEST] … [END OF USER REQUEST].
+    The batch() neutralisation is scoped to the IMPLEMENT_NATIVE_PROMPT instruction block ONLY — a
+    blanket .replace over the whole system would corrupt INJECTED FILE CONTENT (the file view now
+    lives in `system`), silently mangling any project file that contains `batch(calls)`/`with batch()`
+    → the coder copies a corrupted `old` → reject-thrash. (Caught in adversarial review, 2026-06-11.)"""
+    from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
+    _base = finalize_coder_system(system or "")
+    _neutral = (IMPLEMENT_NATIVE_PROMPT
+                .replace("batch(calls)", "(no batch tool in JSON-OPS — emit several ops in one round)")
+                .replace("with batch()", "by emitting several ops in one round"))
+    _base = _base.replace(IMPLEMENT_NATIVE_PROMPT, _neutral, 1)
+    return _base + _JSON_OPS_PROMPT + _fence_user_request(user_content)
+
+
 async def call_with_json_ops(model_id: str, system: str, user_content: str,
                              ctx: dict, max_rounds: int = 40,
                              max_history_chars: int = 400_000, deadline=None) -> dict:
@@ -3911,21 +3956,12 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
                   # JSON-ops pass and silently fell over to native (the whole point was to avoid that).
     from clients.nvidia import call_nvidia_stream
     short = model_id.split('/')[-1]
-    # Route through finalize_coder_system (bughunt #19) so the env flags that shape the coder
-    # prompt — JARVIS_TRACE / JARVIS_EDIT_COT / JARVIS_BULLET_COT, plus the always-on
-    # _INDENT_FORMAT_BLOCK — apply to the JSON-ops PRIMARY coder too (they were a silent no-op
-    # here). THEN the JSON-ops protocol override LAST so it wins on HOW to emit (flat JSON lines).
-    # Cluster B (ckpt-224): the SHARED native prompt prescribes `batch(calls)` as the step-0 GATHER
-    # mechanism — but JSON-OPS has NO batch tool (emitting several ops IS the batch). Neutralise the
-    # base's batch() call-to-actions so they don't contradict the override below (a weak coder that
-    # reads "Do it in ONE round with batch()" up top then "no batch tool" 60 lines later is confused).
-    # Token-level + no-op-if-absent, so a prompt edit can't silently break this.
-    _base = finalize_coder_system(system or "")
-    _base = _base.replace("batch(calls)", "(no batch tool in JSON-OPS — emit several ops in one round)")
-    _base = _base.replace("with batch()", "by emitting several ops in one round")
-    system = _base + _JSON_OPS_PROMPT
-    messages = [{"role": "system", "content": system},
-                {"role": "user", "content": user_content}]
+    # ALL-SYSTEM PROMPTING (user 2026-06-11): the WHOLE coder prompt goes in ONE system message
+    # (no user turn) — same clearer single-block format as the planner — with the per-step task
+    # fenced by [USER REQUEST] … [END OF USER REQUEST]. Assembly is shared with the render harness
+    # via build_json_ops_system so the audited artifact can never drift from what the coder sends.
+    system = build_json_ops_system(system, user_content)
+    messages = [{"role": "system", "content": system}]
     ctx.setdefault("files_changed", set())
     ctx["_run_code_verified"] = False   # #5: per-step — a green run_code lets the verify-gate accept the first done
     ctx["_run_code_env_blocked"] = False  # Cluster C: per-step — an env-blocked run_code also credits the gate

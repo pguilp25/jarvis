@@ -23,21 +23,25 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from workflows.code import build_implement_native_prompt
-from core.native_tools import finalize_coder_system, CODER_TOOLS, _dispatch
+from core.native_tools import build_json_ops_system, CODER_TOOLS, _dispatch
 
 _BAR = "═" * 100
 
 
 def assemble(step_instructions, iface_block, files, to_create=None, error_feedback=""):
     """Return the FULL coder artifact dict {system, user, tools, injected, overflow} EXACTLY as the
-    live coder builds + sends it (phase_implement assembly + call_with_native_tools finalization)."""
+    live PRIMARY coder builds + sends it. The live json-ops coder is ALL-SYSTEM (user 2026-06-11):
+    one system message (instructions + indent block + JSON-OPS protocol + the [USER REQUEST]-fenced
+    step) and NO user turn. We assemble it through the SAME build_json_ops_system the coder uses, so
+    the audited artifact can never drift from the live one (CLAUDE.md doctrine)."""
     nat_system, nat_user, injected, overflow = build_implement_native_prompt(
         step_instructions, iface_block, files, to_create=to_create or [],
         error_feedback=error_feedback)
     return {
-        "system": finalize_coder_system(nat_system),
-        "user": nat_user,
-        "tools": CODER_TOOLS,
+        "system": build_json_ops_system(nat_system, nat_user),
+        "user": "",   # all-system: there is no user turn
+        "tools": [],   # json-ops PRIMARY coder runs in TEXT mode — NO tools array is sent
+                       # (ops are emitted as flat JSON lines). CODER_TOOLS is dumped via --tools.
         "injected": list(injected),
         "overflow": list(overflow),
     }

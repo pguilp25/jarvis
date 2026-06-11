@@ -371,7 +371,12 @@ async def call_nvidia(
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    # System-only support (user 2026-06-11): when `prompt` is empty AND we already have a
+    # system message, send TRUE system-only (no user turn) — verified safe on every active
+    # provider. The `not messages` guard keeps a degenerate (no system, no prompt) call from
+    # sending an empty messages array.
+    if prompt or not messages:
+        messages.append({"role": "user", "content": prompt})
 
     payload = {
         "model": api_model,
@@ -566,7 +571,11 @@ async def call_nvidia_stream(
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        # System-only support (user 2026-06-11): skip the user turn when `prompt` is empty
+        # and a system message exists (verified safe on every active provider). The
+        # `not messages` guard prevents an empty messages array in the degenerate case.
+        if prompt or not messages:
+            messages.append({"role": "user", "content": prompt})
 
     # ── Pre-flight context-budget check ──────────────────────────────
     # Rough estimate: ~4 chars per token for English/code. If our prompt
