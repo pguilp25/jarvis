@@ -12758,74 +12758,69 @@ async def _implement_one_step(
             status(f"  [native:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("native coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
             return _p
-        async def _json_pass(_model):
-            # JSON-ops coder (flag JARVIS_JSON_OPS): gpt-oss in TEXT mode, streaming flat JSON-line
-            # ops. Same ctx + prompt as native; only the protocol differs (ckpt-183).
+        async def _json_pass(_model, _nudge=""):
+            # JSON-ops coder: gpt-oss in TEXT mode, streaming flat JSON-line ops. `_nudge` (added on
+            # a RETRY) is appended to the system so the model is told it made no edit last turn.
             from core.native_tools import call_with_json_ops
-            _r = await call_with_json_ops(_model, _nat_system, _nat_user, _ctx,
+            _r = await call_with_json_ops(_model, _nat_system + _nudge, _nat_user, _ctx,
                                           deadline=_implement_deadline())
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
             status(f"  [json:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("json coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
             return _p, _r.get("reason")
-        # EXACT coder chain (user 2026-06-11): gpt-oss-120b JSON-OPS PRIMARY -> qwen3-coder (text)
-        #   -> owl-alpha (text) -> gemma-4 (text). First link that produces edits wins.
-        # gpt-oss-120b runs in JSON-OPS TEXT mode (flat JSON-line ops): native structured tool-calling
-        # triggered the harmony analysis→commentary `finish_reason=stop` empty-turn (a26 burned ~15
-        # rounds → wall-clock timeout); TEXT mode has no commentary channel to stall at, so that
-        # empty-turn class structurally disappears. All shared tool fixes (read-refusal, growing view,
-        # search scope, etc.) apply via the same _dispatch/_do_*.
-        # NO NATIVE FALLBACK (user 2026-06-11): native function-calling is WORSE than
-        # json-ops for this coder, so we never fall over to it. Primary = gpt-oss json-ops;
-        # fallbacks are all TEXT-protocol coders. Dropped: gpt-oss "native", mistral/medium
-        # "native" (only ever ran as native), and gpt-oss-nim "native" (last-resort hanger).
-        _CODER_CHAIN = [("nvidia/gpt-oss-120b","json"),
-                        ("nvidia/qwen3-coder","text"),
-                        ("openrouter/owl-alpha","text"),
-                        ("google/gemma-4-31b-it","text")]
+        # CODER = gpt-oss json-ops, RETRY-THE-SAME-MODEL, NO weak-model cascade (user 2026-06-11).
+        # A good / non-sketchy app retries its strong, reliable backend on a transient stall or an
+        # empty turn — it does NOT silently downgrade to inferior coders (qwen3 429 / owl-alpha text)
+        # that write CORRUPT partial patches. That cascade was the VERIFIED ckpt-258 8->5 regression:
+        # a transient gpt-oss stall dropped to a weak model that applied only import lines -> undefined
+        # symbols -> ImportError -> every fail_to_pass errored (395e5e20, 8a5a63af), and a26 timed out
+        # mid-cascade. So on a 0-edit turn we tell gpt-oss "you made no edit last turn" and RETRY THE
+        # SAME model; we ACCEPT a genuine force-done (reason=finished, 0 edits = the step needs no
+        # change); and if it still can't after _JSON_MAX_TRIES we fail the step CLEAN (no edit) rather
+        # than ship a corrupt weak-model patch. The ONLY ensemble model-switch in JARVIS is the
+        # PLANNER race (nemotron drafts -> owl-alpha merger) — a different role, kept.
         if os.environ.get("JARVIS_NATIVE_CODER", "0") == "1":
-            _CODER_CHAIN = [("nvidia/gpt-oss-120b","native"), ("nvidia/qwen3-coder","text"),
-                            ("mistral/medium","native"),
-                            ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
-                            ("nvidia/gpt-oss-nim","native")]
-        # RETRY JSON-OPS 3x ON A TRANSIENT STALL BEFORE ANY MODEL FALLOVER (user 2026-06-11).
-        # ckpt-258 audit (VERIFIED): a transient gpt-oss json stall on a step — api-error /
-        # "stream idle 90s" -> "stopped with ZERO edits", or read-budget — was DROPPING straight
-        # to qwen3-coder (chronically 429) then slow owl-alpha text protocol, so the critical step
-        # landed only import lines (referenced symbols never defined -> ImportError -> every
-        # fail_to_pass errors: 395e5e20, 8a5a63af), and a26 TIMED OUT mid-cascade (steps 3 & 5
-        # stalled -> qwen 429 -> owl-alpha, ran out of the 2700s). gpt-oss succeeds on the OTHER
-        # steps, so a transient stall must RETRY THE SAME strong coder, never fall over to weaker
-        # models. Only a genuine non-transient outcome (round/wall-clock budget exhausted, or a
-        # deliberate no-op) skips to the fallback chain.
-        _JSON_RETRY_REASONS = {"api-error", "read-budget", "no-ops"}
-        _chain = list(_CODER_CHAIN)
-        if _chain and _chain[0][1] == "json":
-            _jm = _chain[0][0]
-            for _attempt in range(3):
-                _seed_view_state()   # fresh view-state per attempt (bughunt #14)
+            # experimental native-primary A/B chain (off by default) — keeps the OLD cascade for
+            # comparison only; the default path below never falls over to a weaker coder.
+            for _m, _mode in [("nvidia/gpt-oss-120b", "native"), ("nvidia/qwen3-coder", "text"),
+                              ("mistral/medium", "native"), ("openrouter/owl-alpha", "text"),
+                              ("google/gemma-4-31b-it", "text"), ("nvidia/gpt-oss-nim", "native")]:
+                _seed_view_state()
                 try:
-                    _prod, _reason = await _json_pass(_jm)
+                    _prod = await (_native_pass(_m) if _mode == "native" else _text_pass(_m, True))
                 except Exception as _ce:
-                    warn(f"  json coder attempt {_attempt + 1}/3 raised: {str(_ce)[:80]}")
-                    _prod, _reason = {}, "api-error"
+                    warn(f"  coder link {_m} failed: {str(_ce)[:80]}")
+                    _prod = {}
                 if _prod:
                     return _prod
-                if _reason not in _JSON_RETRY_REASONS:
-                    break   # genuine no-op / budget-exhausted / time-budget — don't spin the retry
-                warn(f"  [json:{_jm.split('/')[-1]}] step {step_num}: 0 edits (reason={_reason}) — "
-                     f"retrying the SAME json coder {_attempt + 1}/3 (transient stall, no fallover)")
-            _chain = [c for c in _chain if c[1] != "json"]   # json exhausted -> text/native fallbacks
-        for _m, _mode in _chain:
+            return {}
+        _JSON_MODEL = "nvidia/gpt-oss-120b"
+        _JSON_MAX_TRIES = 4
+        _JSON_RETRY_REASONS = {"api-error", "read-budget", "no-ops"}   # transient/empty → retry SAME
+        for _attempt in range(_JSON_MAX_TRIES):
             _seed_view_state()   # fresh view-state per attempt (bughunt #14)
+            _nudge = ("" if _attempt == 0 else
+                      "\n\n⚠ RETRY: your PREVIOUS attempt produced NO edit. You MUST emit at least one "
+                      "edit_file / create_file op THIS turn — do not only read/search. If the step "
+                      "genuinely needs no change, emit `done` and say why in the summary.")
             try:
-                _prod = await (_native_pass(_m) if _mode == "native" else _text_pass(_m, True))
+                _prod, _reason = await _json_pass(_JSON_MODEL, _nudge)
             except Exception as _ce:
-                warn(f"  coder link {_m} failed: {str(_ce)[:80]}")
-                _prod = {}
+                warn(f"  json coder attempt {_attempt + 1}/{_JSON_MAX_TRIES} raised: {str(_ce)[:80]}")
+                _prod, _reason = {}, "api-error"
             if _prod:
                 return _prod
-        return {}
+            if _reason == "finished":
+                # genuine force-done: the coder deliberately made no edit (step already satisfied) —
+                # ACCEPT it; do NOT retry and do NOT fall over.
+                return {}
+            if _reason not in _JSON_RETRY_REASONS:
+                break   # budget-exhausted / time-budget — out of room; stop cleanly, no cascade
+            warn(f"  [json:{_JSON_MODEL.split('/')[-1]}] step {step_num}: 0 edits (reason={_reason}) — "
+                 f"retry {_attempt + 1}/{_JSON_MAX_TRIES} SAME model with a make-the-edit nudge "
+                 f"(no weak-model fallover)")
+        return {}   # gpt-oss couldn't produce an edit after retries — fail the step CLEAN; never
+                    # downgrade to a corrupt weak-model patch (user 2026-06-11)
     # Non-native primary (rare) — text coder with its own fallback chain.
     return await _text_pass(IMPLEMENT_MODEL, False)
 
