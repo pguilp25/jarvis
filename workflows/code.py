@@ -9097,9 +9097,22 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         detailed_map=detailed_map, purpose_map=purpose_map,
         research_cache=research_cache,
         log_label="merging plans (final)",
-        max_rounds=6,   # bounded: improve+merge from given plans shouldn't need
-                        # many tool rounds; the substance fallback below catches
-                        # a merger that doesn't emit a structured plan.
+        # LET IT COOK (user 2026-06-11): the merge had max_rounds=6, which guillotined
+        # owl-alpha mid-stride on 395e5e20 — it had finished a correct DEEP-THINK analysis
+        # and was ONE lookup away from writing the strategy-file STEPs when round 6 cut it
+        # off, leaving a structureless body → 0B. A merger that lacks the full story can't
+        # write a good plan, so give it room to investigate (was 6 → 20, >3x). 20 is
+        # "effectively unlimited" for a real merge: synthesis from drafts that already
+        # explored converges well under ~15 rounds even when filling a few genuine gaps,
+        # and the loop terminates on its own far earlier via the duplicate-response break,
+        # the stall->commit guard, the empty-response break, or [PLAN DONE]. The cap is a
+        # TIME backstop, not a quality limit: the merge has NO wall-clock of its own (only
+        # the draft RACE is bounded at PLAN_RACE_MAX_S) and _implement_deadline shrinks the
+        # coder's budget 1:1 with merge time — so an unbounded merge eating the 2700s
+        # instance budget would STARVE the coder and itself cause a 0B (the very bug we are
+        # fixing). 20 rounds worst-case still leaves the coder ample time. The 2/3 "stop
+        # investigating" nudge now fires at ~R13.
+        max_rounds=20,
         stop_on_tool_block=True,
         cache_file_reads=True,
         read_only_role=True,
@@ -9219,7 +9232,18 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
             _fb = _actionable(_forced_raw or "")
             _fb_ok = (("=== PLAN ===" in _fb)
                       or bool(re.search(r"###\s*STEP\s*\d+", _fb, re.IGNORECASE)))
-            if _fb_ok and len(_fb) >= MIN_PLAN_CHARS and len(_fb) > len(_merger_body):
+            # STRUCTURE BEATS LENGTH (395e5e20 0B root cause): we only reach this
+            # forced-commit block when the original merge gave us NO usable plan —
+            # the entry gate above requires (no `=== PLAN ===`/`### STEP`) OR
+            # (actionable < MIN_PLAN_CHARS). So a structured forced-commit plan that
+            # clears the 400-char floor is STRICTLY better than what we have; accept it
+            # unconditionally. The old `len(_fb) > len(_merger_body)` guard wrongly
+            # REJECTED a correct 2777-char 11-STEP plan for being shorter than the
+            # original's 4305 chars of structureless DEEP-THINK ramble (2777 < 4305) →
+            # thin-salvage → RuntimeError → 0-byte patch. Length is the wrong axis: the
+            # step-parser needs STRUCTURE, which the ramble lacked by definition of
+            # having entered this block.
+            if _fb_ok and len(_fb) >= MIN_PLAN_CHARS:
                 warn(f"  Forced-commit merger produced a structured plan "
                      f"({len(_fb):,} chars) — using it.")
                 _wlog.phase_warn("merger forced-commit produced a structured plan",
@@ -9246,7 +9270,16 @@ async def phase_plan(task: str, context: str, complexity: int, project_root: str
         # that's still the merger's work, not a draft). If even that is unusable,
         # FAIL loudly rather than ship a degraded plan.
         from core.tool_call import _salvage_plan_from_think
-        _salv = _salvage_plan_from_think(best_plan) or _strip_think(best_plan)
+        # Take the FIRST candidate whose ACTIONABLE content clears the floor — not the
+        # first truthy one. `_salvage_plan_from_think` can return a thin-but-truthy
+        # extract that would `or`-short-circuit a richer `_strip_think(best_plan)` body
+        # right out of contention → needless RuntimeError/0B (the latent bug behind
+        # 395e5e20's RuntimeError on the forced-commit-exception path).
+        _salv = ""
+        for _cand in (_salvage_plan_from_think(best_plan), _strip_think(best_plan)):
+            if _cand and len(_actionable(_cand)) >= MIN_PLAN_CHARS:
+                _salv = _cand
+                break
         if len(_actionable(_salv)) >= MIN_PLAN_CHARS:
             warn(f"  Merger visible plan thin — recovered the merger's OWN reasoning "
                  f"({len(_salv):,} chars). (No draft fallback.)")

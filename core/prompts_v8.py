@@ -1307,17 +1307,23 @@ The intended rhythm:
      spotted is the expensive mistake. Changing course is cheapest the moment
      you first doubt the approach — take it then, not after you've committed.
 THE ONE FATAL MISTAKE: doing the whole plan inside native `<think>` and
-emitting a thin/empty visible plan. That plan is GONE — discarded, and the
-run falls back to a weaker draft. Think to orient, then EXIT and WRITE.
+emitting a thin/empty visible plan. That plan is GONE — discarded; you get
+ONE forced retry to commit it, and if that also comes back empty the instance
+FAILS (there is no draft to fall back on). Think to orient, then EXIT and WRITE.
 
-⚠ INVESTIGATION BUDGET — COMMIT, DON'T OVER-EXPLORE ⚠
-You MAY fire a few read tools ([REFS]/[CODE]/[SEMANTIC]/[DEPENDENCY]/[DEPENDSON],
-wrapped in [tool use] … [STOP][CONFIRM_STOP]) to verify ONE uncertain detail — but
-the three drafts already did the exploration. Your job is to SYNTHESIZE, not to
-re-investigate from scratch. HARD RULE: by your THIRD round, STOP reading and WRITE
-the `=== PLAN ===`, marking any still-open point in `## CONFIDENCE`. A committed
-plan with a noted gap is FAR better than spending every round investigating and
-emitting no plan — if you never write one, the run falls back to a weaker draft.
+⚠ INVESTIGATION BUDGET — GET THE FULL STORY, THEN COMMIT ⚠
+You MAY fire read tools ([REFS]/[CODE]/[SEMANTIC]/[DEPENDENCY]/[DEPENDSON],
+wrapped in [tool use] … [STOP][CONFIRM_STOP]) to close any GENUINE gap the drafts
+left — a file, symbol, or call-site they NAMED but never actually examined (a draft
+that lists "update strategy/__init__.py" without having read it is such a gap). Take
+the rounds you need: a plan written WITHOUT the full story is the expensive mistake,
+so do NOT rush to commit before you understand every file the change touches.
+But investigation is for gaps only — do NOT re-read what a draft already showed you,
+and NEVER re-request the SAME lookup twice (that's a wasted round, not progress; the
+runtime will cut a repeated-response loop short). The MOMENT you have the full
+picture, STOP reading and WRITE the `=== PLAN ===`, noting any still-open point in
+`## CONFIDENCE`. Investigate until ready, commit the instant you are — neither rush
+nor stall.
 
 Do all of this in ONE pass:
   1. PICK the most CORRECT baseline — the draft closest to a fix that actually
@@ -1365,8 +1371,10 @@ Do all of this in ONE pass:
 
 ═══ Judge AND improver — not a re-investigator ═══
 
-Decide the planners' disagreements from the inputs; use tools only to
-settle a disagreement you genuinely cannot resolve from the plans.
+Decide the planners' disagreements from the inputs; use tools to settle a
+disagreement you cannot resolve from the plans, OR to close a genuine
+evidence gap (a file/symbol a draft NAMED but never examined — per the
+investigation budget above).
 But DO fix the flaws you can see: a raw draft with a missing step, a
 wrong anchor, or an ungrounded claim is YOURS to correct now —
 nothing downstream will.
@@ -1437,8 +1445,8 @@ it now:
 
 ## Investigation discipline
 
-CORE's lookup rules apply (name the question; no manifest re-reads; the round-3
-budget above). Two for merging specifically:
+CORE's lookup rules apply (name the question; no manifest re-reads; the
+investigation budget above). Two for merging specifically:
 
     - Prefer REFS / DEPENDENCY / DEPENDSON / PURPOSE / SEMANTIC over `[CODE:]`.
     - Verify a claim ONLY if confirming it wrong would change your plan.
