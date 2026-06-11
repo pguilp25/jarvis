@@ -12767,7 +12767,7 @@ async def _implement_one_step(
             _p = {fp: file_contents[fp] for fp in _r.get("files_changed", [])}
             status(f"  [json:{_model.split('/')[-1]}] step {step_num}: {len(_p)} file(s), reason={_r.get('reason')}")
             _wlog.phase_event("json coder step", step=step_num, files=len(_p), reason=_r.get("reason"))
-            return _p
+            return _p, _r.get("reason")
         # EXACT coder chain (user 2026-06-11): gpt-oss-120b JSON-OPS PRIMARY -> qwen3-coder (text)
         #   -> owl-alpha (text) -> gemma-4 (text). First link that produces edits wins.
         # gpt-oss-120b runs in JSON-OPS TEXT mode (flat JSON-line ops): native structured tool-calling
@@ -12788,12 +12788,38 @@ async def _implement_one_step(
                             ("mistral/medium","native"),
                             ("openrouter/owl-alpha","text"), ("google/gemma-4-31b-it","text"),
                             ("nvidia/gpt-oss-nim","native")]
-        for _m, _mode in _CODER_CHAIN:
+        # RETRY JSON-OPS 3x ON A TRANSIENT STALL BEFORE ANY MODEL FALLOVER (user 2026-06-11).
+        # ckpt-258 audit (VERIFIED): a transient gpt-oss json stall on a step — api-error /
+        # "stream idle 90s" -> "stopped with ZERO edits", or read-budget — was DROPPING straight
+        # to qwen3-coder (chronically 429) then slow owl-alpha text protocol, so the critical step
+        # landed only import lines (referenced symbols never defined -> ImportError -> every
+        # fail_to_pass errors: 395e5e20, 8a5a63af), and a26 TIMED OUT mid-cascade (steps 3 & 5
+        # stalled -> qwen 429 -> owl-alpha, ran out of the 2700s). gpt-oss succeeds on the OTHER
+        # steps, so a transient stall must RETRY THE SAME strong coder, never fall over to weaker
+        # models. Only a genuine non-transient outcome (round/wall-clock budget exhausted, or a
+        # deliberate no-op) skips to the fallback chain.
+        _JSON_RETRY_REASONS = {"api-error", "read-budget", "no-ops"}
+        _chain = list(_CODER_CHAIN)
+        if _chain and _chain[0][1] == "json":
+            _jm = _chain[0][0]
+            for _attempt in range(3):
+                _seed_view_state()   # fresh view-state per attempt (bughunt #14)
+                try:
+                    _prod, _reason = await _json_pass(_jm)
+                except Exception as _ce:
+                    warn(f"  json coder attempt {_attempt + 1}/3 raised: {str(_ce)[:80]}")
+                    _prod, _reason = {}, "api-error"
+                if _prod:
+                    return _prod
+                if _reason not in _JSON_RETRY_REASONS:
+                    break   # genuine no-op / budget-exhausted / time-budget — don't spin the retry
+                warn(f"  [json:{_jm.split('/')[-1]}] step {step_num}: 0 edits (reason={_reason}) — "
+                     f"retrying the SAME json coder {_attempt + 1}/3 (transient stall, no fallover)")
+            _chain = [c for c in _chain if c[1] != "json"]   # json exhausted -> text/native fallbacks
+        for _m, _mode in _chain:
             _seed_view_state()   # fresh view-state per attempt (bughunt #14)
             try:
-                _prod = await (_json_pass(_m) if _mode == "json"
-                               else _native_pass(_m) if _mode == "native"
-                               else _text_pass(_m, True))
+                _prod = await (_native_pass(_m) if _mode == "native" else _text_pass(_m, True))
             except Exception as _ce:
                 warn(f"  coder link {_m} failed: {str(_ce)[:80]}")
                 _prod = {}
