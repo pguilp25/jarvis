@@ -12722,8 +12722,30 @@ async def _implement_one_step(
         # first-call 400 → timeout. ckpt-179 removed injection → the weak coder couldn't build
         # correct `old` from a view it didn't hold → reject thrash. SO: inject in full UP TO a budget;
         # the rest go read-on-demand (growing def-index view). Best of both.
+        #
+        # ckpt-269: FIX-PASS REFRAMING for the json-ops coder. error_feedback is set ONLY on a
+        # route-back/self-verify fix (never the first pass). The text path (_text_pass) already
+        # reframes the task as "your patch FAILED when RUN — fix it"; the PRIMARY json-ops path did
+        # NOT — it handed the plain "Implement ONLY this step" task with the repro buried in
+        # error_feedback, so the coder read the step as already-done and finished with ZERO edits
+        # (the f91ace96 self-verify miss). Make the json-ops fix pass a DETECT→FIND-SOLUTION task:
+        # the failing reproduction is the PRIMARY instruction, and finishing without an edit is
+        # explicitly disallowed. (error_feedback still also lands in the system block via the builder;
+        # here we only reframe the user-request task so the coder ACTS instead of no-op-finishing.)
+        _nat_step_instructions = step_instructions
+        if error_feedback:
+            _nat_step_instructions = (
+                "⚠ THIS IS A FIX PASS — not a fresh step. A reproduction built from the issue was "
+                "RUN against your current patch (already applied to the code you see) and it FAILED "
+                "(details under 'SELF-VERIFY FAILED' / 'REVIEWER' below). DETECT the root cause from "
+                "that error, FIND the fix, and EDIT the code so the reproduction would pass. You MUST "
+                "make a corrective edit — do NOT finish with zero edits, and do NOT re-issue an edit "
+                "that already applied. Investigate first (read the failing symbol / its definition "
+                "site), then make the focused fix.\n\n"
+                + step_instructions
+            )
         _nat_system, _nat_user, _injected, _overflow = build_implement_native_prompt(
-            step_instructions, iface_block, _nat_targets,
+            _nat_step_instructions, iface_block, _nat_targets,
             to_create=_to_create, error_feedback=error_feedback)
         _ctx = {"file_contents": file_contents, "sandbox": sandbox,
                 "project_root": project_root,
