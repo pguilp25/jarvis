@@ -12796,13 +12796,19 @@ async def _implement_one_step(
             return {}
         _JSON_MODEL = "nvidia/gpt-oss-120b"
         _JSON_MAX_TRIES = 4
-        _JSON_RETRY_REASONS = {"api-error", "read-budget", "no-ops"}   # transient/empty → retry SAME
+        # transient/empty/give-up-after-reject → retry the SAME model (fresh re-seeded view).
+        # "all-edits-rejected" (steady-pass fix 2026-06-11): the coder doned with 0 landed edits
+        # because its edits were all rejected on stale anchors — re-seeding the view + retrying lets
+        # it re-anchor (this killed the ckpt-261 0-byte bleed across 7 steps).
+        _JSON_RETRY_REASONS = {"api-error", "read-budget", "no-ops", "all-edits-rejected", "stuck-repeating"}
         for _attempt in range(_JSON_MAX_TRIES):
             _seed_view_state()   # fresh view-state per attempt (bughunt #14)
             _nudge = ("" if _attempt == 0 else
-                      "\n\n⚠ RETRY: your PREVIOUS attempt produced NO edit. You MUST emit at least one "
-                      "edit_file / create_file op THIS turn — do not only read/search. If the step "
-                      "genuinely needs no change, emit `done` and say why in the summary.")
+                      "\n\n⚠ RETRY: your previous attempt landed NO edit (your edit was likely REJECTED "
+                      "for a stale `old` anchor). COPY `old` VERBATIM from the current view line — with "
+                      "its `LINENO ⇥INDENT|` prefix — before editing; emit at least one edit_file / "
+                      "create_file op THIS turn, do not only read. If the step genuinely needs no "
+                      "change, emit `done` and say why in the summary.")
             try:
                 _prod, _reason = await _json_pass(_JSON_MODEL, _nudge)
             except Exception as _ce:

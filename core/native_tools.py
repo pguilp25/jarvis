@@ -4164,13 +4164,22 @@ async def call_with_json_ops(model_id: str, system: str, user_content: str,
         if want_done:
             # NO-EDIT done: the coder asked to finish but nothing has landed (no edit
             # made, or its edit got rejected this same round → files_changed empty).
-            # An empty patch is not "done"; nudge ONCE to actually make the change,
-            # then accept a second done (fail-soft → chain falls over). (P0-3/P1-1.)
+            # An empty patch is not "done"; nudge ONCE to actually make the change.
             if not ctx.get("files_changed") and not _no_edit_nudged:
                 _no_edit_nudged = True
                 messages.append({"role": "user", "content": _JSON_OPS_NO_EDIT})
                 status(f"  [json:{short}] round {rnd}: done with ZERO edits — nudging to edit first")
                 continue
+            # GIVE-UP-AFTER-REJECT ≠ genuine no-op (steady-pass fix, 2026-06-11): a done with 0
+            # landed edits AND edits were ATTEMPTED-and-ALL-REJECTED this step (_total_rejects>0)
+            # is NOT "the step needs no change" — it's the coder bailing on a stale-anchor reject.
+            # Accepting it as reason="finished" shipped 0-byte / dropped-step patches (the ckpt-261
+            # 0B bleed: 7 steps across the suite). Signal a DISTINCT reason so the caller's
+            # same-model retry fires (with a fresh re-seeded view to re-anchor). A genuine no-op
+            # (no edit ever attempted, _total_rejects==0) still finishes cleanly.
+            if not ctx.get("files_changed") and _total_rejects > 0:
+                reason = "all-edits-rejected"
+                break   # done stays False → caller retries (reason in _JSON_RETRY_REASONS)
             if (ctx.get("files_changed") and not _verify_nudged
                     and not ctx.get("_run_code_verified") and not ctx.get("_run_code_env_blocked")):
                 _verify_nudged = True
