@@ -13176,17 +13176,38 @@ async def _reimplement_step(
     *, step_num: "int | None", error_feedback: str, task: str, plan: str,
     context: str, sandbox: Sandbox, project_root: str,
     detailed_map: str, purpose_map: str, research_cache: dict | None,
+    whole_patch: bool = False,
 ) -> None:
     """Re-run ONE plan step's coder after the reviewer routed a runtime failure
     back to it. The coder re-opens the step with the CURRENT (post-edit) file
     state in view — i.e. its own diff — plus the reviewer's message, and fixes
     in place. step_num=None (or no match) falls back to the last step / changed
-    files. Defensive: never raises into the orchestration loop."""
+    files. Defensive: never raises into the orchestration loop.
+
+    whole_patch=True (ckpt-271, the self-verify fix): the reproduction tests the
+    WHOLE patch and the bug can live in ANY changed file — including a CROSS-FILE
+    one (f327: dataclasses.py + _collection_finder.py; a26: urls.py + uri.py). The
+    old single-step routing loaded only the LAST step's file, so the fixer was
+    physically BLIND to the file the failure lived in → it could never fix a
+    cross-file break. In whole_patch mode we load ALL changed files so the fixer
+    can see and edit wherever the repro failure actually is."""
     try:
         changed = {**sandbox.modified_files, **sandbox.new_files}
         impl_steps = _extract_impl_steps(plan)
         target = None
-        if impl_steps:
+        if whole_patch:
+            # self-verify fix: hand the coder the ENTIRE patch (all changed files),
+            # not one step's slice — the repro failure can be anywhere.
+            target = {
+                "num": step_num or 1, "name": "fix the failing reproduction",
+                "depends_on": [], "files": list(changed.keys()),
+                "details": ("A reproduction built from the issue is failing against the "
+                            "current patch. The bug may be in ANY of the changed files "
+                            "below — find where the failure actually originates and fix "
+                            "it. Do not restrict yourself to one file."),
+                "done": False, "produced_files": {},
+            }
+        elif impl_steps:
             if step_num is not None:
                 target = next((s for s in impl_steps if s.get("num") == step_num), None)
             if target is None:
@@ -13994,6 +14015,7 @@ async def code_agent(state: AgentState) -> AgentState:
                         task=task, plan=plan, context=context, sandbox=sandbox,
                         project_root=project_root, detailed_map=detailed_map,
                         purpose_map=purpose_map, research_cache=research_cache,
+                        whole_patch=True,   # ckpt-271: fix can be in ANY changed file
                     )
             except Exception as _sv_err:
                 # An unexpected raise mid-loop must NOT leave a half-fixed (possibly
