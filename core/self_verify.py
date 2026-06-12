@@ -127,13 +127,15 @@ def _classify(res: dict, sandbox_dir: str, backend: str) -> RunResult:
     out = res.get("output", "") or ""
     code = res.get("exit_code", -1)
     if code == 0:
-        # PASS requires the mandated success sentinel (prompt: end success with
-        # print("REPRO_OK")). exit 0 WITHOUT it = a vacuous / short-circuited repro
-        # → INCONCLUSIVE, not verified. This is the guard that stops a spurious
-        # green from shipping a worse patch on the post-fix route (adversarial
-        # review ckpt-266). An over-conservative miss only ever falls back to
-        # deliver-as-is / revert — never a false PASS.
-        if "REPRO_OK" in out:
+        # PASS requires the mandated success sentinel REPRO_OK as the LAST non-empty
+        # line of stdout (ckpt-272: a substring check let a repro print REPRO_OK early
+        # and then swallow its real assertion in a try/except → exit 0 + sentinel-present
+        # → FALSE PASS shipping a broken patch). Requiring it to be the final line forces
+        # it to come AFTER all assertions. An over-conservative miss (sentinel not last,
+        # e.g. a trailing warning) only falls back to deliver-as-is / revert — never a
+        # false PASS.
+        _last = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
+        if _last.strip() == "REPRO_OK":
             return RunResult(PASS, exit_code=0, output=out, backend=backend)
         return RunResult(ERROR, exit_code=0, output=out, backend=backend)
     missing = _missing_module(out)
@@ -239,17 +241,19 @@ def run_repro(repro_code: str, sandbox_dir: str,
 
 # ── repro authoring (one-shot completion) ────────────────────────────────────
 
-# Non-anchored: grab the FIRST fenced block even when the model wraps it in prose
-# (gpt-oss often adds an explanatory line despite the prompt). Anchoring to the
-# whole string let prose leak into the "repro" → SyntaxError → spurious FAIL
-# (adversarial review ckpt-266).
-_FENCE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)\n```", re.S)
+# Prefer a PYTHON-tagged fence; fall back to the first fence of any language only if
+# there's no python one (ckpt-272: the old `(?:python|py)?` optional tag grabbed the
+# FIRST fence of ANY language — so a leading ```bash setup block or ```text note stole
+# the match and the real python repro was dropped → SyntaxError → spurious FAIL on a
+# possibly-correct patch). gpt-oss often emits a setup/prose fence before the repro.
+_FENCE_PY = re.compile(r"```(?:python|py)\s*\n(.*?)\n```", re.S)
+_FENCE_ANY = re.compile(r"```[^\n]*\n(.*?)\n```", re.S)
 
 
 def _strip_fence(text: str) -> str:
     if not text:
         return ""
-    m = _FENCE_RE.search(text)
+    m = _FENCE_PY.search(text) or _FENCE_ANY.search(text)
     if m:
         return m.group(1).strip()
     # tolerate an opening ```python with no closing fence
