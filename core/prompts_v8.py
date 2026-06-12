@@ -2569,25 +2569,45 @@ CHANGED FILES:
 
 SELFVERIFY_REPRO_PROMPT_V8 = """You write ONE tiny REPRODUCTION SCRIPT that checks whether a code change actually satisfies an issue.
 
-You are given the ISSUE, the DIFF that was just applied, and the changed files. Output a single self-contained Python script that:
+You are given the ISSUE, the DIFF that was just applied, and the changed files. Output a single self-contained Python script.
 
-- Exercises the EXACT behaviour the ISSUE describes, using the ISSUE'S OWN example values (the names, inputs, and expected results it states). Invent nothing the issue doesn't imply.
-- ASSERTS the CORRECT (fixed / newly-added) behaviour:
-    • BUG fix → drive the path the issue calls broken and assert the result is now right.
-    • ADDITION (new function / parameter / option / flag) → call the NEW thing and assert it is accepted and does what the issue asks (e.g. pass the new kwarg and assert it took effect).
+━━ HOW TO THINK — you are an INDEPENDENT, ADVERSARIAL check, not the patch's cheerleader ━━
+- Your script's JOB is to FAIL when the fix is wrong. A repro written to confirm the patch is worthless — write it as if you do NOT trust the fix and are trying to catch it.
+- Derive the test from the ISSUE'S EXTERNAL CONTRACT — the inputs a real caller passes and the result the issue promises. NEVER shape the test around the patch's internals. A test coupled to the implementation cannot detect a wrong implementation. The DIFF tells you which symbols exist and their real signatures — NEVER which internal state to arrange. The instant you set something up *because the patch reads it*, the test stops being an independent check.
+- GROUND IN THE REAL CONTRACT before you call anything: match every symbol's ACTUAL signature, attributes, and return shape as shown in the diff and changed files. Do NOT invent a parameter, keyword, attribute, or return type — a guessed kwarg throws a TypeError that looks like a failure but tests nothing. If a needed signature isn't visible, call it the way the issue's own example does; never guess.
+
+━━ HOW TO BUILD IT ━━
+- Test at the level of the CHANGED SYMBOL'S OWN public API: call the changed function/class directly, as its direct caller would, using the project's real modules (`from pkg.mod import thing`). Do NOT stand up the surrounding framework (HTTP pipeline, full app, request router) around it — driving through the framework lets it silently populate internals (request method, session, ctx) that mask whether the fix itself is correct.
+- ⚠ THE KEY RULE — establish state ONLY through the public call; read this twice:
+    • You MAY arrange inputs by PASSING them to the call (an argument, the documented API, the issue's own example values verbatim), OR by setting state the ISSUE ITSELF says the caller sets (e.g. an env var / config value the issue's scenario names). Inputs a real caller CONTROLS → pass them in.
+    • You may NOT ASSIGN INTO framework/object internals from outside — `ctx.method = ...`, `obj._private = ...`, monkeypatching a symbol the diff touches — to reach the fixed code path. The test is not "does the issue mention this concept" (an issue about POST mentions "POST") — it is "would a real caller of the changed symbol ASSIGN this, or does the framework set it for them?" Internals a real caller does NOT touch → never assign them from outside.
+    • If the fixed behaviour is UNREACHABLE without such an assignment, that is evidence the FIX is gating on a precondition its real caller never provides. Emit the script WITHOUT that assignment and let it FAIL — its failure is the CORRECT verdict (it routes a fix to the coder). Do NOT add the state, and do NOT fall back to NO_REPRO: a fix that's unreachable without rigging is a FAILING repro, not a missing one.
+    • Concretely: if the patch reads `web.ctx.method`, do NOT write `web.ctx.method = 'POST'` yourself — no real caller of the changed function performs that assignment, and neither will the project's test. If the fix needs it, the fix is wrong.
+- LEGITIMATE setup IS allowed and expected: importing the real module, constructing the object the call needs, creating a temp input file, passing the config/inputs the issue names. The line is HOW the state is established (pass it in vs assign an internal from outside), not whether the issue mentions it.
+- ASSERT THE OBSERVABLE RESULT the issue describes — the specific return value, output, or effect — not an internal structure you assumed. Make the assertion DISCRIMINATING: it must pass on a correct fix AND fail on the UNFIXED code for the bug's real reason. A loose check (`is not None`, substring-present, "didn't crash") that a half-right or unfixed impl would also pass proves nothing — assert the exact expected value.
+- Match the change KIND:
+    • BUG fix → drive the path the issue calls broken, assert the result is now right.
+    • ADDITION (new function / parameter / option / flag) → call the NEW thing, assert it is accepted AND does what the issue asks.
     • NEW symbol or file → import it and call it; a missing import is a real failure.
-- Exits 0 when the behaviour is correct and FAILS LOUDLY (assert / raise / uncaught traceback, non-zero exit) when it is not. Print `REPRO_OK` as the VERY LAST line, reached ONLY after every assertion has passed — nothing must print after it, and it must NOT be printed early or from inside an `except`. (The harness counts the run as verified only when `REPRO_OK` is the final output line.)
-- Imports the project's REAL modules (e.g. `from pkg.mod import thing`). Use a mock/stub ONLY for an unrelated external the issue doesn't care about (network, a live DB) — NEVER to fake the behaviour under test.
-- FAITHFULNESS (critical — a repro that props up the code under test is worse than none): drive the REAL public entry point with ONLY the inputs the issue describes. Do NOT fabricate or hand-set framework/request internals, globals, or object attributes that the real caller does NOT set, just because the patch happens to read them — if the patch depends on something the real environment wouldn't provide (e.g. it reads `web.ctx.method` but the real request context has no `.method`), your repro must let it FAIL, not paper over it by setting that attribute. Do NOT wrap the check in a broad try/except that swallows the failure. The repro must report success ONLY when the real behaviour is genuinely correct.
-- Is MINIMAL and finishes in a few seconds. Plain python only — no pytest, no test framework, no network, no writes outside /tmp.
+- Mock/stub ONLY an unrelated external the issue doesn't care about (network, a live DB) — NEVER to fake the behaviour under test, and never stub anything the diff touches or reads. No broad try/except that swallows the failure.
+- Print the success sentinel `REPRO_OK` as the VERY LAST line, reached ONLY after every assertion has passed — nothing prints after it, never early, never from inside an `except`. (The harness counts the run as verified only when `REPRO_OK` is the final output line.)
+- MINIMAL, finishes in a few seconds. Plain runnable script only — no pytest or test framework, no network, no writes outside /tmp.
 
-HARD RULE — NO LEAKAGE: build the check from the ISSUE TEXT alone (its described inputs and expected results). Do NOT reproduce, import, or guess the project's hidden test suite or its test files. The DIFF is shown only so you know which symbols to import — assert the ISSUE'S behaviour, not the diff: a check that would pass even against the UNFIXED code is worthless. Make it genuinely fail when the fix is absent.
+━━ HARD RULE — NO LEAKAGE ━━
+Build the check from the ISSUE TEXT alone (its described inputs and expected results). Do NOT reproduce, import, or guess the project's hidden test suite or its test files. Assert the ISSUE'S behaviour, not the diff.
+
+━━ CHECK BEFORE YOU EMIT — if any answer is "no", fix the script ━━
+1. Would this FAIL on the ORIGINAL (unpatched) code, for the bug's real reason?
+2. Did I establish state ONLY by passing inputs to the call (plus inputs the issue itself names) — and NEVER by assigning into framework/object internals to reach the fix?
+3. Does every call match the symbol's REAL signature/attributes (no invented args/kwargs)?
+4. Do I assert the issue's SPECIFIC expected value (not just "didn't crash" / substring / not-None)?
+5. Is `REPRO_OK` the VERY LAST line, reached only after all asserts pass (never early, never from `except`)?
 
 If the issue gives nothing concrete enough to drive in a standalone script (no inputs, no observable result), output EXACTLY one line:
 NO_REPRO: <one-line reason>
-Do not invent a vacuous check that would pass regardless.
+NO_REPRO is ONLY for an issue with no concrete inputs/outputs at all — NEVER because the fix seems unreachable without internal state (that is a failing repro, not a non-repro). Do not invent a vacuous check that would pass regardless.
 
-Output ONLY the Python script — no prose, no markdown fences — or the single NO_REPRO line."""
+Output ONLY the script — no prose, no markdown fences — or the single NO_REPRO line."""
 
 
 # ════════════════════════════════════════════════════════════════════════
