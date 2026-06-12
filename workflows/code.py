@@ -14007,22 +14007,6 @@ async def code_agent(state: AgentState) -> AgentState:
                              f"repro still failing")
                         _wlog.phase_event("selfverify_budget_exhausted")
                         break
-                    # TIME GUARD (ckpt-272): do NOT start a fix that can't finish before
-                    # the soft deadline. The coder stops cleanly at _implement_deadline(),
-                    # but a fix that runs into the hard 45min wait_for kill would be cut
-                    # mid-edit — bypassing the post-loop revert and shipping a HALF-EDIT
-                    # (worse than the coder's original). Only route a fix with enough
-                    # runway; otherwise stop (revert below if a fix already mutated it).
-                    import time as _t_sv
-                    _sv_dl = _implement_deadline()
-                    _sv_left = (_sv_dl - _t_sv.time()) if _sv_dl else 1e9
-                    if _sv_left < 180:
-                        warn(f"SELF-VERIFY: ~{int(_sv_left)}s to deadline — too little for a "
-                             f"fix cycle; stopping before the hard timeout can cut a fix "
-                             f"mid-edit (revert applies if a fix already ran).")
-                        _wlog.phase_event("selfverify_fix_skipped_low_budget",
-                                          left=int(_sv_left))
-                        break
                     _sv_routed = True
                     status(f"↩ SELF-VERIFY → fix (cycle {_cycle + 1}): make the repro pass")
                     _wlog.phase_event("selfverify_route_fix", cycle=_cycle + 1)
