@@ -13286,11 +13286,15 @@ async def phase_selfverify_review(
         return RouteDecision(kind="step", step_num=None,
                              message=fail_feedback(repro, result, None)), sandbox
     # ENV_BLOCKED / ERROR — could not truly run it. Do NOT claim verified, do NOT
-    # invent a bug. Deliver as-is (no worse than review-off for this instance).
+    # invent a bug. Signal "unverified" (NOT "approved"): the caller delivers the
+    # patch as-is ONLY if no fix has mutated it yet; if a fix WAS routed and the
+    # re-run then came back unrunnable, the caller REVERTS to the coder's original
+    # (ckpt-270 bug fix: a later-cycle env-block was being mistaken for convergence
+    # and shipped the unverified fix-pass mutation — a can-ship-worse hole).
     _miss = f", missing {result.missing_module}" if result.missing_module else ""
-    status(f"  SELF-VERIFY: could not run repro ({result.status}{_miss}) — delivering as-is (unverified)")
+    status(f"  SELF-VERIFY: could not run repro ({result.status}{_miss}) — unverified")
     _wlog.phase_event("selfverify_unverified", status=result.status)
-    return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+    return RouteDecision(kind="unverified", step_num=None, message=""), sandbox
 
 
 async def phase_review(
@@ -13946,8 +13950,17 @@ async def code_agent(state: AgentState) -> AgentState:
                         context, research_cache=research_cache,
                     )
                     if route.kind in ("approved", "none"):
+                        # real PASS — the repro went green. Keep the (fixed) patch.
                         _sv_converged = True
                         break
+                    if route.kind == "unverified":
+                        # ckpt-270: env-blocked / inconclusive re-run. We have NO proof
+                        # the patch is good. If a fix already MUTATED it, the post-loop
+                        # revert (below) restores the coder's original — we never ship an
+                        # unverified mutation. If no fix was routed, the patch IS the
+                        # original, so delivering as-is is correct. Either way: stop.
+                        break
+                    # route.kind == "step" — the repro FAILED; route a fix (if budget).
                     if _cycle >= _SV_MAX_CYCLES:
                         warn(f"SELF-VERIFY fix budget ({_SV_MAX_CYCLES}) exhausted — "
                              f"repro still failing")
