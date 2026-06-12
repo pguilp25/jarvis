@@ -13285,10 +13285,10 @@ async def phase_selfverify_review(
     _tp = os.environ.get("JARVIS_SELFVERIFY_TRACE")
     if _tp:
         try:
-            import re as _re2
+            import re as _re2, json as _json2
             _m = _re2.search(r"instance_[A-Za-z0-9_.\-]+", sb_dir or "")
             with open(_tp, "a") as _tf:
-                _tf.write(json.dumps({
+                _tf.write(_json2.dumps({
                     "inst": _m.group(0) if _m else "?", "ev": "repro_run",
                     "status": result.status, "backend": result.backend,
                     "out": (result.output or "")[:1200],
