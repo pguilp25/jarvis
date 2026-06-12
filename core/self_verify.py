@@ -32,10 +32,15 @@ can be shimmed into it). Different surface, both holes closed.
 from __future__ import annotations
 
 import base64
+import io
 import os
 import re
+import shutil
 import site
+import subprocess
 import sys
+import tarfile
+import tempfile
 
 from core.safe_exec import run_sandboxed
 
@@ -294,6 +299,77 @@ async def author_repro(task: str, diff: str, changed_files_text: str,
     if first.strip().upper().startswith("NO_REPRO"):
         return None
     return code
+
+
+def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = "",
+                          *, pull_if_missing: bool = True):
+    """Phase-2 backend (ckpt-267): run the repro INSIDE the instance's real image
+    (jefzda/sweap-images:<dockerhub_tag>), which has the project's true 3rd-party
+    deps installed — so a repro for a dep-heavy instance (web.py, ansible, …) can
+    actually execute, the case the local/host backends can't cover on a box that
+    never pip-installed the instance.
+
+    Returns callable(repro_code, timeout) -> RunResult, matching run_repro's
+    container_runner hook. It overlays the coder's edited files onto /app (the
+    image's repo root, per the eval harness) and runs the repro with the repo on
+    PYTHONPATH. --network none (no leakage / no escape). FAIL-SAFE: any docker/
+    image/timeout problem returns ERROR or ENV_BLOCKED, so the caller delivers the
+    coder's patch as-is — the container backend can only help, never regress."""
+    def _run(repro_code: str, timeout: int) -> "RunResult":
+        if not image or not shutil.which("docker"):
+            return RunResult(ERROR, output="docker/image unavailable", backend="container")
+        try:
+            insp = subprocess.run(["docker", "image", "inspect", image],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=30)
+            if insp.returncode != 0:
+                if not pull_if_missing:
+                    return RunResult(ENV_BLOCKED, output=f"image not local: {image}",
+                                     backend="container")
+                pull = subprocess.run(["docker", "pull", image],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      timeout=900)
+                if pull.returncode != 0:
+                    return RunResult(ENV_BLOCKED, output=f"image unpullable: {image}",
+                                     backend="container")
+        except Exception as e:
+            return RunResult(ERROR, output=f"docker inspect/pull error: {e}",
+                             backend="container")
+
+        ws = tempfile.mkdtemp(prefix="sv_ctr_")
+        try:
+            # tar the edited files at their repo-relative paths → overlaid onto /app
+            with tarfile.open(os.path.join(ws, "edits.tar"), "w") as tf:
+                for rel, content in (changed_files or {}).items():
+                    rel = str(rel).lstrip("/")
+                    if not rel or ".." in rel.split("/"):
+                        continue   # never write outside the repo root
+                    data = (content or "").encode("utf-8")
+                    ti = tarfile.TarInfo(name=rel)
+                    ti.size = len(data)
+                    tf.addfile(ti, io.BytesIO(data))
+            with open(os.path.join(ws, "repro.py"), "w", encoding="utf-8") as f:
+                f.write(repro_code)
+            inner = ("cd /app && tar xf /ws/edits.tar -C /app && "
+                     "PYTHONPATH=/app:/app/src:/app/lib "
+                     f"timeout {int(timeout)} python -B /ws/repro.py")
+            res = subprocess.run(
+                ["docker", "run", "--rm", "--network", "none",
+                 "-v", f"{ws}:/ws:ro", image, "bash", "-c", inner],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                errors="replace", timeout=int(timeout) + 90)
+            d = {"blocked": False, "timed_out": False,
+                 "exit_code": res.returncode, "output": res.stdout or ""}
+            # _is_repo_module checks the host edited tree (mirrors /app's layout) so a
+            # missing REPO module the coder failed to create still classifies as FAIL.
+            return _classify(d, sandbox_dir, "container")
+        except subprocess.TimeoutExpired:
+            return RunResult(ERROR, output="container run timed out", backend="container")
+        except Exception as e:
+            return RunResult(ERROR, output=f"container run error: {e}", backend="container")
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+    return _run
 
 
 def fail_feedback(repro: str, result: "RunResult", step_num: "int | None") -> str:

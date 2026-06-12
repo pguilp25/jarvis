@@ -13211,7 +13211,9 @@ async def phase_selfverify_review(
     reverts if the fix loop doesn't turn the repro green, so this can only HELP or
     be NEUTRAL, never ship a worse patch than the coder produced."""
     import asyncio as _asyncio
-    from core.self_verify import author_repro, run_repro, fail_feedback, PASS, FAIL
+    import functools as _functools
+    from core.self_verify import (author_repro, run_repro, fail_feedback,
+                                  make_container_runner, PASS, FAIL)
     from core.review_verify import RouteDecision
 
     step("═══ Phase 3.5: SELF-VERIFY REVIEW (repro → run → route) ═══")
@@ -13241,9 +13243,16 @@ async def phase_selfverify_review(
         return RouteDecision(kind="approved", step_num=None, message=""), sandbox
 
     sb_dir = str(getattr(sandbox, "sandbox_dir", "") or project_root)
-    # run_repro is blocking (subprocess) — keep the event loop free for parallel instances.
+    # Phase-2 backend: if this instance has a registered container image, allow the
+    # repro to escalate into the instance's real-deps image (run_repro tries local
+    # stdlib → host → this container). No image (e.g. interactive use) → local/host only.
+    _image = getattr(sandbox, "_instance_image", None)
+    _runner = (make_container_runner(_image, {**sandbox.modified_files, **sandbox.new_files}, sb_dir)
+               if _image else None)
+    # run_repro is blocking (subprocess/docker) — keep the event loop free for parallel instances.
     result = await _asyncio.get_event_loop().run_in_executor(
-        None, run_repro, repro, sb_dir, project_root)
+        None, _functools.partial(run_repro, repro, sb_dir, project_root,
+                                 container_runner=_runner))
     _wlog.phase_event("selfverify_run", status=result.status,
                       backend=result.backend, missing=result.missing_module)
 
@@ -13879,6 +13888,13 @@ async def code_agent(state: AgentState) -> AgentState:
             task, plan, context, sandbox, project_root, files_to_modify, detailed_map,
             purpose_map=purpose_map, research_cache=research_cache,
         )
+        # Register the instance's real-deps image (set by swe_bench from dockerhub_tag)
+        # so the self-verify review can escalate a dep-heavy repro into it (ckpt-267).
+        # Absent under interactive/main.py use → review stays local/host (still safe).
+        try:
+            sandbox._instance_image = state.get("instance_image")
+        except Exception:
+            pass
 
         # ── Phase 3.5: SELF-VERIFY REVIEW (ckpt-266) ──
         # Re-enabled with a RUN-THE-REPRO design that replaces the 2026-05-28 static

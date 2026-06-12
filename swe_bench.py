@@ -432,6 +432,12 @@ async def run_one_instance(
             }
             state["forced_complexity"] = 7
             state["project_root"] = str(inst_dir)
+            # ckpt-267: hand the self-verify review the instance's real-deps image so a
+            # dep-heavy repro can run in it (jefzda/sweap-images:<dockerhub_tag>). Only
+            # used when JARVIS_ENABLE_REVIEW=1 and the local/host backends are env-blocked.
+            _dht = instance.get("dockerhub_tag")
+            if _dht:
+                state["instance_image"] = f"jefzda/sweap-images:{_dht}"
 
             # A2 (ckpt-205): publish an ABSOLUTE wall-clock deadline so the coder stops CLEANLY
             # ~5min before this hard wait_for kill — flushing whatever edits landed instead of
