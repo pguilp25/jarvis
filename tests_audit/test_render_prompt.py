@@ -16,7 +16,7 @@ def test_assembled_system_is_live_prompt_plus_indent_block():
     # the JSON-OPS protocol override. The IMPLEMENT prompt is present but with batch() neutralised
     # for json-ops, so assert its distinctive opening rather than the raw constant verbatim.
     assert IMPLEMENT_NATIVE_PROMPT[:80] in art["system"]          # live coder prompt, opening intact
-    assert "JSON-OPS has NO batch tool" in art["system"]           # batch() neutralised for json-ops
+    assert "no batch tool in JSON-OPS" in art["system"]           # batch() neutralised for json-ops
     assert _INDENT_FORMAT_BLOCK in art["system"]
     assert art["tools"] == []   # json-ops PRIMARY coder is TEXT mode — no tools array sent
 
@@ -42,7 +42,7 @@ def test_batch_neutralisation_does_not_corrupt_file_content():
     art = assemble("STEP: edit it", "(none)", {"a/q.py": src})
     assert "async with batch() as b" in art["system"]   # file content NOT rewritten
     assert "b.add(batch(calls))" in art["system"]        # file content NOT rewritten
-    assert "JSON-OPS has NO batch tool" in art["system"]  # but the IMPLEMENT prompt's own CTA IS neutralised
+    assert "no batch tool in JSON-OPS" in art["system"]  # but the IMPLEMENT prompt's own CTA IS neutralised
 
 
 def test_small_files_inject_huge_file_overflows():

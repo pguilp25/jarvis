@@ -3936,19 +3936,9 @@ def build_json_ops_system(system: str, user_content: str) -> str:
     → the coder copies a corrupted `old` → reject-thrash. (Caught in adversarial review, 2026-06-11.)"""
     from core.prompts_v8 import IMPLEMENT_NATIVE_PROMPT
     _base = finalize_coder_system(system or "")
-    _neutral = IMPLEMENT_NATIVE_PROMPT
-    # Replace the WHOLE batch() tool bullet (not just the token) — a token-only swap left a residue
-    # reading "...NOT for edits/keep/run_code/finish", which CONTRADICTS the JSON-OPS requirement to
-    # put all of a file's edit_file hunks in ONE round (adversarial review, 2026-06-11).
-    _i = _neutral.find("  - batch(calls) — ")
-    if _i != -1:
-        _j = _neutral.find("\n", _neutral.find("NOT for edits/keep/run_code/finish.", _i))
-        if _j != -1:
-            _neutral = _neutral[:_i] + (
-                "  - (JSON-OPS has NO batch tool — emitting several flat ops in ONE round IS the batch: "
-                "gather the step's reads together in your opening round, and put ALL of a file's "
-                "edit_file hunks in ONE round.)") + _neutral[_j:]
-    _neutral = _neutral.replace("with batch()", "by emitting several ops in one round")
+    _neutral = (IMPLEMENT_NATIVE_PROMPT
+                .replace("batch(calls)", "(no batch tool in JSON-OPS — emit several ops in one round)")
+                .replace("with batch()", "by emitting several ops in one round"))
     _base = _base.replace(IMPLEMENT_NATIVE_PROMPT, _neutral, 1)
     return _base + _JSON_OPS_PROMPT + _fence_user_request(user_content)
 
