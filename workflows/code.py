@@ -13194,6 +13194,74 @@ async def _reimplement_step(
         warn(f"  re-implement step error (continuing): {type(e).__name__}: {e}")
 
 
+async def phase_selfverify_review(
+    task, plan, sandbox, project_root, detailed_map="", purpose_map="",
+    context="", research_cache=None,
+):
+    """SELF-VERIFY review (ckpt-266): author a runnable reproduction FROM THE ISSUE,
+    run it against the coder's edited tree (backend auto-detected — local stdlib
+    sandbox / host deps / instance container), and route a fix only on a GENUINE
+    failure. Returns (RouteDecision, sandbox) — same shape as phase_review, so the
+    orchestration loop drives it unchanged.
+
+    Replaces the 2026-05-28 static reviewer that net-degraded (rubber-stamped env
+    failures, bloated correct patches). Two hard safety rules here: (1) an env-block
+    / inconclusive run is NEVER an approval-claiming-verified and NEVER a routed fix
+    — we deliver the coder's patch as-is; (2) the caller snapshots the patch and
+    reverts if the fix loop doesn't turn the repro green, so this can only HELP or
+    be NEUTRAL, never ship a worse patch than the coder produced."""
+    import asyncio as _asyncio
+    from core.self_verify import author_repro, run_repro, fail_feedback, PASS, FAIL
+    from core.review_verify import RouteDecision
+
+    step("═══ Phase 3.5: SELF-VERIFY REVIEW (repro → run → route) ═══")
+    changed = {**sandbox.modified_files, **sandbox.new_files}
+    if not changed:
+        _wlog.phase_event("selfverify_skipped", reason="no_changes")
+        return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+
+    # Author the repro ONCE per instance and cache on the sandbox — after a fix we
+    # re-run the SAME repro (a stable target), never a freshly-drifted one.
+    repro = getattr(sandbox, "_selfverify_repro", None)
+    if repro is None:
+        try:
+            diff = sandbox.get_all_diffs()
+        except Exception:
+            diff = ""
+        cf_text = "\n\n".join(f"# {fp}\n{(c or '')[:4000]}"
+                              for fp, c in list(changed.items())[:8])
+        repro = await author_repro(task, diff, cf_text) or ""
+        try:
+            sandbox._selfverify_repro = repro
+        except Exception:
+            pass
+    if not repro:
+        status("  SELF-VERIFY: issue has no runnable reproduction — delivering as-is (unverified)")
+        _wlog.phase_event("selfverify_no_repro")
+        return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+
+    sb_dir = str(getattr(sandbox, "sandbox_dir", "") or project_root)
+    # run_repro is blocking (subprocess) — keep the event loop free for parallel instances.
+    result = await _asyncio.get_event_loop().run_in_executor(
+        None, run_repro, repro, sb_dir, project_root)
+    _wlog.phase_event("selfverify_run", status=result.status,
+                      backend=result.backend, missing=result.missing_module)
+
+    if result.status == PASS:
+        status(f"  SELF-VERIFY ✓ repro PASSED (backend={result.backend}) — approving")
+        return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+    if result.status == FAIL:
+        status(f"  SELF-VERIFY ✗ repro FAILED (backend={result.backend}) — routing a fix")
+        return RouteDecision(kind="step", step_num=None,
+                             message=fail_feedback(repro, result, None)), sandbox
+    # ENV_BLOCKED / ERROR — could not truly run it. Do NOT claim verified, do NOT
+    # invent a bug. Deliver as-is (no worse than review-off for this instance).
+    _miss = f", missing {result.missing_module}" if result.missing_module else ""
+    status(f"  SELF-VERIFY: could not run repro ({result.status}{_miss}) — delivering as-is (unverified)")
+    _wlog.phase_event("selfverify_unverified", status=result.status)
+    return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+
+
 async def phase_review(
     task: str, plan: str, sandbox: Sandbox,
     project_root: str, detailed_map: str = "",
@@ -13812,66 +13880,68 @@ async def code_agent(state: AgentState) -> AgentState:
             purpose_map=purpose_map, research_cache=research_cache,
         )
 
-        # ── Phase 3.5: REVIEW → RUN [VERIFY:] → ROUTE (up to 3 cycles) ──
-        # DISABLED BY DEFAULT (2026-05-28). Across SWE-bench runs the reviewer was
-        # net-NEGATIVE: it never once caught a wrong patch and fixed it into a
-        # resolve; it rubber-stamped broken patches when the verify failed on a
-        # sandbox/env issue ("environment failure → APPROVED" — matplotlib, pylint);
-        # and the route→reimplement loop DEGRADED a correct patch (django-14053:
-        # a correct fix bloated to 7105B → UNRESOLVED, while the no-loop runs that
-        # shipped the coder's patch directly RESOLVED). The verify can't import an
-        # instance's deps in the read-only/no-net sandbox, so it can't truly gate.
-        # Skipping it is faster and empirically no worse (often better). The
-        # verify-and-route CONCEPT is the path to higher resolve-rate once verify
-        # runs in the instance's real env — re-enable then with JARVIS_ENABLE_REVIEW=1.
+        # ── Phase 3.5: SELF-VERIFY REVIEW (ckpt-266) ──
+        # Re-enabled with a RUN-THE-REPRO design that replaces the 2026-05-28 static
+        # reviewer (it net-degraded: rubber-stamped env failures, and the route loop
+        # BLOATED a correct patch — django-14053 7105B → UNRESOLVED). This reviewer
+        # authors a reproduction FROM THE ISSUE, RUNS it against the edited tree
+        # (backend auto-detected, never hardcoded), and routes a fix ONLY on a
+        # genuine failure. Two safety rails make it strictly ≥ shipping the coder's
+        # patch as-is: (1) an env-blocked/inconclusive run is never a fix and never a
+        # "verified" claim — deliver as-is; (2) SNAPSHOT the patch and REVERT if the
+        # fix loop doesn't turn the repro green (no chasing a possibly-bad repro into
+        # a bloated/broken patch). Gated on JARVIS_ENABLE_REVIEW=1.
         _review_enabled = os.environ.get("JARVIS_ENABLE_REVIEW", "0") == "1"
-        MAX_ROUTE_CYCLES = 3
-        for _cycle in range(MAX_ROUTE_CYCLES + 1):
-            if not _review_enabled:
-                status("  Phase 3.5 REVIEW: skipped (reviewer disabled) — "
-                       "delivering the coder's patch as-is")
-                _wlog.phase_event("review_skipped", reason="JARVIS_ENABLE_REVIEW!=1")
-                break
-            route, sandbox = await phase_review(
-                task, plan, sandbox, project_root, detailed_map, purpose_map, context,
-                research_cache=research_cache,
-            )
-            if route.kind in ("approved", "none"):
-                break
-            if _cycle >= MAX_ROUTE_CYCLES:
-                warn(f"Verify route budget ({MAX_ROUTE_CYCLES}) exhausted "
-                     f"(last: {route.kind}) — delivering current sandbox")
-                _wlog.phase_event("route_budget_exhausted", last_kind=route.kind)
-                break
-
-            if route.kind == "plan":
-                status(f"↩ Reviewer → PLANNER (cycle {_cycle + 1}): {route.message[:120]}")
-                _wlog.phase_event("route_to_plan", cycle=_cycle + 1,
-                                  reason=route.message[:300])
-                plan, research_cache = await phase_plan(
-                    task, context, complexity, project_root,
-                    plan_feedback=(route.message
-                                   + "\n\nThe plan you are revising:\n" + plan[:6000]),
-                    detailed_map=detailed_map, purpose_map=purpose_map,
-                    is_new_project=is_new_project,
-                    files=existing_files if not is_new_project else [],
-                )
-                files_to_modify = _extract_files_from_plan(plan, files) or []
-                final_plan, sandbox = await phase_implement(
-                    task, plan, context, sandbox, project_root, files_to_modify,
-                    detailed_map, purpose_map=purpose_map, research_cache=research_cache,
-                )
-            else:  # route.kind == "step"
-                status(f"↩ Reviewer → STEP {route.step_num} (cycle {_cycle + 1}): "
-                       f"{route.message[:120]}")
-                _wlog.phase_event("route_to_step", cycle=_cycle + 1,
-                                  step=route.step_num, reason=route.message[:300])
-                await _reimplement_step(
-                    step_num=route.step_num, error_feedback=route.message,
-                    task=task, plan=plan, context=context, sandbox=sandbox,
-                    project_root=project_root, detailed_map=detailed_map,
-                    purpose_map=purpose_map, research_cache=research_cache,
-                )
+        _SV_MAX_CYCLES = 2
+        if not _review_enabled:
+            status("  Phase 3.5 SELF-VERIFY: skipped (disabled) — "
+                   "delivering the coder's patch as-is")
+            _wlog.phase_event("review_skipped", reason="JARVIS_ENABLE_REVIEW!=1")
+        else:
+            _sv_snap = (dict(sandbox.modified_files), dict(sandbox.new_files))
+            _sv_routed = False
+            _sv_converged = False
+            try:
+                for _cycle in range(_SV_MAX_CYCLES + 1):
+                    route, sandbox = await phase_selfverify_review(
+                        task, plan, sandbox, project_root, detailed_map, purpose_map,
+                        context, research_cache=research_cache,
+                    )
+                    if route.kind in ("approved", "none"):
+                        _sv_converged = True
+                        break
+                    if _cycle >= _SV_MAX_CYCLES:
+                        warn(f"SELF-VERIFY fix budget ({_SV_MAX_CYCLES}) exhausted — "
+                             f"repro still failing")
+                        _wlog.phase_event("selfverify_budget_exhausted")
+                        break
+                    _sv_routed = True
+                    status(f"↩ SELF-VERIFY → fix (cycle {_cycle + 1}): make the repro pass")
+                    _wlog.phase_event("selfverify_route_fix", cycle=_cycle + 1)
+                    await _reimplement_step(
+                        step_num=route.step_num, error_feedback=route.message,
+                        task=task, plan=plan, context=context, sandbox=sandbox,
+                        project_root=project_root, detailed_map=detailed_map,
+                        purpose_map=purpose_map, research_cache=research_cache,
+                    )
+            except Exception as _sv_err:
+                # An unexpected raise mid-loop must NOT leave a half-fixed (possibly
+                # bloated) patch in place — that would break the can-only-help
+                # invariant. Revert to the coder's original and carry on to deliver.
+                warn(f"SELF-VERIFY crashed ({type(_sv_err).__name__}: {_sv_err}) — "
+                     f"reverting to the coder's original patch")
+                _wlog.phase_event("selfverify_crash", err=str(_sv_err)[:200])
+                sandbox.modified_files, sandbox.new_files = _sv_snap[0], _sv_snap[1]
+                _sv_routed = False  # revert done; skip the post-loop revert
+            # Fix loop ran but never turned the repro green → it may have bloated or
+            # broken the originally-correct patch chasing the repro (django-14053).
+            # Restore the coder's original patch (the dicts are the delivered-patch
+            # source of truth — sandbox.apply() writes them).
+            if _sv_routed and not _sv_converged:
+                sandbox.modified_files, sandbox.new_files = _sv_snap[0], _sv_snap[1]
+                warn("SELF-VERIFY did not converge — reverted to the coder's "
+                     "original patch")
+                _wlog.phase_event("selfverify_reverted_to_original")
 
         # ── Phase 4: TEST (optional) ─────────────────────────────────────
         if wants_test and test_command:

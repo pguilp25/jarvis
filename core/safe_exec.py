@@ -179,9 +179,18 @@ def _set_rlimits():
         pass
 
 
-def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
+def _bwrap_argv(cwd: str, project_root: "str | None",
+                extra_ro_binds: "list[str] | None" = None) -> "list[str]":
     """Construct the bubblewrap argv for a read-only, network-less, privilege-
-    less sandbox with a writable ephemeral /tmp and HOME hidden."""
+    less sandbox with a writable ephemeral /tmp and HOME hidden.
+
+    `extra_ro_binds` (ckpt-266) lets a caller mount ADDITIONAL read-only dirs —
+    used by the self-verify review's HOST backend to expose the host's installed
+    site-packages so a repro can `import` the project's real 3rd-party deps. It's
+    read-only (nothing can be shimmed INTO it) and the repro runs via inline
+    `exec` (never written to the repo tree), so this does NOT reopen the ckpt-166
+    patch-pollution hole — that was the CODER's edit loop writing stub modules, a
+    different surface. The default (None) keeps the STDLIB-ONLY smoke box."""
     argv = [_BWRAP, "--unshare-all", "--die-with-parent", "--new-session"]
     for d in _RO_BINDS:
         argv += ["--ro-bind", d, d]
@@ -208,7 +217,7 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
     # coder is steered away from shimming it (_do_run msg + create_file guard, ckpt-167).
     # the project + the working dir + the interpreter dir, read-only
     seen = set()
-    for d in (project_root, cwd, _interp_dir):
+    for d in (project_root, cwd, _interp_dir, *(extra_ro_binds or ())):
         if d and d not in seen and os.path.isdir(d):
             argv += ["--ro-bind", d, d]
             seen.add(d)
@@ -252,7 +261,8 @@ def _bwrap_argv(cwd: str, project_root: "str | None") -> "list[str]":
 
 
 def run_sandboxed(cmd: str, cwd: str, timeout: int = _DEFAULT_TIMEOUT,
-                  project_root: "str | None" = None) -> dict:
+                  project_root: "str | None" = None,
+                  extra_ro_binds: "list[str] | None" = None) -> dict:
     """Run `cmd` in the fail-proof read-only sandbox.
 
     Returns a dict:
@@ -282,7 +292,7 @@ def run_sandboxed(cmd: str, cwd: str, timeout: int = _DEFAULT_TIMEOUT,
     # non-login shell (`-c`, not `-lc`): avoids sourcing /etc/profile.d which
     # spews MOTD/notice noise into the captured output. The env we need (PATH,
     # HOME, TMPDIR…) is set explicitly via bwrap --setenv.
-    argv = _bwrap_argv(cwd, project_root) + ["--", "/bin/bash", "-c", cmd]
+    argv = _bwrap_argv(cwd, project_root, extra_ro_binds) + ["--", "/bin/bash", "-c", cmd]
 
     # Pass env={} so that bwrap's OWN process starts with an empty environment.
     # Without this, bwrap inherits the caller's env (including all API keys), and

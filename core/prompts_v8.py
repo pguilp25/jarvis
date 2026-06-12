@@ -2562,6 +2562,34 @@ CHANGED FILES:
 
 
 # ════════════════════════════════════════════════════════════════════════
+# SELF-VERIFY REVIEW (ckpt-266) — author a runnable reproduction from the ISSUE
+# and execute it against the edited tree. One-shot completion; output is the
+# script text (or a NO_REPRO sentinel), NOT a tool-protocol turn.
+# ════════════════════════════════════════════════════════════════════════
+
+SELFVERIFY_REPRO_PROMPT_V8 = """You write ONE tiny REPRODUCTION SCRIPT that checks whether a code change actually satisfies an issue.
+
+You are given the ISSUE, the DIFF that was just applied, and the changed files. Output a single self-contained Python script that:
+
+- Exercises the EXACT behaviour the ISSUE describes, using the ISSUE'S OWN example values (the names, inputs, and expected results it states). Invent nothing the issue doesn't imply.
+- ASSERTS the CORRECT (fixed / newly-added) behaviour:
+    • BUG fix → drive the path the issue calls broken and assert the result is now right.
+    • ADDITION (new function / parameter / option / flag) → call the NEW thing and assert it is accepted and does what the issue asks (e.g. pass the new kwarg and assert it took effect).
+    • NEW symbol or file → import it and call it; a missing import is a real failure.
+- Exits 0 when the behaviour is correct and FAILS LOUDLY (assert / raise / uncaught traceback, non-zero exit) when it is not. End every success path with: print("REPRO_OK")
+- Imports the project's REAL modules (e.g. `from pkg.mod import thing`). Use a mock/stub ONLY for an unrelated external the issue doesn't care about (network, a live DB) — NEVER to fake the behaviour under test.
+- Is MINIMAL and finishes in a few seconds. Plain python only — no pytest, no test framework, no network, no writes outside /tmp.
+
+HARD RULE — NO LEAKAGE: build the check from the ISSUE TEXT alone (its described inputs and expected results). Do NOT reproduce, import, or guess the project's hidden test suite or its test files. The DIFF is shown only so you know which symbols to import — assert the ISSUE'S behaviour, not the diff: a check that would pass even against the UNFIXED code is worthless. Make it genuinely fail when the fix is absent.
+
+If the issue gives nothing concrete enough to drive in a standalone script (no inputs, no observable result), output EXACTLY one line:
+NO_REPRO: <one-line reason>
+Do not invent a vacuous check that would pass regardless.
+
+Output ONLY the Python script — no prose, no markdown fences — or the single NO_REPRO line."""
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Backwards-compat aliases
 # ════════════════════════════════════════════════════════════════════════
 
@@ -2575,3 +2603,4 @@ IMPLEMENT_NATIVE_PROMPT = IMPLEMENT_NATIVE_PROMPT_V8
 MERGE_PROMPT_TEMPLATE = MERGE_PROMPT_TEMPLATE_V8
 REVIEW_PROMPT_TEMPLATE = REVIEW_PROMPT_TEMPLATE_V8
 SELF_CHECK_PROMPT = SELF_CHECK_PROMPT_V8
+SELFVERIFY_REPRO_PROMPT = SELFVERIFY_REPRO_PROMPT_V8
