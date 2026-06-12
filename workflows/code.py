@@ -13278,6 +13278,26 @@ async def phase_selfverify_review(
     _wlog.phase_event("selfverify_run", status=result.status,
                       backend=result.backend, missing=result.missing_module)
 
+    # ckpt-270 audit instrumentation (off unless JARVIS_SELFVERIFY_TRACE is set): append a
+    # JSON line capturing the patch + repro + verdict at THIS review call. The first call's
+    # patch is the coder's ORIGINAL (pre-fix); later calls show the patch after each fix —
+    # so the trace reconstructs before → during → after per instance, definitively.
+    _tp = os.environ.get("JARVIS_SELFVERIFY_TRACE")
+    if _tp:
+        try:
+            import re as _re2
+            _m = _re2.search(r"instance_[A-Za-z0-9_.\-]+", sb_dir or "")
+            with open(_tp, "a") as _tf:
+                _tf.write(json.dumps({
+                    "inst": _m.group(0) if _m else "?", "ev": "repro_run",
+                    "status": result.status, "backend": result.backend,
+                    "out": (result.output or "")[:1200],
+                    "patch": (sandbox.get_all_diffs() or "")[:7000],
+                    "repro": (repro or "")[:2000],
+                }, default=str) + "\n")
+        except Exception:
+            pass
+
     if result.status == PASS:
         status(f"  SELF-VERIFY ✓ repro PASSED (backend={result.backend}) — approving")
         return RouteDecision(kind="approved", step_num=None, message=""), sandbox
