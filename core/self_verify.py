@@ -143,6 +143,21 @@ def _classify(res: dict, sandbox_dir: str, backend: str) -> RunResult:
         # an external 3rd-party dep is absent → we could not truly run it here.
         return RunResult(ENV_BLOCKED, exit_code=code, output=out,
                          backend=backend, missing_module=missing)
+    # ckpt-274: a MALFORMED repro — one that errors because IT called the code wrong
+    # (hallucinated a parameter / wrong arity), not because a behavioural assertion
+    # failed — is NOT a patch failure. Routing a fix burns cycles the coder can't use
+    # (it can't fix a broken repro), as on a26 (the repro invented `fetch_url(...,
+    # client_cert=...)`, a kwarg that doesn't exist and is unrelated to the task →
+    # TypeError → 2 wasted fix cycles + 67min → revert). Treat it as INCONCLUSIVE
+    # (→ deliver as-is, never a fix) UNLESS a genuine AssertionError is present (that
+    # IS a real behavioural failure → route a fix). Strictly safe: inconclusive only
+    # ever delivers the coder's patch as-is, never worse. (Root cause — the repro
+    # author guessing signatures — is the tonight CoT-grounding item.)
+    _MALFORMED = ("unexpected keyword argument", "required positional argument",
+                  "takes no arguments", "positional arguments but",
+                  "got multiple values for")
+    if "AssertionError" not in out and any(s in out for s in _MALFORMED):
+        return RunResult(ERROR, exit_code=code, output=out, backend=backend)
     # real failure: assertion, traceback, syntax, or a MISSING REPO module
     # (the coder failed to create the new symbol/file the addition needed).
     return RunResult(FAIL, exit_code=code, output=out, backend=backend,
