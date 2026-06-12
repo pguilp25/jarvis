@@ -351,15 +351,30 @@ def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = ""
             with open(os.path.join(ws, "repro.py"), "w", encoding="utf-8") as f:
                 f.write(repro_code)
             inner = ("cd /app && tar xf /ws/edits.tar -C /app && "
-                     "PYTHONPATH=/app:/app/src:/app/lib "
+                     "QT_QPA_PLATFORM=offscreen PYTHONPATH=/app:/app/src:/app/lib "
                      f"timeout {int(timeout)} python -B /ws/repro.py")
+            # --entrypoint bash: MANY sweap images set ENTRYPOINT=[/bin/bash], so a plain
+            # `docker run IMG bash -c …` becomes `/bin/bash bash -c …` → bash tries to exec
+            # the binary `bash` as a script → "cannot execute binary file" (ckpt-268 root
+            # cause of the container false-fails). Overriding the entrypoint runs `bash -c
+            # inner` cleanly regardless of the image's default entrypoint.
             res = subprocess.run(
-                ["docker", "run", "--rm", "--network", "none",
-                 "-v", f"{ws}:/ws:ro", image, "bash", "-c", inner],
+                ["docker", "run", "--rm", "--network", "none", "--entrypoint", "bash",
+                 "-v", f"{ws}:/ws:ro", image, "-c", inner],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 errors="replace", timeout=int(timeout) + 90)
+            out = res.stdout or ""
+            # Container INFRASTRUCTURE failures (bad entrypoint, exec-format, OCI/runtime,
+            # missing loader) are NOT repro failures — misclassifying them as FAIL triggers
+            # spurious fix cycles. Treat them as env_blocked → deliver as-is (ckpt-268).
+            _INFRA = ("cannot execute binary file", "exec format error", "OCI runtime",
+                      "standard_init_linux", "executable file not found",
+                      "docker: Error", "Unable to find image")
+            if res.returncode != 0 and any(s in out for s in _INFRA):
+                return RunResult(ENV_BLOCKED, exit_code=res.returncode, output=out,
+                                 backend="container")
             d = {"blocked": False, "timed_out": False,
-                 "exit_code": res.returncode, "output": res.stdout or ""}
+                 "exit_code": res.returncode, "output": out}
             # _is_repo_module checks the host edited tree (mirrors /app's layout) so a
             # missing REPO module the coder failed to create still classifies as FAIL.
             return _classify(d, sandbox_dir, "container")
