@@ -13256,7 +13256,7 @@ async def phase_selfverify_review(
     import asyncio as _asyncio
     import functools as _functools
     from core.self_verify import (author_repro, run_repro, fail_feedback,
-                                  make_container_runner, PASS, FAIL)
+                                  make_container_runner, detect_language, PASS, FAIL)
     from core.review_verify import RouteDecision
 
     step("═══ Phase 3.5: SELF-VERIFY REVIEW (repro → run → route) ═══")
@@ -13264,6 +13264,10 @@ async def phase_selfverify_review(
     if not changed:
         _wlog.phase_event("selfverify_skipped", reason="no_changes")
         return RouteDecision(kind="approved", step_num=None, message=""), sandbox
+    # ckpt-275: detect the repro LANGUAGE from the edited files so the whole loop
+    # (author → run → container) follows that language's protocol. Python is the
+    # validated default; Go/JS/TS are best-effort; unknown → generic fallback.
+    _lang = detect_language(list(changed))
 
     # Author the repro ONCE per instance and cache on the sandbox — after a fix we
     # re-run the SAME repro (a stable target), never a freshly-drifted one.
@@ -13275,7 +13279,7 @@ async def phase_selfverify_review(
             diff = ""
         cf_text = "\n\n".join(f"# {fp}\n{(c or '')[:4000]}"
                               for fp, c in list(changed.items())[:8])
-        repro = await author_repro(task, diff, cf_text) or ""
+        repro = await author_repro(task, diff, cf_text, language=_lang) or ""
         try:
             sandbox._selfverify_repro = repro
         except Exception:
@@ -13290,12 +13294,13 @@ async def phase_selfverify_review(
     # repro to escalate into the instance's real-deps image (run_repro tries local
     # stdlib → host → this container). No image (e.g. interactive use) → local/host only.
     _image = getattr(sandbox, "_instance_image", None)
-    _runner = (make_container_runner(_image, {**sandbox.modified_files, **sandbox.new_files}, sb_dir)
+    _runner = (make_container_runner(_image, {**sandbox.modified_files, **sandbox.new_files},
+                                     sb_dir, language=_lang)
                if _image else None)
     # run_repro is blocking (subprocess/docker) — keep the event loop free for parallel instances.
     result = await _asyncio.get_event_loop().run_in_executor(
         None, _functools.partial(run_repro, repro, sb_dir, project_root,
-                                 container_runner=_runner))
+                                 language=_lang, container_runner=_runner))
     _wlog.phase_event("selfverify_run", status=result.status,
                       backend=result.backend, missing=result.missing_module)
 

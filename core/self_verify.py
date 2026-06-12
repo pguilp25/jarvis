@@ -54,6 +54,71 @@ ERROR = "error"
 
 _REPRO_TIMEOUT = 30   # seconds per backend attempt — fast; the loop caps cycles
 
+REPRO_SENTINEL = "REPRO_OK"   # success marker (must be the LAST stdout line) — language-agnostic
+
+# ── language protocols (ckpt-275) ─────────────────────────────────────────────
+# SWE-bench Pro and real-world use are MULTI-LANGUAGE (Go, TypeScript/JavaScript,
+# Python, …). The self-verify loop is language-agnostic in SHAPE — only the repro
+# LANGUAGE, the RUNNER, the success-sentinel print, and the error-string heuristics
+# differ. We detect the language from the EDITED file's extension and follow its
+# protocol. Python is the fully-validated default; the others are best-effort and
+# degrade gracefully (an unknown language → run by exit-code + sentinel only).
+_LANG_PROTOCOL = {
+    "python": {
+        "ext": "py", "runner": "python -B",
+        # repro ERRORED because IT mis-called the code (wrong signature) — NOT a real
+        # behavioural failure (a26: invented fetch_url(client_cert=...)):
+        "malformed": ("unexpected keyword argument", "required positional argument",
+                      "takes no arguments", "positional arguments but",
+                      "got multiple values for"),
+        "missing": ("No module named",),
+    },
+    "javascript": {
+        "ext": "mjs", "runner": "node",
+        "malformed": ("is not a function", "is not defined",
+                      "cannot read properties of undefined"),
+        "missing": ("Cannot find module", "ERR_MODULE_NOT_FOUND"),
+    },
+    "typescript": {
+        "ext": "ts", "runner": "npx --yes tsx",
+        "malformed": ("is not a function", "is not defined", "has no exported member"),
+        "missing": ("Cannot find module", "Cannot find name"),
+    },
+    "go": {
+        "ext": "go", "runner": "go run",
+        "malformed": ("not enough arguments", "too many arguments",
+                      "undefined:", "unknown field"),
+        "missing": ("cannot find package", "no required module"),
+    },
+    "generic": {"ext": "txt", "runner": "", "malformed": (), "missing": ()},
+}
+# the success-sentinel print, per language (handed to the repro author)
+_LANG_SENTINEL = {
+    "python": 'print("REPRO_OK")', "javascript": 'console.log("REPRO_OK")',
+    "typescript": 'console.log("REPRO_OK")', "go": 'fmt.Println("REPRO_OK")',
+    "generic": "emit the line REPRO_OK",
+}
+_EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript", ".go": "go",
+}
+
+
+def detect_language(files) -> str:
+    """Detect the repro language from the EDITED files' extensions (dominant wins).
+    Defaults to python (the validated path + the most common SWE-bench-Pro language)."""
+    import collections
+    c = collections.Counter()
+    for f in (files or []):
+        lang = _EXT_TO_LANG.get(os.path.splitext(str(f))[1].lower())
+        if lang:
+            c[lang] += 1
+    return c.most_common(1)[0][0] if c else "python"
+
+
+def _proto(language: str) -> dict:
+    return _LANG_PROTOCOL.get(language or "python", _LANG_PROTOCOL["python"])
+
 
 class RunResult:
     __slots__ = ("status", "exit_code", "output", "backend", "missing_module")
@@ -115,8 +180,11 @@ def _is_repo_module(modname: str, sandbox_dir: str) -> bool:
     return False
 
 
-def _classify(res: dict, sandbox_dir: str, backend: str) -> RunResult:
-    """Turn a run_sandboxed() dict into a RunResult verdict."""
+def _classify(res: dict, sandbox_dir: str, backend: str, proto: dict = None) -> RunResult:
+    """Turn a run_sandboxed() dict into a RunResult verdict, using the language
+    protocol's error-string heuristics (ckpt-275). Defaults to the python protocol."""
+    if proto is None:
+        proto = _LANG_PROTOCOL["python"]
     if res.get("blocked"):
         # sandbox/policy could not even start it — inconclusive, never a verdict.
         return RunResult(ERROR, output=res.get("reason", "sandbox blocked"),
@@ -135,28 +203,37 @@ def _classify(res: dict, sandbox_dir: str, backend: str) -> RunResult:
         # e.g. a trailing warning) only falls back to deliver-as-is / revert — never a
         # false PASS.
         _last = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
-        if _last.strip() == "REPRO_OK":
+        if _last.strip() == REPRO_SENTINEL:
             return RunResult(PASS, exit_code=0, output=out, backend=backend)
         return RunResult(ERROR, exit_code=0, output=out, backend=backend)
+    # ckpt-275: the language RUNTIME itself is absent (go/node/tsx not installed in this
+    # backend, e.g. the stdlib-only local sandbox) — NOT a patch failure. Treat as
+    # env_blocked so run_repro ESCALATES to the instance container (which has it).
+    if code == 127 or "command not found" in out or "executable file not found" in out:
+        return RunResult(ENV_BLOCKED, exit_code=code, output=out, backend=backend,
+                         missing_module="<runtime>")
+    # missing DEPENDENCY (per-language patterns). For python we additionally distinguish
+    # an absent EXTERNAL dep (env_blocked) from a missing REPO module (real FAIL — the
+    # coder didn't create the symbol). Other languages: any missing-dep pattern → env_blocked.
     missing = _missing_module(out)
     if missing and not _is_repo_module(missing, sandbox_dir):
-        # an external 3rd-party dep is absent → we could not truly run it here.
         return RunResult(ENV_BLOCKED, exit_code=code, output=out,
                          backend=backend, missing_module=missing)
+    if proto.get("missing") and any(s in out for s in proto["missing"]) and not missing:
+        return RunResult(ENV_BLOCKED, exit_code=code, output=out, backend=backend,
+                         missing_module="<dep>")
     # ckpt-274: a MALFORMED repro — one that errors because IT called the code wrong
     # (hallucinated a parameter / wrong arity), not because a behavioural assertion
     # failed — is NOT a patch failure. Routing a fix burns cycles the coder can't use
     # (it can't fix a broken repro), as on a26 (the repro invented `fetch_url(...,
     # client_cert=...)`, a kwarg that doesn't exist and is unrelated to the task →
     # TypeError → 2 wasted fix cycles + 67min → revert). Treat it as INCONCLUSIVE
-    # (→ deliver as-is, never a fix) UNLESS a genuine AssertionError is present (that
+    # (→ deliver as-is, never a fix) UNLESS a genuine assertion failure is present (that
     # IS a real behavioural failure → route a fix). Strictly safe: inconclusive only
-    # ever delivers the coder's patch as-is, never worse. (Root cause — the repro
-    # author guessing signatures — is the tonight CoT-grounding item.)
-    _MALFORMED = ("unexpected keyword argument", "required positional argument",
-                  "takes no arguments", "positional arguments but",
-                  "got multiple values for")
-    if "AssertionError" not in out and any(s in out for s in _MALFORMED):
+    # ever delivers the coder's patch as-is, never worse. Per-language signatures.
+    _assert = ("AssertionError" in out or "assert.fail" in out  # py / generic
+               or "--- FAIL:" in out)                            # go test-style
+    if not _assert and proto.get("malformed") and any(s in out for s in proto["malformed"]):
         return RunResult(ERROR, exit_code=code, output=out, backend=backend)
     # real failure: assertion, traceback, syntax, or a MISSING REPO module
     # (the coder failed to create the new symbol/file the addition needed).
@@ -164,14 +241,19 @@ def _classify(res: dict, sandbox_dir: str, backend: str) -> RunResult:
                      missing_module=missing)
 
 
-# ── the inline-exec command (no temp file, no escaping, never touches the repo) ─
+# ── the run command: write the repro to a tmpfs scratch file and run it with the
+#    language's runner (ckpt-275, replaces the python-only inline-exec). The scratch
+#    file lives in /tmp (bwrap tmpfs / container ephemeral) — NEVER the repo tree, so
+#    it can't pollute the diff. base64 keeps it shell-safe regardless of repro content.
 
-def _b64exec_cmd(repro_code: str) -> str:
+def _run_cmd(repro_code: str, proto: dict) -> str:
     b = base64.b64encode(repro_code.encode("utf-8")).decode("ascii")
-    # -B: don't write .pyc (cwd is read-only). Decode+exec the repro inline so it
-    # is never written into the repo tree (cannot pollute the diff).
-    return (f'python -B -c "import base64;'
-            f"exec(compile(base64.b64decode('{b}').decode('utf-8'),'<repro>','exec'))\"")
+    ext = proto.get("ext", "txt")
+    runner = proto.get("runner", "")
+    if not runner:   # generic / unknown language — no way to run it here
+        return "echo 'self-verify: no runner for this language' >&2; exit 97"
+    return (f"printf %s '{b}' | base64 -d > /tmp/sv_repro.{ext} && "
+            f"{runner} /tmp/sv_repro.{ext}")
 
 
 def _host_site_dirs() -> list[str]:
@@ -202,24 +284,28 @@ def _host_site_dirs() -> list[str]:
 
 def run_repro(repro_code: str, sandbox_dir: str,
               project_root: "str | None" = None, *,
+              language: str = "python",
               allow_host: bool = True,
               container_runner=None,
               timeout: int = _REPRO_TIMEOUT) -> RunResult:
-    """Run `repro_code` against the edited tree at `sandbox_dir`, auto-detecting a
-    backend that can actually execute it. Returns a RunResult; .ran is True only
-    when the verdict is trustworthy (the code actually executed).
+    """Run `repro_code` (in `language`) against the edited tree at `sandbox_dir`,
+    auto-detecting a backend that can actually execute it. Returns a RunResult;
+    .ran is True only when the verdict is trustworthy (the code actually executed).
 
     container_runner, if given, is `callable(repro_code, timeout) -> RunResult`
-    used as the last escalation step (e.g. run inside the instance's image)."""
+    used as the last escalation step (e.g. run inside the instance's image — which,
+    for a non-python repo, is where the language runtime actually lives)."""
     if not repro_code or not repro_code.strip():
         return RunResult(ERROR, output="empty repro")
     sandbox_dir = sandbox_dir or "/tmp"
-    cmd = _b64exec_cmd(repro_code)
+    proto = _proto(language)
+    cmd = _run_cmd(repro_code, proto)
 
-    # 1) LOCAL — stdlib + repo only.
+    # 1) LOCAL — stdlib + repo only (python runtime; other runtimes usually absent →
+    #    env_blocked → escalates to the container that has them).
     res = run_sandboxed(cmd, cwd=sandbox_dir, timeout=timeout,
                         project_root=project_root or sandbox_dir)
-    local = _classify(res, sandbox_dir, "local")
+    local = _classify(res, sandbox_dir, "local", proto)
     if local.ran:
         return local
 
@@ -232,7 +318,7 @@ def run_repro(repro_code: str, sandbox_dir: str,
             res = run_sandboxed(cmd, cwd=sandbox_dir, timeout=timeout,
                                 project_root=project_root or sandbox_dir,
                                 extra_ro_binds=host_dirs)
-            host = _classify(res, sandbox_dir, "host")
+            host = _classify(res, sandbox_dir, "host", proto)
             if host.ran:
                 return host
             # keep the more-informative env_blocked (host still missing the dep)
@@ -284,12 +370,24 @@ def _strip_fence(text: str) -> str:
 
 async def author_repro(task: str, diff: str, changed_files_text: str,
                        model: str = "nvidia/gpt-oss-120b",
-                       *, max_chars: int = 9000) -> "str | None":
-    """Ask a model to write a runnable repro from the ISSUE. Returns the script,
-    or None when the model says NO_REPRO / the call fails (caller treats None as
+                       *, language: str = "python", max_chars: int = 9000) -> "str | None":
+    """Ask a model to write a runnable repro from the ISSUE, in `language`. Returns the
+    script, or None when the model says NO_REPRO / the call fails (caller treats None as
     'cannot verify' → deliver as-is, never a false bug)."""
     from clients.nvidia import call_nvidia
     from core.prompts_v8 import SELFVERIFY_REPRO_PROMPT
+
+    # python uses the validated prompt byte-identical; other languages get an override
+    # header that re-targets the language + sentinel and tells the model to translate the
+    # (python-flavoured) intent below (ckpt-275 — multi-language).
+    system = SELFVERIFY_REPRO_PROMPT
+    if language and language != "python":
+        _sent = _LANG_SENTINEL.get(language, _LANG_SENTINEL["generic"])
+        system = (f"⚠ TARGET LANGUAGE: {language} — write the reproduction in {language}, NOT "
+                  f"Python. Run-as-a-script style. End every success path with `{_sent}` as the "
+                  f"VERY LAST line printed. Where the rules below show Python syntax/wording, "
+                  f"translate the INTENT to {language} (same faithfulness + no-leakage rules).\n\n"
+                  + SELFVERIFY_REPRO_PROMPT)
 
     _t = (task or "").strip()
     _d = (diff or "").strip()
@@ -304,7 +402,7 @@ async def author_repro(task: str, diff: str, changed_files_text: str,
             f"=== DIFF JUST APPLIED ===\n{_d or '(no diff)'}\n\n"
             f"=== CHANGED FILES ===\n{_cf or '(none)'}\n")
     try:
-        raw = await call_nvidia(model, prompt=user, system=SELFVERIFY_REPRO_PROMPT,
+        raw = await call_nvidia(model, prompt=user, system=system,
                                 temperature=0.2, max_tokens=4096)
     except Exception:
         return None
@@ -321,7 +419,7 @@ async def author_repro(task: str, diff: str, changed_files_text: str,
 
 
 def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = "",
-                          *, pull_if_missing: bool = True):
+                          *, language: str = "python", pull_if_missing: bool = True):
     """Phase-2 backend (ckpt-267): run the repro INSIDE the instance's real image
     (jefzda/sweap-images:<dockerhub_tag>), which has the project's true 3rd-party
     deps installed — so a repro for a dep-heavy instance (web.py, ansible, …) can
@@ -334,6 +432,7 @@ def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = ""
     PYTHONPATH. --network none (no leakage / no escape). FAIL-SAFE: any docker/
     image/timeout problem returns ERROR or ENV_BLOCKED, so the caller delivers the
     coder's patch as-is — the container backend can only help, never regress."""
+    proto = _proto(language)
     def _run(repro_code: str, timeout: int) -> "RunResult":
         if not image or not shutil.which("docker"):
             return RunResult(ERROR, output="docker/image unavailable", backend="container")
@@ -367,11 +466,15 @@ def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = ""
                     ti = tarfile.TarInfo(name=rel)
                     ti.size = len(data)
                     tf.addfile(ti, io.BytesIO(data))
-            with open(os.path.join(ws, "repro.py"), "w", encoding="utf-8") as f:
+            _ext, _runner = proto.get("ext", "py"), proto.get("runner") or "python -B"
+            with open(os.path.join(ws, f"repro.{_ext}"), "w", encoding="utf-8") as f:
                 f.write(repro_code)
+            # The container HAS the language runtime (it's the instance's own image), so
+            # run with the per-language runner. The python-oriented env (PYTHONPATH, Qt
+            # offscreen) is harmless for other runtimes.
             inner = ("cd /app && tar xf /ws/edits.tar -C /app && "
                      "QT_QPA_PLATFORM=offscreen PYTHONPATH=/app:/app/src:/app/lib "
-                     f"timeout {int(timeout)} python -B /ws/repro.py")
+                     f"timeout {int(timeout)} {_runner} /ws/repro.{_ext}")
             # --entrypoint bash: MANY sweap images set ENTRYPOINT=[/bin/bash], so a plain
             # `docker run IMG bash -c …` becomes `/bin/bash bash -c …` → bash tries to exec
             # the binary `bash` as a script → "cannot execute binary file" (ckpt-268 root
@@ -396,7 +499,7 @@ def make_container_runner(image: str, changed_files: dict, sandbox_dir: str = ""
                  "exit_code": res.returncode, "output": out}
             # _is_repo_module checks the host edited tree (mirrors /app's layout) so a
             # missing REPO module the coder failed to create still classifies as FAIL.
-            return _classify(d, sandbox_dir, "container")
+            return _classify(d, sandbox_dir, "container", proto)
         except subprocess.TimeoutExpired:
             return RunResult(ERROR, output="container run timed out", backend="container")
         except Exception as e:
