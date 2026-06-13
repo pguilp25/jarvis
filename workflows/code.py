@@ -13256,7 +13256,8 @@ async def phase_selfverify_review(
     import asyncio as _asyncio
     import functools as _functools
     from core.self_verify import (author_repro, run_repro, fail_feedback,
-                                  make_container_runner, detect_language, PASS, FAIL)
+                                  make_container_runner, detect_language,
+                                  extract_signatures, PASS, FAIL)
     from core.review_verify import RouteDecision
 
     step("═══ Phase 3.5: SELF-VERIFY REVIEW (repro → run → route) ═══")
@@ -13273,15 +13274,19 @@ async def phase_selfverify_review(
     # re-run the SAME repro (a stable target), never a freshly-drifted one.
     repro = getattr(sandbox, "_selfverify_repro", None)
     if repro is None:
-        try:
-            diff = sandbox.get_all_diffs()
-        except Exception:
-            diff = ""
-        cf_text = "\n\n".join(f"# {fp}\n{(c or '')[:4000]}"
-                              for fp, c in list(changed.items())[:8])
-        repro = await author_repro(task, diff, cf_text, language=_lang) or ""
+        # ckpt-277: hand the author the SIGNATURE DIGEST (callable API, no bodies) — NOT
+        # the diff / post-patch file contents. Seeing the implementation's control-flow
+        # primes a weak model to rig invented internal state to satisfy it (dbbd9d53 set
+        # web.ctx.method='POST' only because the patch it was shown gated on it). Blind to
+        # the impl, it tests the ISSUE's contract; a wrong patch then genuinely fails.
+        # NEW files first so an added symbol (the thing an ADDITION repro must import) is
+        # never the one truncated by the per-file cap (ckpt-277 review).
+        sigs = extract_signatures({**sandbox.new_files, **sandbox.modified_files},
+                                  language=_lang)
+        repro = await author_repro(task, sigs, language=_lang) or ""
         try:
             sandbox._selfverify_repro = repro
+            sandbox._selfverify_sigs = sigs   # ckpt-277: for the hallucinated-symbol guard
         except Exception:
             pass
     if not repro:
@@ -13328,6 +13333,18 @@ async def phase_selfverify_review(
         status(f"  SELF-VERIFY ✓ repro PASSED (backend={result.backend}) — approving")
         return RouteDecision(kind="approved", step_num=None, message=""), sandbox
     if result.status == FAIL:
+        # ckpt-277: guard the never-ship-worse invariant. If the repro failed because it
+        # referenced a symbol the AUTHOR INVENTED (not in the issue, not in the API digest),
+        # do NOT route a fix — the coder might mutate a correct patch to satisfy the
+        # hallucination and ship worse. Treat as inconclusive → deliver as-is.
+        from core.self_verify import hallucinated_symbol as _hsym
+        _known = (task or "") + "\n" + (getattr(sandbox, "_selfverify_sigs", "") or "")
+        _bad = _hsym(result.output or "", _known)
+        if _bad:
+            status(f"  SELF-VERIFY: repro references undefined symbol '{_bad}' "
+                   f"(not in the issue or the API) — inconclusive, delivering as-is")
+            _wlog.phase_event("selfverify_hallucinated_symbol", symbol=_bad)
+            return RouteDecision(kind="unverified", step_num=None, message=""), sandbox
         status(f"  SELF-VERIFY ✗ repro FAILED (backend={result.backend}) — routing a fix")
         return RouteDecision(kind="step", step_num=None,
                              message=fail_feedback(repro, result, None)), sandbox

@@ -120,6 +120,196 @@ def _proto(language: str) -> dict:
     return _LANG_PROTOCOL.get(language or "python", _LANG_PROTOCOL["python"])
 
 
+# ── signature digest (ckpt-277) ───────────────────────────────────────────────
+# The repro author must NOT be shown the patch (diff / post-patch bodies): seeing
+# the implementation's control-flow primes a weak model to arrange invented internal
+# state to satisfy it — dbbd9d53 set `web.ctx.method='POST'` ONLY because the patch it
+# was shown gated on `web.ctx.method=='POST'`. Instead we hand it a SIGNATURE DIGEST:
+# the callable API (def/class headers, no bodies) so it can ground its calls on the
+# REAL argument shapes (the a26 lesson — no invented kwargs) while staying blind to the
+# implementation. It then tests the ISSUE's contract, not the patch's invented one.
+import ast as _ast
+import re as _re
+
+_NONPY_SIG_RE = {
+    "go": _re.compile(r"^\s*func\s"),
+    "javascript": _re.compile(
+        r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s+\w"
+        r"|^\s*(export\s+)?(const|let|var)\s+\w+\s*=\s*(async\s*)?\("
+        r"|^\s*(export\s+)?(default\s+)?class\s+\w"),
+    "typescript": _re.compile(
+        r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s+\w"
+        r"|^\s*(export\s+)?(abstract\s+)?(class|interface|type|enum)\s+\w"
+        r"|^\s*(public|private|protected|readonly|static)\s+\w"),
+}
+
+
+def _py_signatures(content: str) -> "list[str]":
+    """def/class HEADERS + class FIELD NAMES + module CONSTANT names of a Python source —
+    names, full arg lists (via ast.unparse), return annotation, decorators. NO bodies and
+    NO docstrings: docstrings are coder-authored impl narration that can re-leak the very
+    control-flow we hide (ckpt-277 review — a coder docstring 'parse the body when method
+    is POST' re-primes the rig). Field/constant NAMES are structural (no values) so the
+    author can ground attribute references (record.seeds) instead of guessing them."""
+    try:
+        tree = _ast.parse(content)
+    except Exception:
+        return []
+    out: "list[str]" = []
+
+    def _fn(node, indent=""):
+        for d in getattr(node, "decorator_list", []):
+            try:
+                out.append(f"{indent}@{_ast.unparse(d)}")
+            except Exception:
+                pass
+        try:
+            args = _ast.unparse(node.args)
+        except Exception:
+            args = "..."
+        ret = ""
+        if getattr(node, "returns", None) is not None:
+            try:
+                ret = " -> " + _ast.unparse(node.returns)
+            except Exception:
+                ret = ""
+        kw = "async def " if isinstance(node, _ast.AsyncFunctionDef) else "def "
+        out.append(f"{indent}{kw}{node.name}({args}){ret}")
+
+    def _names(body, upper_only=False):
+        # AnnAssign / simple Assign TARGET names only — never the values (a value could
+        # carry control-flow / literals that re-prime). upper_only → module constants.
+        names = []
+        for n in body:
+            tgts = []
+            if isinstance(n, _ast.AnnAssign) and isinstance(n.target, _ast.Name):
+                tgts = [n.target.id]
+            elif isinstance(n, _ast.Assign):
+                tgts = [t.id for t in n.targets if isinstance(t, _ast.Name)]
+            for nm in tgts:
+                if (not upper_only) or (nm.isupper() and len(nm) > 1):
+                    names.append(nm)
+        return names
+
+    def walk(body, indent, kind):
+        if kind == "class":
+            f = _names(body)
+            if f:
+                out.append(f"{indent}# fields: " + ", ".join(f[:40]))
+        elif kind == "module":
+            c = _names(body, upper_only=True)
+            if c:
+                out.append("# module constants: " + ", ".join(c[:40]))
+        for node in body:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                _fn(node, indent)
+            elif isinstance(node, _ast.ClassDef):
+                try:
+                    bases = ", ".join(_ast.unparse(b) for b in node.bases)
+                except Exception:
+                    bases = ""
+                out.append(f"{indent}class {node.name}({bases})" if bases
+                           else f"{indent}class {node.name}")
+                walk(node.body, indent + "    ", "class")
+            elif isinstance(node, (_ast.If, _ast.Try, _ast.With, _ast.AsyncWith)):
+                # defs hidden under `if TYPE_CHECKING:` / version gates / try-import
+                sub = []
+                for attr in ("body", "orelse", "finalbody", "handlers"):
+                    for item in getattr(node, attr, []) or []:
+                        sub += getattr(item, "body", []) if isinstance(item, _ast.ExceptHandler) else [item]
+                walk(sub, indent, "nested")
+    walk(tree.body, "", "module")
+    return out
+
+
+def _regex_signatures(content: str, language: str) -> "list[str]":
+    """Best-effort declaration headers for non-Python (Go/TS/JS). Line-based — the
+    multi-language path is best-effort; the author also has the issue to ground on."""
+    pat = _NONPY_SIG_RE.get(language)
+    if pat is None:
+        return []
+    out: "list[str]" = []
+    for ln in content.splitlines():
+        if pat.match(ln):
+            s = ln.strip().rstrip("{").strip()
+            if s and s not in out:
+                out.append(s[:160])
+    return out
+
+
+def extract_signatures(changed_files: dict, language: str = "python",
+                       *, max_files: int = 8, max_per_file: int = 60) -> str:
+    """SIGNATURE DIGEST of the changed files — the callable API (headers, no bodies)
+    the repro author may use to ground its calls, WITHOUT seeing the implementation.
+    See the module comment above for why the author is kept blind to the patch."""
+    blocks = []
+    for path, content in list((changed_files or {}).items())[:max_files]:
+        if not content:
+            continue
+        # dispatch per-FILE by extension (a .py in a go-dominant changeset must still
+        # use the AST path), falling back to the run's detected language (ckpt-277 review).
+        flang = _EXT_TO_LANG.get(os.path.splitext(str(path))[1].lower(), language)
+        if flang == "python":
+            sigs = _py_signatures(content)
+        else:
+            sigs = _regex_signatures(content, flang)
+        if sigs:
+            body = "\n".join(sigs[:max_per_file])
+            if len(sigs) > max_per_file:
+                body += f"\n# …(+{len(sigs) - max_per_file} more)"
+            blocks.append(f"# {path}\n{body}")
+    return "\n\n".join(blocks)
+
+
+_RE_ATTR = _re.compile(r"'(\w+)' object has no attribute '([A-Za-z_]\w*)'")  # AttributeError
+_RE_NAME = _re.compile(r"name '([A-Za-z_]\w*)' is not defined")              # NameError
+_RE_IMPORT = _re.compile(r"cannot import name '([A-Za-z_]\w*)'")             # ImportError
+# builtin object types: `'NoneType' object has no attribute 'x'` is a WRONG-VALUE bug
+# (the patch returned the wrong type), NOT an invented symbol → must still route a fix.
+_BUILTIN_TYPES = {"NoneType", "str", "bytes", "bytearray", "int", "float", "bool",
+                  "complex", "list", "tuple", "dict", "set", "frozenset", "range"}
+
+
+def _is_repro_frame(path: str) -> bool:
+    b = os.path.basename((path or "").strip())
+    return (b.startswith("repro.") or b.startswith("sv_repro.")
+            or (path or "").strip() in ("<repro>", "<string>"))
+
+
+def hallucinated_symbol(output: str, known_text: str) -> "str | None":
+    """If a repro FAILED because IT referenced a symbol/attribute the author INVENTED —
+    the failure is raised IN THE REPRO (last traceback frame is the repro file), matches
+    a hallucination pattern, and that name appears NOWHERE in the issue text or the
+    signature digest — return the name. The caller then treats the run as INCONCLUSIVE
+    and delivers the coder's patch as-is, rather than routing a fix that could mutate a
+    possibly-correct patch to satisfy a hallucinated contract (ckpt-277 review, finding 3
+    — blind authoring raises the shape-guessing rate; this caps the 'converged-on-
+    hallucination ships worse' hole). A genuine failure raised in PROJECT code (last frame
+    is a repo file) or a wrong-VALUE error (`'NoneType' object has no attribute …`) is
+    NOT suppressed — it routes a fix as before."""
+    out = output or ""
+    known = known_text or ""
+    frames = _re.findall(r'File "([^"]+)"', out)
+    if frames and not _is_repro_frame(frames[-1]):
+        return None   # failure originates in project code → a genuine bug, route it
+
+    def _grounded(nm: str) -> bool:
+        return bool(_re.search(rf"\b{_re.escape(nm)}\b", known))
+
+    for m in _RE_ATTR.finditer(out):
+        objtype, attr = m.group(1), m.group(2)
+        if objtype in _BUILTIN_TYPES or attr.startswith("__"):
+            continue                      # wrong-value bug / dunder → not an invented symbol
+        if not _grounded(attr):
+            return attr
+    for pat in (_RE_NAME, _RE_IMPORT):
+        for m in pat.finditer(out):
+            nm = m.group(1)
+            if not nm.startswith("__") and not _grounded(nm):
+                return nm
+    return None
+
+
 class RunResult:
     __slots__ = ("status", "exit_code", "output", "backend", "missing_module")
 
@@ -368,12 +558,14 @@ def _strip_fence(text: str) -> str:
     return t
 
 
-async def author_repro(task: str, diff: str, changed_files_text: str,
+async def author_repro(task: str, signatures: str,
                        model: str = "nvidia/gpt-oss-120b",
                        *, language: str = "python", max_chars: int = 9000) -> "str | None":
-    """Ask a model to write a runnable repro from the ISSUE, in `language`. Returns the
-    script, or None when the model says NO_REPRO / the call fails (caller treats None as
-    'cannot verify' → deliver as-is, never a false bug)."""
+    """Ask a model to write a runnable repro from the ISSUE, in `language`. It is given
+    the ISSUE + a SIGNATURE DIGEST (callable API, no bodies) — NOT the patch/diff, so it
+    cannot be primed to arrange invented internal state (ckpt-277). Returns the script,
+    or None when the model says NO_REPRO / the call fails (caller treats None as 'cannot
+    verify' → deliver as-is, never a false bug)."""
     from clients.nvidia import call_nvidia
     from core.prompts_v8 import SELFVERIFY_REPRO_PROMPT
 
@@ -390,17 +582,14 @@ async def author_repro(task: str, diff: str, changed_files_text: str,
                   + SELFVERIFY_REPRO_PROMPT)
 
     _t = (task or "").strip()
-    _d = (diff or "").strip()
-    _cf = (changed_files_text or "").strip()
+    _s = (signatures or "").strip()
     if len(_t) > max_chars:
         _t = _t[: max_chars // 2] + "\n…\n" + _t[-max_chars // 2:]
-    if len(_d) > max_chars:
-        _d = _d[: max_chars] + "\n…[diff truncated]…"
-    if len(_cf) > max_chars:
-        _cf = _cf[: max_chars] + "\n…[files truncated]…"
+    if len(_s) > max_chars:
+        _s = _s[: max_chars] + "\n…[signatures truncated]…"
     user = (f"=== ISSUE ===\n{_t}\n\n"
-            f"=== DIFF JUST APPLIED ===\n{_d or '(no diff)'}\n\n"
-            f"=== CHANGED FILES ===\n{_cf or '(none)'}\n")
+            f"=== CHANGED SYMBOLS — signatures only (the callable API; you are NOT shown "
+            f"the implementation) ===\n{_s or '(none extracted — rely on the issue)'}\n")
     try:
         raw = await call_nvidia(model, prompt=user, system=system,
                                 temperature=0.2, max_tokens=4096)
