@@ -205,9 +205,42 @@ class Sandbox:
                 warn(f"  ⚠ sandbox.apply: refusing out-of-repo path {rel_path!r} — skipped")
                 return None
 
+        def _recover_if_empty(rel_path, content):
+            """A real-life bug (R2): a non-converged self-verify revert / in-memory
+            tracking glitch left modified_files[f]='' while the REAL edited content
+            lived only on the sandbox disk — applying '' wiped a working file. Two
+            safeguards: (a) if in-memory is empty but the sandbox's own edited file is
+            non-empty, the genuine edit is on disk → use it; (b) NEVER overwrite an
+            existing non-empty file with empty/whitespace content (return None = skip)."""
+            if (content or "").strip():
+                return content
+            # (a) recover the real content from the sandbox's edited copy
+            try:
+                sb_file = self.sandbox_dir / rel_path
+                if sb_file.is_file():
+                    disk = sb_file.read_text(encoding="utf-8")
+                    if disk.strip():
+                        warn(f"  ⚠ sandbox.apply: in-memory {rel_path} was EMPTY — "
+                             f"recovered {len(disk)}B from the sandbox copy")
+                        return disk
+            except Exception:
+                pass
+            # (b) backstop: refuse to destroy an existing non-empty file with empty
+            try:
+                if dest.exists() and dest.read_text(encoding="utf-8").strip():
+                    warn(f"  ⚠ sandbox.apply: REFUSING to overwrite non-empty {rel_path} "
+                         f"with EMPTY content — kept the existing file")
+                    return None
+            except Exception:
+                pass
+            return content
+
         for rel_path, content in self.modified_files.items():
             dest = _contained(rel_path)
             if dest is None:
+                continue
+            content = _recover_if_empty(rel_path, content)
+            if content is None:
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
