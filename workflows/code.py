@@ -13755,9 +13755,24 @@ async def code_agent(state: AgentState) -> AgentState:
         detailed_map = maps["detailed"]
         purpose_map = maps.get("purpose", "")
 
-        # Empty project: clear maps so AIs don't try to look up nothing
-        is_new_project = (not detailed_map or detailed_map == "(empty project)")
-        if is_new_project:
+        # is_new_project = GREENFIELD, and ONLY when the project has NO existing source files.
+        # BUG (found in real-life iteration R3/R6): a small existing project can produce an EMPTY
+        # code-map, and keying is_new_project off the empty map mis-routed "modify the existing
+        # tasks.py" to the GREENFIELD planner (PLAN_COT_NEW) → it planned a FROM-SCRATCH rebuild with
+        # invented formats/field-names → the coder re-emitted whole functions → adjacent-behaviour
+        # REGRESSIONS (priority shown as (0)/[high], search crashed). Decide by ACTUAL file presence;
+        # clear an empty/placeholder map SEPARATELY (so AIs don't look up a map that isn't there).
+        import glob as _glob_ck
+        _SKIP_DIRS = ("/.git/", "/node_modules/", "/__pycache__/", "/.jarvis/", "/.jarvis_sandbox/",
+                      "/.venv/", "/venv/", "/dist/", "/build/", "/.pytest_cache/", "/jarvis_thinking_logs/")
+        _has_src = any(
+            not any(s in p for s in _SKIP_DIRS)
+            for ext in ("*.py", "*.js", "*.ts", "*.tsx", "*.jsx", "*.go", "*.rb", "*.rs",
+                        "*.java", "*.c", "*.cc", "*.cpp", "*.h", "*.hpp", "*.html", "*.css")
+            for p in _glob_ck.glob(os.path.join(project_root, "**", ext), recursive=True)
+        )
+        is_new_project = not _has_src
+        if not detailed_map or detailed_map == "(empty project)":
             detailed_map = ""
             general_map = ""
             purpose_map = ""
