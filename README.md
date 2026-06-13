@@ -1,318 +1,103 @@
-# JARVIS v0.5.1 — Multi-Brain AI Agent
+# JARVIS — a multi-brain coding agent built on free/cheap models
 
-### Opus-level performance. $0/month.
+JARVIS coordinates a handful of **free and very cheap** LLMs — NVIDIA NIM, OpenRouter, DeepInfra, Groq, Gemini — to approximate frontier-model coding quality for **about 2¢ a task**, just slower. The bet behind it: instead of one weak model thinking alone, have several models plan independently, critique each other, merge the best plan, implement it, and then *verify the result by running it* — and push as much of the hard, error-prone bookkeeping as possible into a **deterministic harness** so the weak model only ever has to make a small, local decision.
 
-JARVIS coordinates 10+ free AI models to deliver results comparable to Claude Opus 4.6 or GPT-5 — just slower. Instead of one frontier model thinking alone, JARVIS has multiple models plan independently, debate each other's ideas, find flaws, and merge the best approaches. The result is frontier-quality output at zero cost.
-
-**100% free.** Every model JARVIS uses is available on free API tiers. No paid subscriptions, no credits, no usage fees. You get your API keys for free and JARVIS handles the rest.
-
-> **Beta** — JARVIS is functional and usable, but the context management and the coding agent prompts are not fully optimized yet. Even so, the multi-brain approach already produces results that compete with the best paid models. Contributions and feedback welcome.
-
-### Why JARVIS?
-
-| | Claude Opus 4.6 | GPT-5 | JARVIS |
-|---|---|---|---|
-| **Cost** | $15/$75 per 1M tokens | $10/$30 per 1M tokens | **$0** |
-| **Subscription** | $20-200/month | $20-200/month | **Free forever** |
-| **Coding quality** | Excellent | Excellent | **Comparable** (multi-brain debate) |
-| **Speed** | ~30 sec | ~20 sec | ~2-5 min (tradeoff for free) |
-| **How** | 1 frontier model | 1 frontier model | 10+ free models collaborating |
+The most developed part — and the part worth using — is the **coding agent ("Deep Code")**: a four-stage pipeline (UNDERSTAND → PLAN → IMPLEMENT → REVIEW) aimed at solving real GitHub issues on real repositories. It's good enough that, on a hard task, it produces a working patch a frontier model would be happy with — on models that individually are nowhere near that level.
 
 ---
 
-## Installation
+## ⚠️ Honest status — what to actually use
 
-### Requirements
+This is a research project, not a finished product. Be selective:
 
-- Python 3.10+
-- An internet connection
-- Free API keys (see below)
+- ✅ **Use the coding agent (Deep Code).** This is where almost all the engineering went. It plans, edits real files, runs its own checks, and ships a patch. It's the real deal.
+- ⚠️ **Everything else works but is far from optimal** — general chat, web search, image gen, formatting, the conversational flow. They run, but they haven't had the attention the coder has.
+- 🚫 **Don't rely on the auto-router.** The classifier that decides "is this chat / a question / a coding task" is the weakest link and will sometimes route a coding task to the wrong place. Skip it: go straight to Deep Code.
 
-### Linux / macOS
+**The recommended way to use JARVIS:**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/jarvis.git
-cd jarvis
-python3 -m venv venv
-source venv/bin/activate
-pip install aiohttp
+python ui_main.py      # opens the web UI
 ```
 
-### Windows
+Then in the UI: paste your **free API keys** in Settings → API Keys, set your **project path** in Settings → Project, and run your coding task in **Deep Code** mode. That's the path that's been tuned and tested.
 
-```bash
-git clone https://github.com/YOUR_USERNAME/jarvis.git
-cd jarvis
-python -m venv venv
-venv\Scripts\activate
-pip install aiohttp
-```
-
-### Getting API Keys (all free, no credit card needed)
-
-You need at least the NVIDIA key. The others unlock more models and faster responses.
-
-| Provider | Get your key at | What it unlocks |
-|----------|----------------|-----------------|
-| **NVIDIA** (required) | [build.nvidia.com](https://build.nvidia.com) | DeepSeek V3.2, Qwen 3.5, GLM-5, Nemotron Super, MiniMax M2.5, SD3 image gen |
-| **Groq** | [console.groq.com](https://console.groq.com) | Kimi K2, Llama 4 Scout, GPT-OSS 120B (fast inference) |
-| **Gemini** | [aistudio.google.com](https://aistudio.google.com) | Flash Lite (formatting), 2.5 Pro, 3.1 Pro |
-| **OpenRouter** (optional) | [openrouter.ai](https://openrouter.ai) | Additional free models, future use |
-
-### Optional: LSP Server (smarter code search)
-
-JARVIS can use Language Server Protocol for semantic code search — finding dependencies, types, and indirect references that text search misses. Without LSP, JARVIS falls back to ripgrep (still works, just less precise).
-
-```bash
-# Python projects
-pip install python-lsp-server
-
-# JavaScript/TypeScript projects
-npm install -g typescript-language-server typescript
-```
-
-JARVIS auto-detects your project language and starts the right server. No configuration needed.
+API keys are read from env vars (or the UI settings): `OPENROUTER_API_KEY(S)`, `NVIDIA_API_KEY`, `DEEPINFRA_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY(S)`. You need OpenRouter + NVIDIA at minimum; the rest add redundancy.
 
 ---
 
-## Usage
+## How it works
 
-### Web UI (recommended)
+A single free/weak model is decent but not frontier-level, and — more importantly — it's *unreliable*: it loses track of indentation, edits the wrong line, forgets which file it's in, reinvents a format. JARVIS's whole design is two ideas stacked together.
 
-```bash
-# Linux/macOS
-source venv/bin/activate
-python ui_main.py
-
-# Windows
-venv\Scripts\activate
-python ui_main.py
-```
-
-Open `http://localhost:3000` in your browser.
-
-**First time setup:** Click the gear icon (⚙) in the sidebar to open Settings, go to API Keys, paste your keys, and click Save.
-
-**Set a project** for the coding agent: Settings → Project → paste your project path → Set Project.
-
-### Terminal CLI
-
-```bash
-python main.py
-```
-
-Type your message and press Enter. Use `/help` for available commands.
-
----
-
-## How It Works
-
-### The Multi-Brain Advantage
-
-A single free model (like DeepSeek or Llama) is good but not frontier-level. JARVIS gets around this by making multiple free models collaborate: they each think independently, then critique each other's work, then the best ideas are merged. This debate-and-merge process produces output quality that matches models costing $15-20/million tokens — for free. The tradeoff is speed: where Opus gives you one answer in 30 seconds, JARVIS might take 2-5 minutes because it's running 4-8 models in parallel behind the scenes.
-
-### Automatic Routing
-
-You just type your message. JARVIS analyzes it and routes to the right workflow:
-
-- **Simple questions** → fast single-model answer (Groq, ~1 second)
-- **Complex questions** → multi-model ensemble with debate and synthesis
-- **Coding tasks** → full coding pipeline (see below)
-- **Research** → parallel web search + multi-source synthesis
-- **Image generation** → prompt expansion + Stable Diffusion 3
-- **Deep reasoning** → iterative thinking loop (100+ cycles)
-
-### Mode Overrides
-
-Prefix your message with a mode to force a specific workflow:
-
-| Prefix | What it does |
-|--------|-------------|
-| `!!simple` | Force fast single-model response |
-| `!!medium` | Force intelligent multi-model response |
-| `!!hard` | Force full ensemble with debate |
-| `!!deepcode` | Force deep coding mode (3-layer plan debate + parallel coders + review) |
-| `!!deep` | Deep iterative thinking (for hard math/science) |
-| `!!compute` | Code-execution research loop |
-| `!!image` | Image generation |
-
-The Web UI also has a mode dropdown in the input area.
-
----
-
-## Coding Agent
-
-The coding agent is where JARVIS's multi-brain approach shines most. A single free model writing code makes mistakes. JARVIS has 4 models plan independently, 4 more critique and improve those plans, one merge the best ideas, then the coder implements while a separate reviewer catches bugs. This pipeline produces code changes comparable to what you'd get from Opus or Cursor — it just takes longer.
-
-### Standard Mode (auto-detected for code tasks)
-
-1. **UNDERSTAND** — 3 AIs search the codebase in parallel to find relevant files and functions
-2. **PLAN** — 4 AIs write independent implementation plans → GLM-5 merges the best ideas into one plan
-3. **IMPLEMENT** — GLM-5 codes each file in parallel
-4. **REVIEW** — GLM-5 reviews each file in parallel, finds flaws, writes fixes
-5. **DELIVER** — Shows you the diff, you approve or reject
-
-### Deep Code Mode (`!!deepcode`)
-
-Same as above but with racing and 3-layer planning:
-
-1. **Layer 1** — 4 AIs race to write plans. First 3 to finish win, the slowest is cancelled mid-flight.
-2. **Layer 2** — 4 Nemotron Super instances each read all 3 winning plans, find flaws and strengths, write their own improved plan (parallel)
-3. **Layer 3** — GLM-5 reads all 4 improved plans, finds remaining flaws, writes the final plan
-
-All research (code lookups, reference searches) is cached and shared across every AI in the pipeline — the coder doesn't re-run searches the planner already did.
-
-All edits are sandboxed — your original files are never touched until you approve.
-
-### Code Indexing (3 Maps)
-
-When you set a project, JARVIS indexes it into three maps:
-
-- **General Map** — high-level overview by feature/component (shown to every AI)
-- **Detailed Map** — function signatures, logic, variables, dependencies (queried on demand via `[DETAIL: section name]`)
-- **Purpose Map** — code categorized by what it does (e.g. "API calls", "UI colors", "error handling"). Queried via `[PURPOSE: category]`, returns actual code snippets with 10 lines of context
-
-Maps are cached and only regenerated when files change. Processed in ~100K token batches using Nemotron Super (128K context), so it works on large codebases.
-
-### Mid-Thought Tools (Cascade)
-
-Every AI in the pipeline can pause mid-thought to look things up. Tools are used in escalating order — start cheap, go deeper only if needed:
-
-1. `[REFS: name]` — find all definitions, imports, and usages (ripgrep, fast)
-2. `[LSP: name]` — semantic search: dependencies, types, indirect references (requires LSP server)
-3. `[DETAIL: section]` / `[PURPOSE: category]` — query code maps
-4. `[CODE: path/to/file]` / `[SEARCH: pattern]` — read raw source code (last resort)
-
-The AI writes all the tags it needs, then writes STOP. All lookups run in parallel, results come back, and the AI continues.
-
----
-
-## Other Features
-
-### Chat
-
-- **Fast mode** — single model, instant responses for simple questions
-- **Intelligent mode** — multiple models generate answers, best one is selected
-- **Very intelligent mode** — full ensemble: multiple models respond, then debate, then synthesize
-
-### Research
-
-- Parallel web searches across multiple queries
-- Multi-source synthesis with citations
-- Domain-aware prompting (science, math, history, etc.)
-
-### Image Generation
-
-- Prompt expansion: a separate AI turns your brief description into a detailed image prompt
-- Stable Diffusion 3 Medium via NVIDIA NIM
-- Supports modification of previous images ("make it darker", "add a sunset")
-
-### Deep Thinking
-
-- Iterative reasoning loop for hard math/science/logic problems
-- 100+ thinking cycles with self-evaluation
-- Optional code execution mode for computational verification
-- Optional Lean 4 formal proof mode
-
-### Web UI
-
-- Multi-conversation support (create, switch, delete, auto-title)
-- Thinking display — expandable accordion showing each API call with live streaming
-- Stop button — cancel any in-progress thinking
-- Settings page — API keys, project path, model info
-- Image rendering inline in chat
-
----
-
-## Project Structure
+### 1. Multi-brain: plan independently, debate, merge
 
 ```
-jarvis/
-├── main.py                  # CLI entry point + main pipeline
-├── ui_main.py               # Web UI launcher
-├── config.py                # Model configs, API mappings
-├── ui/
-│   ├── server.py            # WebSocket server (aiohttp)
-│   └── index.html           # Single-file web UI
-├── core/
-│   ├── decorticator.py      # Intent classifier / router
-│   ├── ensemble.py          # Multi-model debate + synthesis
-│   ├── tool_call.py         # Mid-thought tool use loop
-│   ├── memory.py            # Conversation memory
-│   ├── retry.py             # Retry + fallback logic
-│   └── ...                  # formatter, compressor, self-eval, etc.
-├── clients/
-│   ├── api.py               # Unified API router
-│   ├── nvidia.py            # NVIDIA NIM client (SSE streaming)
-│   ├── groq.py              # Groq client (SSE streaming)
-│   ├── gemini.py            # Gemini client
-│   └── openrouter.py        # OpenRouter client
-├── workflows/
-│   ├── chat.py              # Chat (fast/intelligent/ensemble)
-│   ├── code.py              # Coding agent (plan/implement/review)
-│   ├── research.py          # Research agent
-│   ├── image.py             # Image generation
-│   └── deep_thinking_v5.py  # Iterative deep reasoning
-└── tools/
-    ├── code_index.py         # 3-map code indexer
-    ├── codebase.py           # File scanning, search, refs
-    ├── lsp.py                # LSP client for semantic code search
-    ├── sandbox.py            # Sandboxed code editing
-    └── search.py             # Web search
+UNDERSTAND  →  PLAN  →  IMPLEMENT  →  REVIEW
+              (4 drafts          (one coder,    (run a repro,
+               → 1 merger)        function-      route a fix)
+                                  calling)
 ```
 
----
+- **PLAN** — four planners draft a plan *independently* and in parallel (Nemotron-3-Ultra, Owl-Alpha, Gemma-4, Nemotron-3-Super — deliberately diverse, open, non-frontier models). A merger (Owl-Alpha) then consolidates them into one plan, taking the most *correct and complete* approach rather than the longest. Disagreement between drafts is a feature: it surfaces the parts that are actually hard.
+- **IMPLEMENT** — the coder (**gpt-oss-120b**) executes one plan step at a time through **native function calling** — `read_file`, `edit_file`, `search_text`, `find_refs`, `run_code`, `finish`, etc. — not by dumping a blob of text.
+- **REVIEW (self-verify)** — after the patch, JARVIS *writes a small reproduction from the issue's own description, runs it*, and if it fails, routes a corrective fix back to the coder. It never reads the project's hidden test suite (that would be cheating); it tests what the issue actually says.
 
-## Models Used (all free — $0 total cost)
+### 2. The harness computes the global state; the model only acts locally
 
-Every model below is available on a free API tier. No credit card required for any of them.
+This is the idea that makes weak models reliable. Anything global, stateful, or easy to get wrong is handled deterministically by the harness, so the model is left with a single small move:
 
-| Model | Provider | Used for |
-|-------|----------|----------|
-| DeepSeek V3.2 | NVIDIA | Planning, understanding |
-| Qwen 3.5 | NVIDIA | Planning |
-| MiniMax M2.5 | NVIDIA | Planning |
-| Nemotron Super | NVIDIA | Code indexing, planning |
-| GLM-5 | NVIDIA | Plan merging, code writing, code review |
-| Kimi K2 | Groq | Fast chat, ensemble |
-| Llama 4 Scout | Groq | Fast chat, ensemble |
-| GPT-OSS 120B | Groq | Intelligent chat |
-| Flash Lite | Gemini | Output formatting |
-| SD3 Medium | NVIDIA | Image generation |
+- **Edits are number-first and content-verified.** The coder copies a line from the view (which carries both its line number *and* its content) and the harness applies the change by anchoring on both — so a stale line number self-corrects and a wrong anchor is rejected instead of silently corrupting the file.
+- **Indentation is computed, not guessed.** The file view encodes each line's indent as a number; the harness re-emits the real whitespace. The model never counts spaces.
+- **Edits run through safety gates** before they land: a parse check (reject + revert on a syntax error the edit introduced), an undefined-name / dangling-reference check (you can't delete a symbol that's still called), a duplicate-block guard, and an apply-time guard that **refuses to overwrite a working file with empty content** (recovering the real content from the sandbox if the in-memory copy was lost).
+- **The code map, symbol lookups, stale-read detection, and "which file am I in" are all the harness's job.** The model asks; the harness answers with ground truth.
+
+The slogan, from the project's own notes: *the harness computes the global, the model acts local.*
 
 ---
 
-## Beta Status
+## What's been built (the last few hundred commits)
 
-This is a **beta release**. The multi-brain architecture already produces results comparable to frontier paid models — but it's not perfect yet.
+Much of this repo's history is hard-won, offline-verified fixes to make weak models behave. The big themes:
 
-What works:
-
-- ✅ All chat modes (fast, intelligent, very intelligent)
-- ✅ Coding agent with multi-AI planning, parallel implementation, and review
-- ✅ Deep code mode with 3-layer debate — competitive with Opus/Cursor for complex changes
-- ✅ Racing in planning (first 3 of 4 AIs win, slowest cancelled)
-- ✅ Shared research cache across entire pipeline (plan → code → review)
-- ✅ LSP integration for semantic code search (auto-detects, falls back to ripgrep)
-- ✅ Code indexing with 3 maps (general, detailed, purpose)
-- ✅ Image generation
-- ✅ Web UI with multi-conversation, thinking display, stop button
-- ✅ Research with web search
-- ✅ Deep thinking mode
-- ✅ Windows path support (both / and \ work everywhere)
-
-What's not optimized (it works, but could be better):
-
-- ⚠️ Context management — the system sometimes includes too much or too little context
-- ⚠️ Coding agent prompts — the AIs occasionally explore unrelated code or miss parts of the task
-- ⚠️ Speed — the multi-brain approach is slower than a single frontier model (2-5 min vs 30 sec for complex tasks)
-- ⚠️ Shell agent — stub only, not implemented
-- ⚠️ Error handling — some edge cases aren't gracefully handled
-
-The goal: **frontier-level AI for everyone, for free.** We're not there 100% yet, but it's close enough to be useful today.
+- **A reflex library for the coder.** Instead of vague advice, the coder's prompt carries concrete, *triggered* reflexes — fire-this-the-moment-it-applies rules drawn from real observed failures: read from the source you gated on (don't gate on `web.data()` then read `web.input()`); "all / every / collect" means *accumulate*, don't overwrite; produce the exact type/literal a test expects; bytes stay bytes until you decode them; use the stdlib serializer for wire formats instead of hand-rolling; remove a symbol and fix every call site in one edit; a missing third-party import is the environment, not your bug. These are woven into a step-by-step "how to think" reasoning flow and grouped by category so the model can find the one it needs. (A repeatedly-validated lesson: for weak models, *concrete* reflexes beat elegant abstract principles — when we tried replacing them with general principles, the score dropped.)
+- **A self-verifying reviewer.** It authors a repro from the issue, runs it (local sandbox → host → the instance's real Docker image as needed), and routes a fix — under a strict *snapshot-and-revert invariant*: the review can only help or be neutral, **never ship a patch worse than the coder's original.** The repro author is shown the changed symbols' *signatures only* — not the implementation — so it can't be primed into rubber-stamping a buggy patch. Import-time crashes in the repro are treated as inconclusive rather than as bug signals.
+- **Correct plan routing.** The planner now correctly distinguishes a *greenfield* build from *modifying an existing project* by actual file presence (a small existing project used to be misread as "new" and get rebuilt from scratch, drifting conventions and regressing adjacent behavior).
+- **Robust provider routing.** gpt-oss-120b is pinned to DeepInfra's bf16 endpoint through OpenRouter's provider field; planners and reviewer run on free models with multi-provider fallback chains; API keys are round-robined, dead/over-quota keys are skipped automatically, and 402/429 responses are retried down the chain. The result is that a single provider hiccup doesn't sink a run.
+- **Empty-turn recovery.** Some providers occasionally return no structured tool call even when one is required, leaving the call as text; the harness salvages the inline call and retries, so the coder doesn't silently stall.
+- **A read-only, no-network sandbox** (bwrap) where all edits land and `run_code` executes, so nothing the agent does touches your real files until you approve.
 
 ---
 
-## License
+## Cost
 
-MIT
+A typical Deep Code run costs **roughly 2¢**. The expensive part — the coder — runs on **gpt-oss-120b via DeepInfra (cheap, paid)**, while the planners, merger, and reviewer run on **free** model tiers, with free models also configured as fallbacks. So you're paying cents for the one model that does the heavy editing, and nothing for the rest.
+
+(Earlier versions were fully $0 on free tiers; the current setup spends a little to get a much more reliable coder.)
+
+---
+
+## Benchmarks
+
+JARVIS is developed against **SWE-bench Pro** — real GitHub issues, graded by actually running the project's hidden tests in Docker (the ScaleAI harness + per-instance images). Pro is multi-language (Python, Go, TypeScript/JavaScript) and ships the issue's behavioral spec, which is a fair, hard target.
+
+We don't want to quote a cherry-picked number, so the honest statement is: on a hard hand-picked subset the agent reliably solves the genuinely-winnable instances and converges to working patches, with the residual failures being either oscillation on a couple of stochastic instances or contracts that aren't derivable from the issue text alone. **A full 75-instance run is in progress to measure the true SWE-bench score** — that number will go here when it lands.
+
+Separately, as a real-world sanity check we had JARVIS build and then *iteratively extend* a small application from scratch over many rounds (add features, fix bugs, refactor), running the app after each round. It built a working CLI app, debugged a regression from just a symptom report, and shipped features end-to-end — and that exercise surfaced (and led to fixes for) bugs that pure benchmark runs never would, because benchmarks only read the final patch and never iterate on a living repo.
+
+---
+
+## Layout
+
+- `main.py` — terminal CLI entry point
+- `ui_main.py` — web UI (recommended)
+- `workflows/code.py` — the coding pipeline (plan → implement → review)
+- `core/native_tools.py` — the coder's function-calling loop and tools
+- `core/self_verify.py` — the self-verifying reviewer
+- `core/prompts_v8.py` — the live prompts (planner / coder / reviewer)
+- `tools/` — code index, sandbox, codebase views
+- `clients/` — provider routing and fallback
+
+---
+
+JARVIS is an experiment in getting frontier-ish coding out of models that, alone, aren't close — by making them collaborate and by doing the hard bookkeeping for them. The coding agent is the part that delivers on that today; the rest is catching up.
