@@ -13772,6 +13772,9 @@ async def code_agent(state: AgentState) -> AgentState:
             for p in _glob_ck.glob(os.path.join(project_root, "**", ext), recursive=True)
         )
         is_new_project = not _has_src
+        _map_present = bool(detailed_map and detailed_map != "(empty project)")
+        status(f"Plan mode: {'NEW / greenfield (build from scratch)' if is_new_project else 'EXISTING (read + modify in place)'} "
+               f"— source files {'absent' if is_new_project else 'present'}, code-map {'present' if _map_present else 'EMPTY'}")
         if not detailed_map or detailed_map == "(empty project)":
             detailed_map = ""
             general_map = ""
