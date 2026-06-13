@@ -276,6 +276,40 @@ def _is_repro_frame(path: str) -> bool:
             or (path or "").strip() in ("<repro>", "<string>"))
 
 
+def import_time_failure(output: str) -> bool:
+    """True if the repro crashed while IMPORTING — a transitively-imported module's
+    LOAD-TIME code raised (e.g. a module-level `Environment()` construction) BEFORE the
+    repro's own test logic ran. That is an environment / import-chain failure of the
+    repro's setup, NOT a behaviour failure of the code under test → inconclusive
+    (deliver the coder's patch as-is), never a routed fix (ckpt-280 — c580: `from
+    qutebrowser.utils.urlutils import widened_hostnames` transitively loaded jinja.py
+    whose module-level `Environment()` crashed → a fix was wrongly routed and the coder
+    converged it into a worse, shipped mutation).
+
+    Detected by: the DEEPEST traceback frame inside the REPRO file is an `import` /
+    `from … import` statement (the repro never got past its imports) AND the error
+    surfaced in ANOTHER module (the deepest overall frame is not the repro). This keeps
+    a genuine `ImportError: cannot import name 'X'` — raised AT the repro's own import
+    line, so the repro IS the deepest frame — as a real FAIL (the coder didn't create
+    the symbol)."""
+    lines = (output or "").splitlines()
+    frames = []   # (path, source_line)
+    for i, ln in enumerate(lines):
+        m = _re.match(r'\s*File "([^"]+)", line \d+, in ', ln)
+        if m:
+            src = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            frames.append((m.group(1), src))
+    if not frames:
+        return False
+    repro_frames = [(p, s) for (p, s) in frames if _is_repro_frame(p)]
+    if not repro_frames:
+        return False
+    deepest_repro_src = repro_frames[-1][1]
+    is_import = deepest_repro_src.startswith("import ") or deepest_repro_src.startswith("from ")
+    error_in_other_module = not _is_repro_frame(frames[-1][0])
+    return is_import and error_in_other_module
+
+
 def hallucinated_symbol(output: str, known_text: str) -> "str | None":
     """If a repro FAILED because IT referenced a symbol/attribute the author INVENTED —
     the failure is raised IN THE REPRO (last traceback frame is the repro file), matches
@@ -425,6 +459,14 @@ def _classify(res: dict, sandbox_dir: str, backend: str, proto: dict = None) -> 
                or "--- FAIL:" in out)                            # go test-style
     if not _assert and proto.get("malformed") and any(s in out for s in proto["malformed"]):
         return RunResult(ERROR, exit_code=code, output=out, backend=backend)
+    # ckpt-280: the repro crashed while IMPORTING (a transitively-loaded module's
+    # module-level code raised before the test ran) — an env/import-chain failure of the
+    # repro's setup, NOT a behaviour failure. Inconclusive → deliver coder-original
+    # as-is, never route a fix (which a strong coder converges into a worse mutation —
+    # the c580 regression). A genuine assertion failure still wins (test logic DID run).
+    if not _assert and import_time_failure(out):
+        return RunResult(ENV_BLOCKED, exit_code=code, output=out,
+                         backend=backend, missing_module="<import-time>")
     # real failure: assertion, traceback, syntax, or a MISSING REPO module
     # (the coder failed to create the new symbol/file the addition needed).
     return RunResult(FAIL, exit_code=code, output=out, backend=backend,
